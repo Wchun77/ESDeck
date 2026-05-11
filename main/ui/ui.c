@@ -16,6 +16,15 @@
 
 #define ARRAY_SIZE(arr)  ((int)(sizeof(arr) / sizeof((arr)[0])))
 
+/* Forward declarations */
+static void ui_destroy_deck(void);
+static void ui_deck_build_widgets(void);
+static void ui_show_switching_screen(void);
+static void img_pool_load(const deck_cfg_t *cfg);
+
+/* Global config — populated by ui_preload_start() or config switch flow */
+static deck_cfg_t s_cfg;
+
 /* -----------------------------------------------------------------------
  * MSC mode screen
  * ----------------------------------------------------------------------- */
@@ -265,18 +274,59 @@ static void config_cancel_cb(lv_event_t *e)
     config_dialog_close();
 }
 
+/* Called from the switch preload task via lv_async_call — executes safely
+ * inside the LVGL task after image decoding is complete. */
+static void on_switch_preload_done(void *arg)
+{
+    ui_deck_build_widgets();
+    ESP_LOGI("UI", "Config switch complete - PSRAM free: %d B",
+             heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+/* Background task: decodes images for the new config, then schedules
+ * ui_deck_build_widgets() back on the LVGL task via lv_async_call. */
+static void switch_preload_task(void *arg)
+{
+    img_pool_load(&s_cfg);
+    lv_async_call(on_switch_preload_done, NULL);
+    vTaskDelete(NULL);
+}
+
 static void config_confirm_cb(lv_event_t *e)
 {
     if (s_selected_idx < 0 || s_selected_idx >= s_scan_res.count) return;
 
     const char *fname = s_scan_res.names[s_selected_idx];
-    if (ui_config_nvs_save(fname)) {
-        ESP_LOGI("CFG", "Saved config: %s, restarting...", fname);
-        config_dialog_close();
-        esp_restart();
-    } else {
+    if (!ui_config_nvs_save(fname)) {
         ESP_LOGE("CFG", "Failed to save config to NVS");
+        return;
     }
+
+    ESP_LOGI("CFG", "Switching config: %s", fname);
+
+    /* Close dialog before touching the deck so no dialog widget points
+     * into the about-to-be-destroyed deck objects. */
+    config_dialog_close();
+
+    /* Tear down old deck and free its PSRAM image buffers. */
+    ui_destroy_deck();
+
+    /* Load new config metadata (fast — JSON parse only, no image I/O). */
+    bool cfg_ok = ui_config_load(&s_cfg);
+    if (!cfg_ok || s_cfg.page_count == 0) {
+        s_cfg.page_count = 1;
+        s_cfg.pages      = calloc(1, sizeof(page_cfg_t));
+        snprintf(s_cfg.pages[0].name, UI_CONFIG_NAME_LEN, "Main");
+        s_cfg.pages[0].button_count = 0;
+        s_cfg.pages[0].buttons      = NULL;
+    }
+
+    /* Show switching screen so the user sees feedback during image decode. */
+    ui_show_switching_screen();
+
+    /* Decode images in a background task so LVGL stays responsive.
+     * on_switch_preload_done() will be called on the LVGL task when done. */
+    xTaskCreate(switch_preload_task, "sw_preload", 8192, NULL, 3, NULL);
 }
 
 static void config_item_cb(lv_event_t *e)
@@ -586,15 +636,10 @@ static void show_select_config_dialog(void)
 #define KB_ROWS      4
 #define KB_GAP       4
 
-static deck_cfg_t s_cfg;
-
-static lv_obj_t **s_pages        = NULL;
-static lv_obj_t **s_sidebar_btns = NULL;
-static int        s_cur_page     = 0;
-static int        s_page_count   = 0;
-
 static lv_obj_t *s_context_panel = NULL;
 static lv_obj_t *s_overlay       = NULL;
+static lv_obj_t *s_sidebar       = NULL;  /* static sidebar strip, kept for z-order restore */
+static lv_obj_t *s_sidebar_pages = NULL;  /* config-dependent page buttons inside s_sidebar */
 
 /* -----------------------------------------------------------------------
  * PSRAM image pre-decode pool
@@ -697,41 +742,53 @@ static lv_img_dsc_t *img_pool_decode(const char *path)
     return &e->dsc;
 }
 
-/* Background preload task: acquires LVGL lock once per image so the boot
- * animation can run in between. Self-deletes when finished. */
-static void preload_task_fn(void *arg)
-{
-    /* Allocate pool metadata (no LVGL lock needed) */
-    int cap = 0;
-    for (int p = 0; p < s_cfg.page_count; p++) {
-        if (s_cfg.pages[p].bg_image[0]) cap++;
-        cap += s_cfg.pages[p].button_count;
-    }
-    if (cap > 0) {
-        s_img_pool     = calloc((size_t)cap, sizeof(psram_img_t));
-        s_img_pool_cap = cap;
-    }
 
-    /* Decode backgrounds — no LVGL lock needed: decoder only does file I/O
-     * and CPU work, it does not touch the LVGL object/render state. */
-    for (int p = 0; p < s_cfg.page_count; p++) {
-        if (!s_cfg.pages[p].bg_image[0]) continue;
+/* Free all PSRAM pixel buffers and reset pool state. */
+static void img_pool_free(void)
+{
+    for (int i = 0; i < s_img_pool_n; i++) {
+        if (s_img_pool[i].valid && s_img_pool[i].dsc.data) {
+            heap_caps_free((void *)s_img_pool[i].dsc.data);
+            s_img_pool[i].dsc.data = NULL;
+        }
+    }
+    free(s_img_pool);
+    s_img_pool     = NULL;
+    s_img_pool_cap = 0;
+    s_img_pool_n   = 0;
+}
+
+/* Allocate pool metadata and decode all images referenced by cfg.
+ * Called both from the boot preload task and from the config switch flow. */
+static void img_pool_load(const deck_cfg_t *cfg)
+{
+    int cap = 0;
+    for (int p = 0; p < cfg->page_count; p++) {
+        if (cfg->pages[p].bg_image[0]) cap++;
+        cap += cfg->pages[p].button_count;
+    }
+    if (cap == 0) return;
+
+    s_img_pool     = calloc((size_t)cap, sizeof(psram_img_t));
+    s_img_pool_cap = cap;
+
+    for (int p = 0; p < cfg->page_count; p++) {
+        if (!cfg->pages[p].bg_image[0]) continue;
         char path[UI_CONFIG_BG_LEN + 12];
         snprintf(path, sizeof(path), "S:%s/%s",
-                 UI_CONFIG_BG_PATH, s_cfg.pages[p].bg_image);
+                 UI_CONFIG_BG_PATH, cfg->pages[p].bg_image);
         FILE *f = fopen(path + 2, "r");
         if (!f) { ESP_LOGW("IMG", "bg not found: %s", path); continue; }
         fclose(f);
         img_pool_decode(path);
     }
 
-    /* Decode button icons */
-    for (int p = 0; p < s_cfg.page_count; p++) {
-        for (int b = 0; b < s_cfg.pages[p].button_count; b++) {
-            if (!s_cfg.pages[p].buttons[b].icon[0]) continue;
+    for (int p = 0; p < cfg->page_count; p++) {
+        for (int b = 0; b < cfg->pages[p].button_count; b++) {
+            if (!cfg->pages[p].buttons[b].icon[0]) continue;
             char path[UI_CONFIG_ICON_LEN + 12];
             snprintf(path, sizeof(path), "S:%s/%s",
-                     UI_CONFIG_ICON_PATH, s_cfg.pages[p].buttons[b].icon);
+                     UI_CONFIG_ICON_PATH, cfg->pages[p].buttons[b].icon);
             FILE *f = fopen(path + 2, "r");
             if (!f) continue;
             fclose(f);
@@ -739,7 +796,17 @@ static void preload_task_fn(void *arg)
         }
     }
 
-    ESP_LOGI("IMG", "bg preload done – %d cached, PSRAM free: %d B",
+    ESP_LOGI("IMG", "pool loaded - %d cached, PSRAM free: %d B",
+             s_img_pool_n, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+/* Background preload task: acquires LVGL lock once per image so the boot
+ * animation can run in between. Self-deletes when finished. */
+static void preload_task_fn(void *arg)
+{
+    img_pool_load(&s_cfg);
+
+    ESP_LOGI("IMG", "preload done - %d cached, PSRAM free: %d B",
              s_img_pool_n, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     s_preload_done = true;
@@ -760,18 +827,6 @@ void ui_preload_start(void)
         snprintf(s_cfg.pages[0].name, UI_CONFIG_NAME_LEN, "Main");
     }
 
-    /* Allocate pool metadata now (synchronous) so create_page/create_buttons
-     * can safely call img_pool_find() even before the task finishes. */
-    int cap = 0;
-    for (int p = 0; p < s_cfg.page_count; p++) {
-        if (s_cfg.pages[p].bg_image[0]) cap++;
-        cap += s_cfg.pages[p].button_count;
-    }
-    if (cap > 0) {
-        s_img_pool     = calloc((size_t)cap, sizeof(psram_img_t));
-        s_img_pool_cap = cap;
-    }
-
     s_preload_caller = xTaskGetCurrentTaskHandle();
     xTaskCreate(preload_task_fn, "img_preload", 8192, NULL, 3, NULL);
 }
@@ -782,6 +837,20 @@ void ui_preload_wait(void)
     if (s_preload_started && !s_preload_done)
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 }
+
+/* -----------------------------------------------------------------------
+ * Deck state
+ * ----------------------------------------------------------------------- */
+
+/*
+ * s_deck_root: single parent for all config-dependent widgets.
+ * Deleting it tears down sidebar pages + content pages in one call.
+ */
+static lv_obj_t  *s_deck_root    = NULL;
+static lv_obj_t **s_pages        = NULL;
+static lv_obj_t **s_sidebar_btns = NULL;
+static int        s_cur_page     = 0;
+static int        s_page_count   = 0;
 
 static lv_obj_t *s_keyboard_screen = NULL;
 static lv_obj_t *s_kb_abc_cont     = NULL;
@@ -1522,40 +1591,75 @@ static void create_buttons(lv_obj_t *page, int page_idx, const page_cfg_t *page_
 }
 
 /* -----------------------------------------------------------------------
- * Main UI init
+ * Deck UI lifecycle
  * ----------------------------------------------------------------------- */
-void my_ui_init(void)
+
+/*
+ * ui_destroy_deck: tears down all config-dependent widgets, frees the
+ * img_pool PSRAM buffers, and releases config data.
+ * Safe to call even if deck was never built.
+ */
+static void ui_destroy_deck(void)
+{
+    /* Null out pointers before deleting to prevent stale access from
+     * in-flight event callbacks during the delete traversal. */
+    s_pages        = NULL;
+    s_sidebar_btns = NULL;
+    s_cur_page     = 0;
+    s_page_count   = 0;
+
+    /* Delete config-dependent sidebar page buttons. */
+    if (s_sidebar_pages) {
+        lv_obj_del(s_sidebar_pages);
+        s_sidebar_pages = NULL;
+    }
+
+    if (s_deck_root) {
+        lv_obj_del(s_deck_root);
+        s_deck_root = NULL;
+    }
+
+    /* Release PSRAM pixel buffers from the previous config. */
+    img_pool_free();
+
+    ui_config_free(&s_cfg);
+
+    ESP_LOGI("UI", "Deck destroyed - PSRAM free: %d B",
+             heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+static void ui_deck_build_widgets(void)
 {
     s_page_count = s_cfg.page_count;
+
+    s_deck_root = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(s_deck_root, SCREEN_W, SCREEN_H);
+    lv_obj_set_pos(s_deck_root, 0, 0);
+    lv_obj_set_style_bg_opa(s_deck_root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_deck_root, 0, 0);
+    lv_obj_set_style_pad_all(s_deck_root, 0, 0);
+    lv_obj_set_style_radius(s_deck_root, 0, 0);
+    lv_obj_clear_flag(s_deck_root, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_scrollbar_mode(s_deck_root, LV_SCROLLBAR_MODE_OFF);
 
     s_pages        = calloc((size_t)s_page_count, sizeof(lv_obj_t *));
     s_sidebar_btns = calloc((size_t)s_page_count, sizeof(lv_obj_t *));
 
-    lv_obj_t *scr = lv_scr_act();
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x111111), 0);
-
-    lv_obj_t *sidebar = lv_obj_create(scr);
-    lv_obj_set_size(sidebar, SIDEBAR_W, SCREEN_H);
-    lv_obj_set_pos(sidebar, 0, 0);
-    lv_obj_set_style_bg_color(sidebar, lv_color_hex(0x111111), 0);
-    lv_obj_set_style_border_width(sidebar, 0, 0);
-    lv_obj_set_style_radius(sidebar, 0, 0);
-    lv_obj_set_style_pad_all(sidebar, 0, 0);
-    lv_obj_clear_flag(sidebar, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *sidebar_pages = lv_obj_create(sidebar);
-    lv_obj_set_size(sidebar_pages, SIDEBAR_W, SCREEN_H - 80);
-    lv_obj_set_pos(sidebar_pages, 0, 0);
-    lv_obj_set_style_bg_opa(sidebar_pages, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(sidebar_pages, 0, 0);
-    lv_obj_set_style_pad_all(sidebar_pages, 8, 0);
-    lv_obj_set_style_pad_row(sidebar_pages, 6, 0);
-    lv_obj_set_layout(sidebar_pages, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(sidebar_pages, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_scrollbar_mode(sidebar_pages, LV_SCROLLBAR_MODE_OFF);
+    /* sidebar_pages is parented under s_sidebar (the static strip) so it
+     * renders inside the sidebar area without z-order conflicts. */
+    s_sidebar_pages = lv_obj_create(s_sidebar);
+    lv_obj_set_size(s_sidebar_pages, SIDEBAR_W, SCREEN_H - 80);
+    lv_obj_set_pos(s_sidebar_pages, 0, 0);
+    lv_obj_set_style_bg_opa(s_sidebar_pages, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_sidebar_pages, 0, 0);
+    lv_obj_set_style_pad_all(s_sidebar_pages, 8, 0);
+    lv_obj_set_style_pad_row(s_sidebar_pages, 6, 0);
+    lv_obj_set_layout(s_sidebar_pages, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(s_sidebar_pages, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scrollbar_mode(s_sidebar_pages, LV_SCROLLBAR_MODE_OFF);
 
     for (int i = 0; i < s_page_count; i++) {
-        lv_obj_t *btn = lv_btn_create(sidebar_pages);
+        lv_obj_t *btn = lv_btn_create(s_sidebar_pages);
         lv_obj_set_size(btn, 64, 56);
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x2a2a2a), 0);
         lv_obj_set_style_radius(btn, 8, 0);
@@ -1572,7 +1676,68 @@ void my_ui_init(void)
         lv_obj_center(lbl);
     }
 
-    lv_obj_t *sidebar_bottom = lv_obj_create(sidebar);
+    for (int i = 0; i < s_page_count; i++) {
+        lv_obj_t *btn_cont = NULL;
+        s_pages[i] = create_page(s_deck_root, &s_cfg.pages[i], &btn_cont);
+        create_buttons(btn_cont, i, &s_cfg.pages[i]);
+        if (i != 0) lv_obj_add_flag(s_pages[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    lv_obj_set_style_bg_color(s_sidebar_btns[0], lv_color_hex(0x3a3a3a), 0);
+
+    /* s_deck_root is freshly added to scr and sits on top of everything.
+     * Pull s_sidebar and s_context_panel back to the foreground. */
+    if (s_sidebar) {
+        lv_obj_move_foreground(s_sidebar);
+    }
+    if (s_context_panel) {
+        lv_obj_move_foreground(s_context_panel);
+    }
+}
+
+/* -----------------------------------------------------------------------
+ * Switching screen
+ * ----------------------------------------------------------------------- */
+
+/* Covers the entire screen with a dark overlay and a status message.
+ * Displayed while the background image decode task is running.
+ * The new s_deck_root built by ui_deck_build_widgets() will render on top
+ * of this overlay, so it does not need to be explicitly removed. */
+static void ui_show_switching_screen(void)
+{
+    lv_obj_t *cover = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(cover, SCREEN_W, SCREEN_H);
+    lv_obj_set_pos(cover, 0, 0);
+    lv_obj_set_style_bg_color(cover, lv_color_hex(0x111111), 0);
+    lv_obj_set_style_border_width(cover, 0, 0);
+    lv_obj_set_style_radius(cover, 0, 0);
+    lv_obj_clear_flag(cover, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *lbl = lv_label_create(cover);
+    lv_label_set_text(lbl, "Switching config...");
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+    lv_obj_center(lbl);
+}
+
+/* -----------------------------------------------------------------------
+ * Static UI (built once at startup, never destroyed)
+ * ----------------------------------------------------------------------- */
+static void ui_build_static(void)
+{
+    lv_obj_t *scr = lv_scr_act();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x111111), 0);
+
+    s_sidebar = lv_obj_create(scr);
+    lv_obj_set_size(s_sidebar, SIDEBAR_W, SCREEN_H);
+    lv_obj_set_pos(s_sidebar, 0, 0);
+    lv_obj_set_style_bg_color(s_sidebar, lv_color_hex(0x111111), 0);
+    lv_obj_set_style_border_width(s_sidebar, 0, 0);
+    lv_obj_set_style_radius(s_sidebar, 0, 0);
+    lv_obj_set_style_pad_all(s_sidebar, 0, 0);
+    lv_obj_clear_flag(s_sidebar, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *sidebar_bottom = lv_obj_create(s_sidebar);
     lv_obj_set_size(sidebar_bottom, SIDEBAR_W, 80);
     lv_obj_set_pos(sidebar_bottom, 0, SCREEN_H - 80);
     lv_obj_set_style_bg_opa(sidebar_bottom, LV_OPA_TRANSP, 0);
@@ -1590,15 +1755,6 @@ void my_ui_init(void)
     lv_label_set_text(settings_label, LV_SYMBOL_SETTINGS);
     lv_obj_set_style_text_font(settings_label, &lv_font_montserrat_24, 0);
     lv_obj_center(settings_label);
-
-    for (int i = 0; i < s_page_count; i++) {
-        lv_obj_t *btn_cont = NULL;
-        s_pages[i] = create_page(scr, &s_cfg.pages[i], &btn_cont);
-        create_buttons(btn_cont, i, &s_cfg.pages[i]);
-        if (i != 0) lv_obj_add_flag(s_pages[i], LV_OBJ_FLAG_HIDDEN);
-    }
-
-    lv_obj_set_style_bg_color(s_sidebar_btns[0], lv_color_hex(0x3a3a3a), 0);
 
     s_context_panel = lv_obj_create(scr);
     lv_obj_set_size(s_context_panel, 220, LV_SIZE_CONTENT);
@@ -1645,6 +1801,17 @@ void my_ui_init(void)
     lv_obj_set_pos(s_context_panel,
                    SIDEBAR_W + 8,
                    SCREEN_H - lv_obj_get_height(s_context_panel) - 8);
+}
+
+/* -----------------------------------------------------------------------
+ * Public entry points
+ * ----------------------------------------------------------------------- */
+void my_ui_init(void)
+{
+    /* s_cfg and s_img_pool were populated by ui_preload_start/wait.
+     * Just build the static shell and then the deck widgets. */
+    ui_build_static();
+    ui_deck_build_widgets();
 
     ESP_LOGI("MEM", "After UI init - PSRAM free: %d bytes", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     ESP_LOGI("MEM", "After UI init - Internal free: %d bytes", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
