@@ -192,9 +192,7 @@ static void show_confirm_dialog(void)
  * ----------------------------------------------------------------------- */
 #define CFG_ROWS_PER_PAGE  4
 
-static lv_style_prop_t          s_no_trans_props[] = {LV_STYLE_BG_COLOR, 0};
-static lv_style_transition_dsc_t s_row_no_trans;
-static char                      s_active_config_fname[UI_CONFIG_FNAME_LEN];
+static char s_active_config_fname[UI_CONFIG_FNAME_LEN];
 
 static lv_obj_t        *s_config_dim      = NULL;
 static lv_obj_t        *s_config_dialog   = NULL;
@@ -246,14 +244,14 @@ static void config_render_page(void)
             lv_label_set_text(s_config_row_lbls[i], s_scan_res.names[abs_idx]);
             lv_obj_clear_flag(s_config_rows[i], LV_OBJ_FLAG_HIDDEN);
             if (abs_idx == s_selected_idx) {
-                lv_obj_add_state(s_config_rows[i], LV_STATE_CHECKED);
+                lv_obj_set_style_bg_color(s_config_rows[i], lv_color_hex(0x0055cc), 0);
                 s_selected_row = s_config_rows[i];
             } else {
-                lv_obj_clear_state(s_config_rows[i], LV_STATE_CHECKED);
+                lv_obj_set_style_bg_color(s_config_rows[i], lv_color_hex(0x2a2a2a), 0);
             }
         } else {
             lv_obj_add_flag(s_config_rows[i], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_clear_state(s_config_rows[i], LV_STATE_CHECKED);
+            lv_obj_set_style_bg_color(s_config_rows[i], lv_color_hex(0x2a2a2a), 0);
         }
     }
 
@@ -344,12 +342,12 @@ static void config_item_cb(lv_event_t *e)
     lv_obj_t *row = lv_event_get_target(e);
 
     if (s_selected_row && s_selected_row != row) {
-        lv_obj_clear_state(s_selected_row, LV_STATE_CHECKED);
+        lv_obj_set_style_bg_color(s_selected_row, lv_color_hex(0x2a2a2a), 0);
     }
 
     s_selected_row = row;
     s_selected_idx = abs_idx;
-    lv_obj_add_state(row, LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x0055cc), 0);
 
     lv_obj_t *confirm_lbl = lv_obj_get_child(s_config_confirm, 0);
     bool is_same = (s_active_config_fname[0] != '\0' &&
@@ -384,9 +382,9 @@ static void config_prev_cb(lv_event_t *e)
         s_selected_idx = (target_abs < s_scan_res.count) ? target_abs : last_abs;
 
         int new_pos = s_selected_idx - base;
-        if (s_selected_row) lv_obj_clear_state(s_selected_row, LV_STATE_CHECKED);
+        if (s_selected_row) lv_obj_set_style_bg_color(s_selected_row, lv_color_hex(0x2a2a2a), 0);
         s_selected_row = s_config_rows[new_pos];
-        lv_obj_add_state(s_selected_row, LV_STATE_CHECKED);
+        lv_obj_set_style_bg_color(s_selected_row, lv_color_hex(0x0055cc), 0);
     }
 }
 
@@ -407,17 +405,14 @@ static void config_next_cb(lv_event_t *e)
         s_selected_idx = (target_abs < s_scan_res.count) ? target_abs : last_abs;
 
         int new_pos = s_selected_idx - base;
-        if (s_selected_row) lv_obj_clear_state(s_selected_row, LV_STATE_CHECKED);
+        if (s_selected_row) lv_obj_set_style_bg_color(s_selected_row, lv_color_hex(0x2a2a2a), 0);
         s_selected_row = s_config_rows[new_pos];
-        lv_obj_add_state(s_selected_row, LV_STATE_CHECKED);
+        lv_obj_set_style_bg_color(s_selected_row, lv_color_hex(0x0055cc), 0);
     }
 }
 
 static void show_select_config_dialog(void)
 {
-    lv_style_transition_dsc_init(&s_row_no_trans, s_no_trans_props,
-                                 lv_anim_path_linear, 0, 0, NULL);
-
     s_scan_res = ui_config_scan();
 
     if (s_scan_res.count == 0) {
@@ -497,11 +492,8 @@ static void show_select_config_dialog(void)
         lv_obj_set_height(row, 48);
         lv_obj_set_style_bg_color(row, lv_color_hex(0x2a2a2a), 0);
         lv_obj_set_style_bg_color(row, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
-        lv_obj_set_style_bg_color(row, lv_color_hex(0x0055cc), LV_STATE_CHECKED);
         lv_obj_set_style_radius(row, 6, 0);
         lv_obj_set_style_border_width(row, 0, 0);
-        lv_obj_set_style_transition(row, &s_row_no_trans, LV_STATE_DEFAULT);
-        lv_obj_set_style_transition(row, &s_row_no_trans, LV_STATE_CHECKED);
         lv_obj_add_event_cb(row, config_item_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
 
         lv_obj_t *lbl = lv_label_create(row);
