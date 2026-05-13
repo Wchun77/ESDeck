@@ -422,7 +422,7 @@ static void show_select_config_dialog(void)
     lv_obj_set_style_bg_opa(s_config_dim, LV_OPA_60, 0);
     lv_obj_set_style_border_width(s_config_dim, 0, 0);
     lv_obj_set_style_radius(s_config_dim, 0, 0);
-    lv_obj_clear_flag(s_config_dim, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_config_dim, LV_OBJ_FLAG_SCROLLABLE);
 
     int dlg_w = (SCREEN_W * 80) / 100;
     int dlg_h = (SCREEN_H * 80) / 100;
@@ -1474,35 +1474,38 @@ static lv_obj_t *create_page(lv_obj_t *parent, const page_cfg_t *page_cfg, lv_ob
                  UI_CONFIG_BG_PATH, page_cfg->bg_image);
 
         lv_img_dsc_t *cached = img_pool_find(bg_path);
-        const void   *src    = cached ? (const void *)cached : (const void *)bg_path;
-        bool          usable = (cached != NULL);
-        if (!usable) {
-            FILE *f = fopen(bg_path + 2, "r");
-            if (f) { fclose(f); usable = true; }
-        }
 
-        if (usable) {
+        if (cached) {
+            uint32_t zoom_x = (uint32_t)page_w * 256 / cached->header.w;
+            uint32_t zoom_y = (uint32_t)page_h * 256 / cached->header.h;
+            uint32_t zoom   = (zoom_x > zoom_y) ? zoom_x : zoom_y;
+
             lv_obj_t *bg = lv_img_create(page);
-            lv_img_set_src(bg, src);
-            lv_obj_set_pos(bg, 0, 0);
+            lv_img_set_src(bg, cached);
+
+            // pivot 設圖片中心
+            lv_img_set_pivot(bg, cached->header.w / 2, cached->header.h / 2);
+            // pos 設 page 中心
+            lv_obj_set_pos(bg, page_w / 2 - cached->header.w / 2,
+                            page_h / 2 - cached->header.h / 2);
             lv_obj_set_size(bg, page_w, page_h);
-            lv_img_set_zoom(bg, 256);
+            lv_img_set_zoom(bg, (uint16_t)zoom);
             lv_obj_add_flag(bg, LV_OBJ_FLAG_EVENT_BUBBLE);
             lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE);
-        } else {
-            ESP_LOGW("UI", "bg_image not found: %s", bg_path);
-        }
 
-        /* Semi-transparent black mask over background */
-        lv_obj_t *mask = lv_obj_create(page);
-        lv_obj_set_size(mask, page_w, page_h);
-        lv_obj_set_pos(mask, 0, 0);
-        lv_obj_set_style_bg_color(mask, lv_color_hex(0x000000), 0);
-        lv_obj_set_style_bg_opa(mask, LV_OPA_50, 0);
-        lv_obj_set_style_border_width(mask, 0, 0);
-        lv_obj_set_style_radius(mask, 0, 0);
-        lv_obj_add_flag(mask, LV_OBJ_FLAG_EVENT_BUBBLE);
-        lv_obj_clear_flag(mask, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+            /* Semi-transparent black mask over background */
+            lv_obj_t *mask = lv_obj_create(page);
+            lv_obj_set_size(mask, page_w, page_h);
+            lv_obj_set_pos(mask, 0, 0);
+            lv_obj_set_style_bg_color(mask, lv_color_hex(0x000000), 0);
+            lv_obj_set_style_bg_opa(mask, LV_OPA_50, 0);
+            lv_obj_set_style_border_width(mask, 0, 0);
+            lv_obj_set_style_radius(mask, 0, 0);
+            lv_obj_add_flag(mask, LV_OBJ_FLAG_EVENT_BUBBLE);
+            lv_obj_clear_flag(mask, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        } else {
+            ESP_LOGW("UI", "bg_image not in pool (skipped): %s", bg_path);
+        }
     }
 
     /* Button container — carries the flex layout */

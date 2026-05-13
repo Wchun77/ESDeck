@@ -14,6 +14,55 @@
  * Internal helpers
  * -------------------------------------------------------------------------- */
 
+#define STARTUP_TXT_PATH  "/flash/startup.txt"
+
+static bool apply_startup_txt(void)
+{
+    FILE *f = fopen(STARTUP_TXT_PATH, "r");
+    if (!f) {
+        return false;
+    }
+
+    char fname[UI_CONFIG_FNAME_LEN];
+    memset(fname, 0, sizeof(fname));
+
+    size_t n = fread(fname, 1, sizeof(fname) - 1, f);
+    fclose(f);
+
+    if (n == 0) {
+        ESP_LOGW(TAG, "startup.txt is empty, ignoring");
+        remove(STARTUP_TXT_PATH);
+        return false;
+    }
+
+    /* Strip trailing whitespace / CR / LF */
+    for (int i = (int)n - 1; i >= 0; i--) {
+        if (fname[i] == '\r' || fname[i] == '\n' || fname[i] == ' ') {
+            fname[i] = '\0';
+        } else {
+            break;
+        }
+    }
+
+    if (fname[0] == '\0') {
+        ESP_LOGW(TAG, "startup.txt content empty after trim, ignoring");
+        remove(STARTUP_TXT_PATH);
+        return false;
+    }
+
+    ESP_LOGI(TAG, "startup.txt -> NVS: [%s]", fname);
+
+    bool ok = nvs_manager_set_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY, fname);
+    if (ok) {
+        remove(STARTUP_TXT_PATH);
+        ESP_LOGI(TAG, "startup.txt applied and removed");
+    } else {
+        ESP_LOGE(TAG, "Failed to write NVS from startup.txt");
+    }
+
+    return ok;
+}
+
 static bool find_json(char *out_path, size_t out_size)
 {
     DIR *dir = opendir(UI_CONFIG_JSON_PATH);
@@ -98,6 +147,8 @@ bool ui_config_nvs_load(char *out, size_t out_size)
 bool ui_config_load(deck_cfg_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
+
+    apply_startup_txt();
 
     /* Step 1: find the JSON file */
     char json_path[UI_CONFIG_FNAME_LEN + 8];
