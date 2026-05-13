@@ -21,6 +21,7 @@ static void ui_destroy_deck(void);
 static void ui_deck_build_widgets(void);
 static void ui_show_switching_screen(void);
 static void img_pool_load(const deck_cfg_t *cfg);
+static void lazy_bg_remove_widgets(int page_idx);
 
 /* Global config — populated by ui_preload_start() or config switch flow */
 static deck_cfg_t s_cfg;
@@ -422,7 +423,7 @@ static void show_select_config_dialog(void)
     lv_obj_set_style_bg_opa(s_config_dim, LV_OPA_60, 0);
     lv_obj_set_style_border_width(s_config_dim, 0, 0);
     lv_obj_set_style_radius(s_config_dim, 0, 0);
-    lv_obj_clear_flag(s_config_dim, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(s_config_dim, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
     int dlg_w = (SCREEN_W * 80) / 100;
     int dlg_h = (SCREEN_H * 80) / 100;
@@ -641,6 +642,11 @@ static lv_obj_t *s_overlay       = NULL;
 static lv_obj_t *s_sidebar       = NULL;  /* static sidebar strip, kept for z-order restore */
 static lv_obj_t *s_sidebar_pages = NULL;  /* config-dependent page buttons inside s_sidebar */
 
+/* s_pages and s_page_count declared here so img_pool_decode (LRU eviction)
+ * can reference them before the deck state section. */
+static lv_obj_t **s_pages      = NULL;
+static int        s_page_count = 0;
+
 /* -----------------------------------------------------------------------
  * PSRAM image pre-decode pool
  * ----------------------------------------------------------------------- */
@@ -648,6 +654,8 @@ typedef struct {
     char         key[UI_CONFIG_BG_LEN + 16];
     lv_img_dsc_t dsc;
     bool         valid;
+    bool         is_bg;       /* true = background image, eligible for LRU eviction */
+    uint32_t     last_used;   /* xTaskGetTickCount() at last access */
 } psram_img_t;
 
 static psram_img_t *s_img_pool     = NULL;
@@ -660,9 +668,12 @@ static TaskHandle_t   s_preload_caller  = NULL;
 
 static lv_img_dsc_t *img_pool_find(const char *path)
 {
-    for (int i = 0; i < s_img_pool_n; i++)
-        if (s_img_pool[i].valid && strcmp(s_img_pool[i].key, path) == 0)
+    for (int i = 0; i < s_img_pool_n; i++) {
+        if (s_img_pool[i].valid && strcmp(s_img_pool[i].key, path) == 0) {
+            s_img_pool[i].last_used = xTaskGetTickCount();
             return &s_img_pool[i].dsc;
+        }
+    }
     return NULL;
 }
 
@@ -673,9 +684,17 @@ static lv_img_dsc_t *img_pool_decode(const char *path)
     lv_img_dsc_t *hit = img_pool_find(path);
     if (hit) return hit;
 
-    if (s_img_pool_n >= s_img_pool_cap) {
-        ESP_LOGW("IMG", "pool full, skipping %s", path);
-        return NULL;
+    /* Find a free slot: prefer invalid (evicted) slots before appending */
+    int free_slot = -1;
+    for (int i = 0; i < s_img_pool_n; i++) {
+        if (!s_img_pool[i].valid) { free_slot = i; break; }
+    }
+    if (free_slot < 0) {
+        if (s_img_pool_n >= s_img_pool_cap) {
+            ESP_LOGW("IMG", "pool full, skipping %s", path);
+            return NULL;
+        }
+        free_slot = s_img_pool_n;
     }
 
     lv_img_decoder_dsc_t dec;
@@ -700,6 +719,37 @@ static lv_img_dsc_t *img_pool_decode(const char *path)
     size_t sz = (size_t)w * h * px;
 
     uint8_t *buf = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        /* LRU eviction: find the least recently used bg entry and free it */
+        int lru_idx = -1;
+        uint32_t lru_tick = UINT32_MAX;
+        for (int i = 0; i < s_img_pool_n; i++) {
+            if (s_img_pool[i].valid && s_img_pool[i].is_bg &&
+                s_img_pool[i].last_used < lru_tick) {
+                lru_tick = s_img_pool[i].last_used;
+                lru_idx  = i;
+            }
+        }
+        if (lru_idx >= 0) {
+            ESP_LOGI("IMG", "LRU evict: %s", s_img_pool[lru_idx].key);
+            /* Find and clean up the LVGL widgets of the evicted page */
+            for (int p = 0; p < s_page_count; p++) {
+                if (!s_cfg.pages[p].bg_image[0] || !s_pages || !s_pages[p]) continue;
+                char chk[UI_CONFIG_BG_LEN + 12];
+                snprintf(chk, sizeof(chk), "S:%s/%s",
+                         UI_CONFIG_BG_PATH, s_cfg.pages[p].bg_image);
+                if (strcmp(chk, s_img_pool[lru_idx].key) == 0) {
+                    lazy_bg_remove_widgets(p);
+                    break;
+                }
+            }
+            /* Free PSRAM buffer; mark slot invalid for reuse (no compact) */
+            heap_caps_free((void *)s_img_pool[lru_idx].dsc.data);
+            s_img_pool[lru_idx].dsc.data = NULL;
+            s_img_pool[lru_idx].valid    = false;
+            buf = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        }
+    }
     if (!buf) {
         ESP_LOGE("IMG", "PSRAM OOM %u KB: %s", (unsigned)(sz / 1024), path);
         lv_img_decoder_close(&dec);
@@ -727,7 +777,8 @@ static lv_img_dsc_t *img_pool_decode(const char *path)
         return NULL;
     }
 
-    psram_img_t *e        = &s_img_pool[s_img_pool_n++];
+    if (free_slot == s_img_pool_n) s_img_pool_n++;
+    psram_img_t *e = &s_img_pool[free_slot];
     snprintf(e->key, sizeof(e->key), "%s", path);
     e->dsc.header.cf          = cf;
     e->dsc.header.always_zero = 0;
@@ -737,6 +788,8 @@ static lv_img_dsc_t *img_pool_decode(const char *path)
     e->dsc.data_size          = sz;
     e->dsc.data               = buf;
     e->valid                  = true;
+    e->is_bg                  = false;   /* caller sets true for bg images */
+    e->last_used              = xTaskGetTickCount();
 
     ESP_LOGI("IMG", "cached %s [%ux%u %u KB]", path, (unsigned)w, (unsigned)h, (unsigned)(sz / 1024));
     return &e->dsc;
@@ -771,17 +824,6 @@ static void img_pool_load(const deck_cfg_t *cfg)
 
     s_img_pool     = calloc((size_t)cap, sizeof(psram_img_t));
     s_img_pool_cap = cap;
-
-    for (int p = 0; p < cfg->page_count; p++) {
-        if (!cfg->pages[p].bg_image[0]) continue;
-        char path[UI_CONFIG_BG_LEN + 12];
-        snprintf(path, sizeof(path), "S:%s/%s",
-                 UI_CONFIG_BG_PATH, cfg->pages[p].bg_image);
-        FILE *f = fopen(path + 2, "r");
-        if (!f) { ESP_LOGW("IMG", "bg not found: %s", path); continue; }
-        fclose(f);
-        img_pool_decode(path);
-    }
 
     for (int p = 0; p < cfg->page_count; p++) {
         for (int b = 0; b < cfg->pages[p].button_count; b++) {
@@ -847,10 +889,8 @@ void ui_preload_wait(void)
  * Deleting it tears down sidebar pages + content pages in one call.
  */
 static lv_obj_t  *s_deck_root    = NULL;
-static lv_obj_t **s_pages        = NULL;
 static lv_obj_t **s_sidebar_btns = NULL;
 static int        s_cur_page     = 0;
-static int        s_page_count   = 0;
 
 static lv_obj_t *s_keyboard_screen = NULL;
 static lv_obj_t *s_kb_abc_cont     = NULL;
@@ -1432,6 +1472,98 @@ static void btn_event_cb(lv_event_t *e)
     usb_hid_send(page + 1, btn + 1);
 }
 
+static void lazy_bg_set(int page_idx)
+{
+    const page_cfg_t *page_cfg = &s_cfg.pages[page_idx];
+    lv_obj_t         *page     = s_pages[page_idx];
+
+    if (!page_cfg->bg_image[0]) return;
+
+    int page_w = SCREEN_W - SIDEBAR_W;
+    int page_h = SCREEN_H;
+
+    char bg_path[UI_CONFIG_BG_LEN + 12];
+    snprintf(bg_path, sizeof(bg_path), "S:%s/%s",
+             UI_CONFIG_BG_PATH, page_cfg->bg_image);
+
+    /* If bg widget already exists, just update last_used and return */
+    if (lv_obj_get_child_cnt(page) >= 1 &&
+        lv_obj_check_type(lv_obj_get_child(page, 0), &lv_img_class)) {
+        img_pool_find(bg_path);
+        return;
+    }
+
+    /* Hit: already in pool, just build widgets */
+    lv_img_dsc_t *cached = img_pool_find(bg_path);
+    if (!cached) {
+        /* Miss: decode (may trigger LRU eviction internally) */
+        cached = img_pool_decode(bg_path);
+        if (!cached) {
+            ESP_LOGW("UI", "lazy bg decode failed: %s", bg_path);
+            return;
+        }
+        /* Mark as bg so LRU eviction can target it */
+        for (int i = 0; i < s_img_pool_n; i++) {
+            if (s_img_pool[i].valid && strcmp(s_img_pool[i].key, bg_path) == 0) {
+                s_img_pool[i].is_bg = true;
+                break;
+            }
+        }
+    }
+
+    uint32_t zoom_x  = (uint32_t)page_w * 256 / cached->header.w;
+    uint32_t zoom_y  = (uint32_t)page_h * 256 / cached->header.h;
+    uint32_t zoom    = (zoom_x > zoom_y) ? zoom_x : zoom_y;
+    int32_t  scaled_w = (int32_t)cached->header.w * (int32_t)zoom / 256;
+    int32_t  scaled_h = (int32_t)cached->header.h * (int32_t)zoom / 256;
+    int32_t  off_x   = ((int32_t)page_w - scaled_w) / 2;
+    int32_t  off_y   = ((int32_t)page_h - scaled_h) / 2;
+
+    lv_obj_t *bg = lv_img_create(page);
+    lv_obj_move_to_index(bg, 0);
+    lv_img_set_src(bg, cached);
+    lv_img_set_pivot(bg, 0, 0);
+    lv_obj_set_pos(bg, off_x, off_y);
+    lv_obj_set_size(bg, page_w, page_h);
+    lv_img_set_zoom(bg, (uint16_t)zoom);
+    lv_obj_add_flag(bg, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *mask = lv_obj_create(page);
+    lv_obj_move_to_index(mask, 1);
+    lv_obj_set_size(mask, page_w, page_h);
+    lv_obj_set_pos(mask, 0, 0);
+    lv_obj_set_style_bg_color(mask, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(mask, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(mask, 0, 0);
+    lv_obj_set_style_radius(mask, 0, 0);
+    lv_obj_add_flag(mask, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_clear_flag(mask, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    ESP_LOGI("IMG", "lazy bg set page %d - PSRAM free: %d B",
+             page_idx, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+static void lazy_bg_remove_widgets(int page_idx)
+{
+    if (!s_pages || !s_pages[page_idx]) return;
+    if (!s_cfg.pages[page_idx].bg_image[0]) return;
+
+    lv_obj_t *page = s_pages[page_idx];
+    /* bg is index 0 (lv_img_class), mask is index 1 (solid lv_obj).
+     * btn_cont is transparent, so stop when we hit a transparent object. */
+    while (lv_obj_get_child_cnt(page) >= 1) {
+        lv_obj_t *c0 = lv_obj_get_child(page, 0);
+        if (lv_obj_check_type(c0, &lv_img_class)) {
+            lv_obj_del(c0);
+        } else if (lv_obj_get_style_bg_opa(c0, 0) != LV_OPA_TRANSP) {
+            lv_obj_del(c0);
+        } else {
+            break;
+        }
+    }
+}
+
 static void sidebar_btn_cb(lv_event_t *e)
 {
     int idx = (int)(uintptr_t)lv_event_get_user_data(e);
@@ -1439,6 +1571,7 @@ static void sidebar_btn_cb(lv_event_t *e)
     lv_obj_add_flag(s_pages[s_cur_page], LV_OBJ_FLAG_HIDDEN);
     s_cur_page = idx;
     lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page], lv_color_hex(0x3a3a3a), 0);
+    lazy_bg_set(s_cur_page);
     lv_obj_clear_flag(s_pages[s_cur_page], LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -1473,39 +1606,7 @@ static lv_obj_t *create_page(lv_obj_t *parent, const page_cfg_t *page_cfg, lv_ob
         snprintf(bg_path, sizeof(bg_path), "S:%s/%s",
                  UI_CONFIG_BG_PATH, page_cfg->bg_image);
 
-        lv_img_dsc_t *cached = img_pool_find(bg_path);
-
-        if (cached) {
-            uint32_t zoom_x = (uint32_t)page_w * 256 / cached->header.w;
-            uint32_t zoom_y = (uint32_t)page_h * 256 / cached->header.h;
-            uint32_t zoom   = (zoom_x > zoom_y) ? zoom_x : zoom_y;
-
-            lv_obj_t *bg = lv_img_create(page);
-            lv_img_set_src(bg, cached);
-
-            // pivot 設圖片中心
-            lv_img_set_pivot(bg, cached->header.w / 2, cached->header.h / 2);
-            // pos 設 page 中心
-            lv_obj_set_pos(bg, page_w / 2 - cached->header.w / 2,
-                            page_h / 2 - cached->header.h / 2);
-            lv_obj_set_size(bg, page_w, page_h);
-            lv_img_set_zoom(bg, (uint16_t)zoom);
-            lv_obj_add_flag(bg, LV_OBJ_FLAG_EVENT_BUBBLE);
-            lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE);
-
-            /* Semi-transparent black mask over background */
-            lv_obj_t *mask = lv_obj_create(page);
-            lv_obj_set_size(mask, page_w, page_h);
-            lv_obj_set_pos(mask, 0, 0);
-            lv_obj_set_style_bg_color(mask, lv_color_hex(0x000000), 0);
-            lv_obj_set_style_bg_opa(mask, LV_OPA_50, 0);
-            lv_obj_set_style_border_width(mask, 0, 0);
-            lv_obj_set_style_radius(mask, 0, 0);
-            lv_obj_add_flag(mask, LV_OBJ_FLAG_EVENT_BUBBLE);
-            lv_obj_clear_flag(mask, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-        } else {
-            ESP_LOGW("UI", "bg_image not in pool (skipped): %s", bg_path);
-        }
+        /* bg widget is built on first visit via lazy_bg_set() */
     }
 
     /* Button container — carries the flex layout */
@@ -1696,6 +1797,7 @@ static void ui_deck_build_widgets(void)
     if (s_context_panel) {
         lv_obj_move_foreground(s_context_panel);
     }
+    lazy_bg_set(s_cur_page);
 }
 
 /* -----------------------------------------------------------------------
