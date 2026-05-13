@@ -192,6 +192,10 @@ static void show_confirm_dialog(void)
  * ----------------------------------------------------------------------- */
 #define CFG_ROWS_PER_PAGE  4
 
+static lv_style_prop_t          s_no_trans_props[] = {LV_STYLE_BG_COLOR, 0};
+static lv_style_transition_dsc_t s_row_no_trans;
+static char                      s_active_config_fname[UI_CONFIG_FNAME_LEN];
+
 static lv_obj_t        *s_config_dim      = NULL;
 static lv_obj_t        *s_config_dialog   = NULL;
 static lv_obj_t        *s_config_confirm  = NULL;
@@ -347,11 +351,19 @@ static void config_item_cb(lv_event_t *e)
     s_selected_idx = abs_idx;
     lv_obj_add_state(row, LV_STATE_CHECKED);
 
-    lv_obj_clear_state(s_config_confirm, LV_STATE_DISABLED);
-    lv_obj_set_style_bg_color(s_config_confirm, lv_color_hex(0x3a3a3a), 0);
     lv_obj_t *confirm_lbl = lv_obj_get_child(s_config_confirm, 0);
-    if (confirm_lbl) {
-        lv_obj_set_style_text_color(confirm_lbl, lv_color_hex(0xcccccc), 0);
+    bool is_same = (s_active_config_fname[0] != '\0' &&
+                    strcmp(s_scan_res.names[abs_idx], s_active_config_fname) == 0);
+    if (is_same) {
+        lv_obj_add_state(s_config_confirm, LV_STATE_DISABLED);
+        lv_obj_set_style_bg_color(s_config_confirm, lv_color_hex(0x333333), 0);
+        if (confirm_lbl)
+            lv_obj_set_style_text_color(confirm_lbl, lv_color_hex(0x555555), 0);
+    } else {
+        lv_obj_clear_state(s_config_confirm, LV_STATE_DISABLED);
+        lv_obj_set_style_bg_color(s_config_confirm, lv_color_hex(0x3a3a3a), 0);
+        if (confirm_lbl)
+            lv_obj_set_style_text_color(confirm_lbl, lv_color_hex(0xcccccc), 0);
     }
 }
 
@@ -403,6 +415,9 @@ static void config_next_cb(lv_event_t *e)
 
 static void show_select_config_dialog(void)
 {
+    lv_style_transition_dsc_init(&s_row_no_trans, s_no_trans_props,
+                                 lv_anim_path_linear, 0, 0, NULL);
+
     s_scan_res = ui_config_scan();
 
     if (s_scan_res.count == 0) {
@@ -423,7 +438,7 @@ static void show_select_config_dialog(void)
     lv_obj_set_style_bg_opa(s_config_dim, LV_OPA_60, 0);
     lv_obj_set_style_border_width(s_config_dim, 0, 0);
     lv_obj_set_style_radius(s_config_dim, 0, 0);
-    lv_obj_clear_flag(s_config_dim, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_config_dim, LV_OBJ_FLAG_SCROLLABLE);
 
     int dlg_w = (SCREEN_W * 80) / 100;
     int dlg_h = (SCREEN_H * 80) / 100;
@@ -480,12 +495,13 @@ static void show_select_config_dialog(void)
         lv_obj_t *row = lv_btn_create(list_cont);
         lv_obj_set_width(row, LV_PCT(100));
         lv_obj_set_height(row, 48);
-        lv_obj_add_flag(row, LV_OBJ_FLAG_CHECKABLE);
         lv_obj_set_style_bg_color(row, lv_color_hex(0x2a2a2a), 0);
         lv_obj_set_style_bg_color(row, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
-        lv_obj_set_style_bg_color(row, lv_color_hex(0x3a3a3a), LV_STATE_CHECKED);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x0055cc), LV_STATE_CHECKED);
         lv_obj_set_style_radius(row, 6, 0);
         lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_transition(row, &s_row_no_trans, LV_STATE_DEFAULT);
+        lv_obj_set_style_transition(row, &s_row_no_trans, LV_STATE_CHECKED);
         lv_obj_add_event_cb(row, config_item_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
 
         lv_obj_t *lbl = lv_label_create(row);
@@ -570,14 +586,13 @@ static void show_select_config_dialog(void)
     lv_obj_center(lbl_confirm);
 
     /* Pre-select the currently active config if found in scan result */
-    char nvs_fname[UI_CONFIG_FNAME_LEN];
-    if (ui_config_nvs_load(nvs_fname, sizeof(nvs_fname))) {
-        for (int i = 0; i < s_scan_res.count; i++) {
-            if (strcmp(s_scan_res.names[i], nvs_fname) == 0) {
-                s_selected_idx = i;
-                s_cfg_page     = i / CFG_ROWS_PER_PAGE;
-                break;
-            }
+    s_active_config_fname[0] = '\0';
+    ui_config_nvs_load(s_active_config_fname, sizeof(s_active_config_fname));
+    for (int i = 0; i < s_scan_res.count; i++) {
+        if (strcmp(s_scan_res.names[i], s_active_config_fname) == 0) {
+            s_selected_idx = i;
+            s_cfg_page     = i / CFG_ROWS_PER_PAGE;
+            break;
         }
     }
 
@@ -1570,7 +1585,7 @@ static void sidebar_btn_cb(lv_event_t *e)
     lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page], lv_color_hex(0x2a2a2a), 0);
     lv_obj_add_flag(s_pages[s_cur_page], LV_OBJ_FLAG_HIDDEN);
     s_cur_page = idx;
-    lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page], lv_color_hex(0x3a3a3a), 0);
+    lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page], lv_color_hex(0x0055cc), 0);
     lazy_bg_set(s_cur_page);
     lv_obj_clear_flag(s_pages[s_cur_page], LV_OBJ_FLAG_HIDDEN);
 }
@@ -1787,7 +1802,7 @@ static void ui_deck_build_widgets(void)
         if (i != 0) lv_obj_add_flag(s_pages[i], LV_OBJ_FLAG_HIDDEN);
     }
 
-    lv_obj_set_style_bg_color(s_sidebar_btns[0], lv_color_hex(0x3a3a3a), 0);
+    lv_obj_set_style_bg_color(s_sidebar_btns[0], lv_color_hex(0x0055cc), 0);
 
     /* s_deck_root is freshly added to scr and sits on top of everything.
      * Pull s_sidebar and s_context_panel back to the foreground. */
