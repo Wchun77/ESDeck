@@ -48,16 +48,30 @@ static lv_obj_t  *s_sys_temp_lbl  = NULL;
 static lv_obj_t  *s_sys_gpu_bar   = NULL;
 static lv_obj_t  *s_sys_gpu_lbl   = NULL;
 
-/* Data queue — written from TinyUSB task, read from LVGL timer task.
- * Using a queue avoids calling lv_async_call from a non-LVGL task. */
-static QueueHandle_t  s_data_queue   = NULL;
-static monitor_data_t s_data         = { 0 };
-static bool           s_data_received = false;
-static int            s_data_timeout  = 0;
+/* -----------------------------------------------------------------------
+ * Queues — written from TinyUSB task, read from LVGL timer (safe).
+ * ----------------------------------------------------------------------- */
+typedef struct {
+    uint8_t hour, min, sec;
+    uint8_t month, day, wday;
+} monitor_time_t;
 
-/* Forward declaration — called from TinyUSB task via usb_hid */
+static QueueHandle_t  s_data_queue    = NULL;
+static QueueHandle_t  s_time_queue    = NULL;
+
+static monitor_data_t s_data          = { 0 };
+static monitor_time_t s_time          = { 0 };
+
+static bool s_data_received  = false;
+static int  s_data_timeout   = 0;
+static bool s_time_received  = false;
+static int  s_time_timeout   = 0;
+
+/* Forward declarations — called from TinyUSB task via usb_hid */
 static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
                                    uint8_t ram_usage, uint8_t gpu_usage);
+static void ui_monitor_on_hid_time(uint8_t hour, uint8_t min, uint8_t sec,
+                                   uint8_t month, uint8_t day, uint8_t wday);
 
 /* -----------------------------------------------------------------------
  * Sidebar page switching
@@ -128,13 +142,7 @@ static void update_clock(void)
 {
     if (!s_clock_time_lbl) return;
 
-    time_t    now;
-    struct tm t;
-    time(&now);
-    localtime_r(&now, &t);
-
-    /* Year < 2024 means RTC has not been synced yet */
-    if (t.tm_year + 1900 < 2024) {
+    if (!s_time_received) {
         lv_label_set_text(s_clock_time_lbl, "--:--");
         lv_label_set_text(s_clock_sec_lbl,  "--");
         lv_label_set_text(s_clock_date_lbl, "--/--  ---");
@@ -149,10 +157,11 @@ static void update_clock(void)
     char ss[4];
     char date[24];
 
-    snprintf(hhmm, sizeof(hhmm), "%02d:%02d", t.tm_hour, t.tm_min);
-    snprintf(ss,   sizeof(ss),   "%02d",       t.tm_sec);
+    snprintf(hhmm, sizeof(hhmm), "%02d:%02d", s_time.hour, s_time.min);
+    snprintf(ss,   sizeof(ss),   "%02d",       s_time.sec);
     snprintf(date, sizeof(date), "%02d/%02d  %s",
-             t.tm_mon + 1, t.tm_mday, days[t.tm_wday]);
+             s_time.month, s_time.day,
+             s_time.wday < 7 ? days[s_time.wday] : "---");
 
     lv_label_set_text(s_clock_time_lbl, hhmm);
     lv_label_set_text(s_clock_sec_lbl,  ss);
@@ -277,16 +286,32 @@ static void update_system(void)
  * ----------------------------------------------------------------------- */
 static void monitor_timer_cb(lv_timer_t *t)
 {
-    update_clock();
+    /* Drain time queue */
+    monitor_time_t time_d;
+    bool got_time = false;
+    while (s_time_queue && xQueueReceive(s_time_queue, &time_d, 0) == pdTRUE)
+        got_time = true;
 
-    /* Drain the queue — take only the latest sample if multiple arrived */
-    monitor_data_t d;
+    if (got_time) {
+        s_time          = time_d;
+        s_time_received = true;
+        s_time_timeout  = 0;
+    } else if (s_time_received) {
+        s_time_timeout++;
+        if (s_time_timeout >= 3) {
+            s_time_received = false;
+            s_time_timeout  = 0;
+        }
+    }
+
+    /* Drain data queue */
+    monitor_data_t data_d;
     bool got_data = false;
-    while (s_data_queue && xQueueReceive(s_data_queue, &d, 0) == pdTRUE)
+    while (s_data_queue && xQueueReceive(s_data_queue, &data_d, 0) == pdTRUE)
         got_data = true;
 
     if (got_data) {
-        s_data          = d;
+        s_data          = data_d;
         s_data_received = true;
         s_data_timeout  = 0;
     } else if (s_data_received) {
@@ -297,6 +322,7 @@ static void monitor_timer_cb(lv_timer_t *t)
         }
     }
 
+    update_clock();
     update_system();
 }
 
@@ -305,8 +331,9 @@ static void monitor_timer_cb(lv_timer_t *t)
  * ----------------------------------------------------------------------- */
 void ui_monitor_enter(lv_obj_t *sidebar)
 {
-    /* Create data queue before starting the timer or registering HID callback */
+    /* Create data queues before starting timer or registering HID callbacks */
     s_data_queue = xQueueCreate(1, sizeof(monitor_data_t));
+    s_time_queue = xQueueCreate(1, sizeof(monitor_time_t));
 
     lv_obj_t *scr = lv_scr_act();
 
@@ -366,8 +393,9 @@ void ui_monitor_enter(lv_obj_t *sidebar)
 
     s_cur_page = MON_PAGE_CLOCK;
 
-    /* Register HID callback and notify PC to start sending data */
+    /* Register HID callbacks and notify PC to start sending data */
     usb_hid_set_monitor_cb(ui_monitor_on_hid_data);
+    usb_hid_set_time_cb(ui_monitor_on_hid_time);
     usb_hid_monitor_subscribe();
 
     ESP_LOGI(TAG, "entered monitor mode");
@@ -375,15 +403,14 @@ void ui_monitor_enter(lv_obj_t *sidebar)
 
 void ui_monitor_exit(void)
 {
-    /* Notify PC to stop sending data and unregister callback first */
+    /* Notify PC to stop sending data and unregister callbacks first */
     usb_hid_monitor_unsubscribe();
     usb_hid_set_monitor_cb(NULL);
+    usb_hid_set_time_cb(NULL);
 
-    /* Delete queue before stopping timer so no stale data can arrive */
-    if (s_data_queue) {
-        vQueueDelete(s_data_queue);
-        s_data_queue = NULL;
-    }
+    /* Delete queues before stopping timer */
+    if (s_data_queue) { vQueueDelete(s_data_queue); s_data_queue = NULL; }
+    if (s_time_queue) { vQueueDelete(s_time_queue); s_time_queue = NULL; }
 
     if (s_clock_timer) {
         lv_timer_del(s_clock_timer);
@@ -419,6 +446,8 @@ void ui_monitor_exit(void)
     s_cur_page      = MON_PAGE_CLOCK;
     s_data_received = false;
     s_data_timeout  = 0;
+    s_time_received = false;
+    s_time_timeout  = 0;
 
     ESP_LOGI(TAG, "exited monitor mode");
 }
@@ -430,8 +459,8 @@ void ui_monitor_push_data(const monitor_data_t *data)
 }
 
 /* -----------------------------------------------------------------------
- * HID OUT report callback — called from TinyUSB task context.
- * Writes into the queue only; no LVGL calls allowed here.
+ * HID callbacks — called from TinyUSB task context.
+ * Only queue operations allowed here; no LVGL calls.
  * ----------------------------------------------------------------------- */
 static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
                                    uint8_t ram_usage, uint8_t gpu_usage)
@@ -443,4 +472,19 @@ static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
         .gpu_usage = (float)gpu_usage,
     };
     ui_monitor_push_data(&d);
+}
+
+static void ui_monitor_on_hid_time(uint8_t hour, uint8_t min, uint8_t sec,
+                                   uint8_t month, uint8_t day, uint8_t wday)
+{
+    if (!s_time_queue) return;
+    monitor_time_t t = {
+        .hour  = hour,
+        .min   = min,
+        .sec   = sec,
+        .month = month,
+        .day   = day,
+        .wday  = wday,
+    };
+    xQueueOverwrite(s_time_queue, &t);
 }

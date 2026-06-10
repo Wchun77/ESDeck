@@ -39,6 +39,11 @@ void usb_hid_monitor_reply_mode(bool in_monitor);
 void usb_hid_set_monitor_cb(void (*cb)(uint8_t cpu_usage, uint8_t cpu_temp,
                                        uint8_t ram_usage, uint8_t gpu_usage));
 
+/* Register callback invoked when PC sends CMD_TIME.
+ * Pass NULL to unregister. Called from the TinyUSB task context. */
+void usb_hid_set_time_cb(void (*cb)(uint8_t hour, uint8_t min, uint8_t sec,
+                                    uint8_t month, uint8_t day, uint8_t wday));
+
 /* Register callback invoked when PC sends CMD_QUERY.
  * Must return true if currently in monitor mode. */
 void usb_hid_set_mode_query_cb(bool (*cb)(void));

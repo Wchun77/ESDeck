@@ -75,12 +75,22 @@ static const tusb_desc_device_t s_device_desc = {
 static void (*s_monitor_data_cb)(uint8_t cpu_usage, uint8_t cpu_temp,
                                  uint8_t ram_usage, uint8_t gpu_usage) = NULL;
 
+/* Called when PC sends CMD_TIME */
+static void (*s_time_cb)(uint8_t hour, uint8_t min, uint8_t sec,
+                         uint8_t month, uint8_t day, uint8_t wday) = NULL;
+
 /* Called when PC sends CMD_QUERY; returns true if currently in monitor mode */
 static bool (*s_mode_query_cb)(void) = NULL;
 
 void usb_hid_set_monitor_cb(void (*cb)(uint8_t, uint8_t, uint8_t, uint8_t))
 {
     s_monitor_data_cb = cb;
+}
+
+void usb_hid_set_time_cb(void (*cb)(uint8_t, uint8_t, uint8_t,
+                                    uint8_t, uint8_t, uint8_t))
+{
+    s_time_cb = cb;
 }
 
 void usb_hid_set_mode_query_cb(bool (*cb)(void))
@@ -191,21 +201,29 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
             s_monitor_data_cb(buffer[1], buffer[2], buffer[3], buffer[4]);
     }
     else if (cmd == HID_MON_CMD_TIME && bufsize >= 7) {
-        struct tm t = {
-            .tm_year  = (buffer[1] + 2000) - 1900,
-            .tm_mon   = buffer[2] - 1,
-            .tm_mday  = buffer[3],
-            .tm_hour  = buffer[4],
-            .tm_min   = buffer[5],
-            .tm_sec   = buffer[6],
-            .tm_isdst = -1,
-        };
-        time_t epoch = mktime(&t);
-        struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
-        settimeofday(&tv, NULL);
-        ESP_LOGI(TAG, "time synced: %04d-%02d-%02d %02d:%02d:%02d",
-                 buffer[1] + 2000, buffer[2], buffer[3],
-                 buffer[4], buffer[5], buffer[6]);
+        if (s_time_cb) {
+            struct tm t = {
+                .tm_year  = (buffer[1] + 2000) - 1900,
+                .tm_mon   = buffer[2] - 1,
+                .tm_mday  = buffer[3],
+                .tm_hour  = buffer[4],
+                .tm_min   = buffer[5],
+                .tm_sec   = buffer[6],
+                .tm_isdst = -1,
+            };
+            mktime(&t);
+
+            /* Add 1 second to compensate for the one-tick display lag */
+            uint8_t sec_adj  = buffer[6] + 1;
+            uint8_t min_adj  = buffer[5];
+            uint8_t hour_adj = buffer[4];
+            if (sec_adj  >= 60) { sec_adj  = 0; min_adj++;  }
+            if (min_adj  >= 60) { min_adj  = 0; hour_adj++; }
+            if (hour_adj >= 24) { hour_adj = 0; }
+
+            s_time_cb(hour_adj, min_adj, sec_adj,
+                    buffer[2], buffer[3], (uint8_t)t.tm_wday);
+        }
     }
     else if (cmd == HID_MON_CMD_QUERY) {
         bool in_monitor = s_mode_query_cb ? s_mode_query_cb() : false;
