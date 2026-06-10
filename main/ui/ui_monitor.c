@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include <time.h>
 #include <string.h>
 #include <math.h>
@@ -47,18 +48,12 @@ static lv_obj_t  *s_sys_temp_lbl  = NULL;
 static lv_obj_t  *s_sys_gpu_bar   = NULL;
 static lv_obj_t  *s_sys_gpu_lbl   = NULL;
 
-/* Latest data snapshot — written by ui_monitor_push_data,
- * read by the LVGL timer on the LVGL task.
- * Negative sentinel means no data received yet -> display "-". */
-static monitor_data_t s_data = {
-    .cpu_usage = -1.0f,
-    .cpu_temp  = -1.0f,
-    .ram_usage = -1.0f,
-    .gpu_usage = -1.0f,
-};
-static volatile bool s_data_dirty    = false;
-static volatile bool s_data_received = false;
-static int           s_data_timeout  = 0;
+/* Data queue — written from TinyUSB task, read from LVGL timer task.
+ * Using a queue avoids calling lv_async_call from a non-LVGL task. */
+static QueueHandle_t  s_data_queue   = NULL;
+static monitor_data_t s_data         = { 0 };
+static bool           s_data_received = false;
+static int            s_data_timeout  = 0;
 
 /* Forward declaration — called from TinyUSB task via usb_hid */
 static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
@@ -278,36 +273,31 @@ static void update_system(void)
 }
 
 /* -----------------------------------------------------------------------
- * Master 1-second timer — updates clock every tick, system when dirty
+ * Master 1-second timer — runs on LVGL task, safe to touch widgets
  * ----------------------------------------------------------------------- */
 static void monitor_timer_cb(lv_timer_t *t)
 {
     update_clock();
 
-    if (s_data_received && !s_data_dirty) {
-        /* No new data this tick — increment timeout counter */
+    /* Drain the queue — take only the latest sample if multiple arrived */
+    monitor_data_t d;
+    bool got_data = false;
+    while (s_data_queue && xQueueReceive(s_data_queue, &d, 0) == pdTRUE)
+        got_data = true;
+
+    if (got_data) {
+        s_data          = d;
+        s_data_received = true;
+        s_data_timeout  = 0;
+    } else if (s_data_received) {
         s_data_timeout++;
         if (s_data_timeout >= 3) {
             s_data_received = false;
             s_data_timeout  = 0;
         }
     }
-    s_data_dirty = false;
 
     update_system();
-}
-
-/* -----------------------------------------------------------------------
- * lv_async_call target: apply pushed data on the LVGL task
- * ----------------------------------------------------------------------- */
-static void apply_data_async(void *arg)
-{
-    monitor_data_t *d = (monitor_data_t *)arg;
-    s_data          = *d;
-    s_data_dirty    = true;
-    s_data_received = true;
-    s_data_timeout  = 0;
-    free(d);
 }
 
 /* -----------------------------------------------------------------------
@@ -315,6 +305,9 @@ static void apply_data_async(void *arg)
  * ----------------------------------------------------------------------- */
 void ui_monitor_enter(lv_obj_t *sidebar)
 {
+    /* Create data queue before starting the timer or registering HID callback */
+    s_data_queue = xQueueCreate(1, sizeof(monitor_data_t));
+
     lv_obj_t *scr = lv_scr_act();
 
     /* Sidebar pages for monitor */
@@ -369,11 +362,11 @@ void ui_monitor_enter(lv_obj_t *sidebar)
 
     /* Start 1-second update timer */
     s_clock_timer = lv_timer_create(monitor_timer_cb, 1000, NULL);
-    lv_timer_ready(s_clock_timer);  /* fire immediately for first paint */
+    lv_timer_ready(s_clock_timer);
 
     s_cur_page = MON_PAGE_CLOCK;
 
-    /* Register HID OUT callback and notify PC to start sending data */
+    /* Register HID callback and notify PC to start sending data */
     usb_hid_set_monitor_cb(ui_monitor_on_hid_data);
     usb_hid_monitor_subscribe();
 
@@ -382,9 +375,16 @@ void ui_monitor_enter(lv_obj_t *sidebar)
 
 void ui_monitor_exit(void)
 {
-    /* Notify PC to stop sending data and unregister callback */
+    /* Notify PC to stop sending data and unregister callback first */
     usb_hid_monitor_unsubscribe();
     usb_hid_set_monitor_cb(NULL);
+
+    /* Delete queue before stopping timer so no stale data can arrive */
+    if (s_data_queue) {
+        vQueueDelete(s_data_queue);
+        s_data_queue = NULL;
+    }
+
     if (s_clock_timer) {
         lv_timer_del(s_clock_timer);
         s_clock_timer = NULL;
@@ -425,15 +425,13 @@ void ui_monitor_exit(void)
 
 void ui_monitor_push_data(const monitor_data_t *data)
 {
-    monitor_data_t *copy = malloc(sizeof(monitor_data_t));
-    if (!copy) return;
-    *copy = *data;
-    lv_async_call(apply_data_async, copy);
+    if (!s_data_queue) return;
+    xQueueOverwrite(s_data_queue, data);
 }
 
 /* -----------------------------------------------------------------------
  * HID OUT report callback — called from TinyUSB task context.
- * Packages raw bytes into monitor_data_t and posts via lv_async_call.
+ * Writes into the queue only; no LVGL calls allowed here.
  * ----------------------------------------------------------------------- */
 static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
                                    uint8_t ram_usage, uint8_t gpu_usage)
