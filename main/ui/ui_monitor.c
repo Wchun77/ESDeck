@@ -1,11 +1,13 @@
 #include "ui_monitor.h"
 #include "ui.h"
+#include "usb/usb_hid.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <time.h>
 #include <string.h>
 #include <math.h>
+#include <stdlib.h>
 
 #define TAG  "MON"
 
@@ -46,14 +48,21 @@ static lv_obj_t  *s_sys_gpu_bar   = NULL;
 static lv_obj_t  *s_sys_gpu_lbl   = NULL;
 
 /* Latest data snapshot — written by ui_monitor_push_data,
- * read by the LVGL timer on the LVGL task. */
+ * read by the LVGL timer on the LVGL task.
+ * Negative sentinel means no data received yet -> display "-". */
 static monitor_data_t s_data = {
-    .cpu_usage = 42.0f,
-    .cpu_temp  = 68.0f,
-    .ram_usage = 61.0f,
-    .gpu_usage = 35.0f,
+    .cpu_usage = -1.0f,
+    .cpu_temp  = -1.0f,
+    .ram_usage = -1.0f,
+    .gpu_usage = -1.0f,
 };
-static volatile bool s_data_dirty = false;
+static volatile bool s_data_dirty    = false;
+static volatile bool s_data_received = false;
+static int           s_data_timeout  = 0;
+
+/* Forward declaration — called from TinyUSB task via usb_hid */
+static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
+                                   uint8_t ram_usage, uint8_t gpu_usage);
 
 /* -----------------------------------------------------------------------
  * Sidebar page switching
@@ -129,6 +138,14 @@ static void update_clock(void)
     time(&now);
     localtime_r(&now, &t);
 
+    /* Year < 2024 means RTC has not been synced yet */
+    if (t.tm_year + 1900 < 2024) {
+        lv_label_set_text(s_clock_time_lbl, "--:--");
+        lv_label_set_text(s_clock_sec_lbl,  "--");
+        lv_label_set_text(s_clock_date_lbl, "--/--  ---");
+        return;
+    }
+
     static const char *days[] = {
         "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
     };
@@ -192,6 +209,7 @@ static lv_obj_t *make_cell(lv_obj_t *parent, int col, int row,
     lv_obj_set_style_text_font(val_lbl, &lv_font_montserrat_36, 0);
     lv_obj_set_style_text_color(val_lbl, lv_color_hex(0xffffff), 0);
     lv_obj_align(val_lbl, LV_ALIGN_CENTER, 0, -10);
+    lv_label_set_text(val_lbl, "-");
 
     /* Progress bar */
     lv_obj_t *bar = lv_bar_create(cell);
@@ -229,13 +247,24 @@ static void update_system(void)
 
     char buf[16];
 
+    if (!s_data_received) {
+        lv_label_set_text(s_sys_cpu_lbl,  "-");
+        lv_label_set_text(s_sys_temp_lbl, "-");
+        lv_label_set_text(s_sys_ram_lbl,  "-");
+        lv_label_set_text(s_sys_gpu_lbl,  "-");
+        lv_bar_set_value(s_sys_cpu_bar,  0, LV_ANIM_OFF);
+        lv_bar_set_value(s_sys_temp_bar, 0, LV_ANIM_OFF);
+        lv_bar_set_value(s_sys_ram_bar,  0, LV_ANIM_OFF);
+        lv_bar_set_value(s_sys_gpu_bar,  0, LV_ANIM_OFF);
+        return;
+    }
+
     snprintf(buf, sizeof(buf), "%.1f%%", s_data.cpu_usage);
     lv_label_set_text(s_sys_cpu_lbl, buf);
     lv_bar_set_value(s_sys_cpu_bar, (int)s_data.cpu_usage, LV_ANIM_ON);
 
     snprintf(buf, sizeof(buf), "%.0f C", s_data.cpu_temp);
     lv_label_set_text(s_sys_temp_lbl, buf);
-    /* Temp bar: map 0-100C to 0-100 */
     lv_bar_set_value(s_sys_temp_bar,
                      (int)fminf(s_data.cpu_temp, 100.0f), LV_ANIM_ON);
 
@@ -255,10 +284,17 @@ static void monitor_timer_cb(lv_timer_t *t)
 {
     update_clock();
 
-    if (s_data_dirty) {
-        s_data_dirty = false;
-        update_system();
+    if (s_data_received && !s_data_dirty) {
+        /* No new data this tick — increment timeout counter */
+        s_data_timeout++;
+        if (s_data_timeout >= 3) {
+            s_data_received = false;
+            s_data_timeout  = 0;
+        }
     }
+    s_data_dirty = false;
+
+    update_system();
 }
 
 /* -----------------------------------------------------------------------
@@ -267,8 +303,10 @@ static void monitor_timer_cb(lv_timer_t *t)
 static void apply_data_async(void *arg)
 {
     monitor_data_t *d = (monitor_data_t *)arg;
-    s_data       = *d;
-    s_data_dirty = true;
+    s_data          = *d;
+    s_data_dirty    = true;
+    s_data_received = true;
+    s_data_timeout  = 0;
     free(d);
 }
 
@@ -335,11 +373,18 @@ void ui_monitor_enter(lv_obj_t *sidebar)
 
     s_cur_page = MON_PAGE_CLOCK;
 
+    /* Register HID OUT callback and notify PC to start sending data */
+    usb_hid_set_monitor_cb(ui_monitor_on_hid_data);
+    usb_hid_monitor_subscribe();
+
     ESP_LOGI(TAG, "entered monitor mode");
 }
 
 void ui_monitor_exit(void)
 {
+    /* Notify PC to stop sending data and unregister callback */
+    usb_hid_monitor_unsubscribe();
+    usb_hid_set_monitor_cb(NULL);
     if (s_clock_timer) {
         lv_timer_del(s_clock_timer);
         s_clock_timer = NULL;
@@ -371,7 +416,9 @@ void ui_monitor_exit(void)
     s_sys_gpu_bar    = NULL;
     s_sys_gpu_lbl    = NULL;
 
-    s_cur_page = MON_PAGE_CLOCK;
+    s_cur_page      = MON_PAGE_CLOCK;
+    s_data_received = false;
+    s_data_timeout  = 0;
 
     ESP_LOGI(TAG, "exited monitor mode");
 }
@@ -382,4 +429,20 @@ void ui_monitor_push_data(const monitor_data_t *data)
     if (!copy) return;
     *copy = *data;
     lv_async_call(apply_data_async, copy);
+}
+
+/* -----------------------------------------------------------------------
+ * HID OUT report callback — called from TinyUSB task context.
+ * Packages raw bytes into monitor_data_t and posts via lv_async_call.
+ * ----------------------------------------------------------------------- */
+static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
+                                   uint8_t ram_usage, uint8_t gpu_usage)
+{
+    monitor_data_t d = {
+        .cpu_usage = (float)cpu_usage,
+        .cpu_temp  = (float)cpu_temp,
+        .ram_usage = (float)ram_usage,
+        .gpu_usage = (float)gpu_usage,
+    };
+    ui_monitor_push_data(&d);
 }
