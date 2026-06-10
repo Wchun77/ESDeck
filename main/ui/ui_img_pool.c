@@ -192,30 +192,23 @@ void ui_img_pool_free(void)
 
 void ui_img_pool_load(const deck_cfg_t *cfg)
 {
-    int cap = 0;
+    /* Pool capacity: icons (decoded eagerly) + bg slots (lazy, LRU managed).
+     * Reserve one slot per page that has a bg image so LRU eviction has room
+     * to operate without permanently losing a slot to a freed entry. */
+    int icon_count = 0;
+    int bg_count   = 0;
     for (int p = 0; p < cfg->page_count; p++) {
-        if (cfg->pages[p].bg_image[0]) cap++;
-        cap += cfg->pages[p].button_count;
+        if (cfg->pages[p].bg_image[0]) bg_count++;
+        icon_count += cfg->pages[p].button_count;
     }
+
+    int cap = icon_count + bg_count;
     if (cap == 0) return;
 
     s_pool     = calloc((size_t)cap, sizeof(psram_img_t));
     s_pool_cap = cap;
 
-    /* Decode bg images first so they occupy predictable slots. */
-    for (int p = 0; p < cfg->page_count; p++) {
-        if (!cfg->pages[p].bg_image[0]) continue;
-        char path[UI_CONFIG_BG_LEN + 12];
-        snprintf(path, sizeof(path), "S:%s/%s",
-                 UI_CONFIG_BG_PATH, cfg->pages[p].bg_image);
-        FILE *f = fopen(path + 2, "r");
-        if (!f) continue;
-        fclose(f);
-        lv_img_dsc_t *dsc = ui_img_pool_decode(path);
-        if (dsc) ui_img_pool_mark_bg(path);
-    }
-
-    /* Then decode icons. */
+    /* Decode icons only — bg images are decoded lazily in ui_deck_lazy_bg_set. */
     for (int p = 0; p < cfg->page_count; p++) {
         for (int b = 0; b < cfg->pages[p].button_count; b++) {
             if (!cfg->pages[p].buttons[b].icon[0]) continue;
@@ -229,8 +222,8 @@ void ui_img_pool_load(const deck_cfg_t *cfg)
         }
     }
 
-    ESP_LOGI("IMG", "pool loaded - %d cached, PSRAM free: %d B",
-             s_pool_n, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    ESP_LOGI("IMG", "pool loaded - %d icons, %d bg slots, PSRAM free: %d B",
+             s_pool_n, bg_count, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }
 
 /* -----------------------------------------------------------------------
