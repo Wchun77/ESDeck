@@ -2,12 +2,21 @@
 #include "ui_img_pool.h"
 #include "ui_deck.h"
 #include "ui_settings.h"
+#include "usb/usb_hid.h"
 #include "lvgl.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 
 static lv_obj_t *s_sidebar       = NULL;
 static lv_obj_t *s_context_panel = NULL;
+
+/* -----------------------------------------------------------------------
+ * Mode query callback — called from TinyUSB task via usb_hid
+ * ----------------------------------------------------------------------- */
+static bool mode_query_cb(void)
+{
+    return ui_settings_get_mode() == UI_MODE_MONITOR;
+}
 
 /* -----------------------------------------------------------------------
  * Cross-module accessors
@@ -96,6 +105,8 @@ static void ui_build_static(void)
  * ----------------------------------------------------------------------- */
 void my_ui_init(void)
 {
+    usb_hid_set_mode_query_cb(mode_query_cb);
+
     ui_build_static();
 
     deck_cfg_t *cfg = ui_img_pool_take_preload_cfg();
