@@ -25,7 +25,7 @@ lv_obj_t *ui_get_context_panel(void)
 /* -----------------------------------------------------------------------
  * Switching screen
  * ----------------------------------------------------------------------- */
-void ui_show_switching_screen(void)
+void ui_show_switching_screen(const char *msg)
 {
     lv_obj_t *cover = lv_obj_create(lv_scr_act());
     lv_obj_set_size(cover, SCREEN_W, SCREEN_H);
@@ -36,7 +36,7 @@ void ui_show_switching_screen(void)
     lv_obj_clear_flag(cover, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *lbl = lv_label_create(cover);
-    lv_label_set_text(lbl, "Switching config...");
+    lv_label_set_text(lbl, msg);
     lv_obj_set_style_text_color(lbl, lv_color_hex(0x888888), 0);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
     lv_obj_center(lbl);

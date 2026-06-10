@@ -148,7 +148,7 @@ static void confirm_cb(lv_event_t *e)
         s_new_cfg.pages[0].buttons      = NULL;
     }
 
-    ui_show_switching_screen();
+    ui_show_switching_screen("Switching config...");
     xTaskCreate(switch_preload_task, "sw_preload", 8192, NULL, 3, NULL);
 }
 

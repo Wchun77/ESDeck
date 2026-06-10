@@ -202,6 +202,20 @@ void ui_img_pool_load(const deck_cfg_t *cfg)
     s_pool     = calloc((size_t)cap, sizeof(psram_img_t));
     s_pool_cap = cap;
 
+    /* Decode bg images first so they occupy predictable slots. */
+    for (int p = 0; p < cfg->page_count; p++) {
+        if (!cfg->pages[p].bg_image[0]) continue;
+        char path[UI_CONFIG_BG_LEN + 12];
+        snprintf(path, sizeof(path), "S:%s/%s",
+                 UI_CONFIG_BG_PATH, cfg->pages[p].bg_image);
+        FILE *f = fopen(path + 2, "r");
+        if (!f) continue;
+        fclose(f);
+        lv_img_dsc_t *dsc = ui_img_pool_decode(path);
+        if (dsc) ui_img_pool_mark_bg(path);
+    }
+
+    /* Then decode icons. */
     for (int p = 0; p < cfg->page_count; p++) {
         for (int b = 0; b < cfg->pages[p].button_count; b++) {
             if (!cfg->pages[p].buttons[b].icon[0]) continue;

@@ -11,7 +11,7 @@
 void my_ui_init(void);
 
 /* Show a full-screen "Switching config..." cover while image decode runs. */
-void ui_show_switching_screen(void);
+void ui_show_switching_screen(const char *msg);
 
 /* Accessors for shared static widgets.
  * Modules that need to parent into the sidebar or bring the context panel
