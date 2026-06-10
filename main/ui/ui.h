@@ -1,5 +1,20 @@
 #pragma once
 
-void ui_preload_start(void);  /* load config + start background preload task */
-void ui_preload_wait(void);   /* block until preload task finishes */
+#include "lvgl.h"
+
+/* Screen dimensions — shared across all UI modules. */
+#define SCREEN_W   800
+#define SCREEN_H   480
+#define SIDEBAR_W   80
+
+/* Entry point — called once after ui_preload_wait(). */
 void my_ui_init(void);
+
+/* Show a full-screen "Switching config..." cover while image decode runs. */
+void ui_show_switching_screen(void);
+
+/* Accessors for shared static widgets.
+ * Modules that need to parent into the sidebar or bring the context panel
+ * to the foreground use these instead of storing their own copies. */
+lv_obj_t *ui_get_sidebar(void);
+lv_obj_t *ui_get_context_panel(void);

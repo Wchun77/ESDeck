@@ -1,6 +1,7 @@
 #include "waveshare_rgb_lcd_port.h"
 #include "usb_hid.h"
 #include "ui.h"
+#include "ui_img_pool.h"
 #include "fs_manager/fs_flash.h"
 #include "fs_manager/fs_sd.h"
 #include "usb/usb_manager.h"
