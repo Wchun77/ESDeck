@@ -13,7 +13,7 @@
 
 #define UI_CONFIG_ICON_PATH    "/sdcard"
 #define UI_CONFIG_BG_PATH      "/sdcard"
-#define UI_CONFIG_JSON_PATH    "/flash"
+#define UI_CONFIG_DECK_PATH    "/flash/deck"
 #define UI_CONFIG_JSON_PREFIX  "esp_"
 
 #define UI_CONFIG_BG_LEN       64
@@ -25,7 +25,7 @@ typedef struct {
 
 typedef struct {
     char       name[UI_CONFIG_NAME_LEN];
-    char       bg_image[UI_CONFIG_BG_LEN];  /* JPEG filename, empty = no background */
+    char       bg_image[UI_CONFIG_BG_LEN];
     btn_cfg_t *buttons;
     uint8_t    button_count;
 } page_cfg_t;
@@ -36,8 +36,7 @@ typedef struct {
 } deck_cfg_t;
 
 /*
- * Load config from /flash/esp_XXXX.json.
- * Scans for the first file matching the prefix and parses it.
+ * Load deck config from NVS-specified file under UI_CONFIG_DECK_PATH.
  * Returns true on success. Call ui_config_free() when done.
  */
 bool ui_config_load(deck_cfg_t *cfg);
@@ -50,12 +49,13 @@ void ui_config_free(deck_cfg_t *cfg);
 #define UI_CONFIG_FNAME_LEN    64
 
 typedef struct {
-    char  **names;   /* array of heap-allocated filename strings */
+    char  **names;
     int     count;
 } json_scan_result_t;
 
 /*
- * Scan UI_CONFIG_JSON_PATH for all *.json files.
+ * Scan UI_CONFIG_DECK_PATH for all *.json files.
+ * Returns count = -1 if the directory does not exist.
  * Caller must free with ui_config_scan_free().
  */
 json_scan_result_t ui_config_scan(void);
@@ -65,16 +65,12 @@ json_scan_result_t ui_config_scan(void);
  */
 void ui_config_scan_free(json_scan_result_t *res);
 
-#define CFG_NVS_NAMESPACE  "esdeck"
-#define CFG_NVS_KEY        "cfg_file"
+#define CFG_NVS_NAMESPACE   "esdeck"
+#define CFG_NVS_KEY_DECK    "deck_cfg"
+#define CFG_NVS_KEY_MONITOR "mon_cfg"
 
 /*
- * Save selected config filename to NVS.
+ * Save / load selected deck config filename to NVS.
  */
 bool ui_config_nvs_save(const char *filename);
-
-/*
- * Load config filename from NVS.
- * Returns false if not set or on error.
- */
 bool ui_config_nvs_load(char *out, size_t out_size);

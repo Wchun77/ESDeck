@@ -4,24 +4,22 @@
 
 #include <string.h>
 #include <dirent.h>
+#include <sys/stat.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "cJSON.h"
 
 #define TAG  "[UI_CFG]"
 
+#define STARTUP_TXT_PATH  "/flash/deck/startup.txt"
+
 /* --------------------------------------------------------------------------
  * Internal helpers
  * -------------------------------------------------------------------------- */
-
-#define STARTUP_TXT_PATH  "/flash/startup.txt"
-
 static bool apply_startup_txt(void)
 {
     FILE *f = fopen(STARTUP_TXT_PATH, "r");
-    if (!f) {
-        return false;
-    }
+    if (!f) return false;
 
     char fname[UI_CONFIG_FNAME_LEN];
     memset(fname, 0, sizeof(fname));
@@ -35,13 +33,11 @@ static bool apply_startup_txt(void)
         return false;
     }
 
-    /* Strip trailing whitespace / CR / LF */
     for (int i = (int)n - 1; i >= 0; i--) {
-        if (fname[i] == '\r' || fname[i] == '\n' || fname[i] == ' ') {
+        if (fname[i] == '\r' || fname[i] == '\n' || fname[i] == ' ')
             fname[i] = '\0';
-        } else {
+        else
             break;
-        }
     }
 
     if (fname[0] == '\0') {
@@ -52,7 +48,7 @@ static bool apply_startup_txt(void)
 
     ESP_LOGI(TAG, "startup.txt -> NVS: [%s]", fname);
 
-    bool ok = nvs_manager_set_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY, fname);
+    bool ok = nvs_manager_set_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_DECK, fname);
     if (ok) {
         remove(STARTUP_TXT_PATH);
         ESP_LOGI(TAG, "startup.txt applied and removed");
@@ -61,38 +57,6 @@ static bool apply_startup_txt(void)
     }
 
     return ok;
-}
-
-static bool find_json(char *out_path, size_t out_size)
-{
-    DIR *dir = opendir(UI_CONFIG_JSON_PATH);
-    if (!dir) {
-        ESP_LOGE(TAG, "Cannot open %s", UI_CONFIG_JSON_PATH);
-        return false;
-    }
-
-    struct dirent *de;
-    bool found = false;
-
-    while ((de = readdir(dir)) != NULL) {
-        if (de->d_type != DT_REG) continue;
-        if (strncmp(de->d_name, UI_CONFIG_JSON_PREFIX,
-                    strlen(UI_CONFIG_JSON_PREFIX)) != 0) continue;
-
-        snprintf(out_path, out_size, "%s/%s", UI_CONFIG_JSON_PATH, de->d_name);
-        ESP_LOGI(TAG, "Found config: %s", out_path);
-        found = true;
-        break;
-    }
-
-    closedir(dir);
-
-    if (!found) {
-        ESP_LOGW(TAG, "No %s*.json found in %s",
-                 UI_CONFIG_JSON_PREFIX, UI_CONFIG_JSON_PATH);
-    }
-
-    return found;
 }
 
 static char *read_file(const char *path)
@@ -114,10 +78,7 @@ static char *read_file(const char *path)
     }
 
     char *buf = heap_caps_malloc((size_t)sz + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!buf) {
-        /* Fallback to internal RAM */
-        buf = malloc((size_t)sz + 1);
-    }
+    if (!buf) buf = malloc((size_t)sz + 1);
     if (!buf) {
         ESP_LOGE(TAG, "OOM reading %s (%ld bytes)", path, sz);
         fclose(f);
@@ -127,7 +88,6 @@ static char *read_file(const char *path)
     fread(buf, 1, (size_t)sz, f);
     buf[sz] = '\0';
     fclose(f);
-
     return buf;
 }
 
@@ -136,12 +96,12 @@ static char *read_file(const char *path)
  * -------------------------------------------------------------------------- */
 bool ui_config_nvs_save(const char *filename)
 {
-    return nvs_manager_set_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY, filename);
+    return nvs_manager_set_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_DECK, filename);
 }
 
 bool ui_config_nvs_load(char *out, size_t out_size)
 {
-    return nvs_manager_get_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY, out, out_size);
+    return nvs_manager_get_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_DECK, out, out_size);
 }
 
 bool ui_config_load(deck_cfg_t *cfg)
@@ -150,24 +110,21 @@ bool ui_config_load(deck_cfg_t *cfg)
 
     apply_startup_txt();
 
-    /* Step 1: find the JSON file */
-    char json_path[UI_CONFIG_FNAME_LEN + 8];
+    char json_path[UI_CONFIG_FNAME_LEN + 16];
     char nvs_fname[UI_CONFIG_FNAME_LEN];
 
     if (ui_config_nvs_load(nvs_fname, sizeof(nvs_fname))) {
         snprintf(json_path, sizeof(json_path), "%s/%s",
-                 UI_CONFIG_JSON_PATH, nvs_fname);
+                 UI_CONFIG_DECK_PATH, nvs_fname);
         ESP_LOGI(TAG, "Using NVS config: %s", json_path);
     } else {
         ESP_LOGW(TAG, "No NVS config, skipping load");
         return false;
     }
 
-    /* Step 2: read into buffer */
     char *buf = read_file(json_path);
     if (!buf) return false;
 
-    /* Step 3: parse */
     cJSON *root = cJSON_Parse(buf);
     free(buf);
 
@@ -203,16 +160,14 @@ bool ui_config_load(deck_cfg_t *cfg)
         page_cfg_t *page = &cfg->pages[pi];
 
         cJSON *name = cJSON_GetObjectItem(page_obj, "name");
-        if (cJSON_IsString(name) && name->valuestring) {
+        if (cJSON_IsString(name) && name->valuestring)
             snprintf(page->name, UI_CONFIG_NAME_LEN, "%s", name->valuestring);
-        } else {
+        else
             snprintf(page->name, UI_CONFIG_NAME_LEN, "P%d", pi + 1);
-        }
 
         cJSON *bg = cJSON_GetObjectItem(page_obj, "bg_image");
-        if (cJSON_IsString(bg) && bg->valuestring) {
+        if (cJSON_IsString(bg) && bg->valuestring)
             snprintf(page->bg_image, UI_CONFIG_BG_LEN, "%s", bg->valuestring);
-        }
 
         cJSON *btns_arr = cJSON_GetObjectItem(page_obj, "buttons");
         if (!cJSON_IsArray(btns_arr)) {
@@ -237,21 +192,18 @@ bool ui_config_load(deck_cfg_t *cfg)
             btn_cfg_t *btn = &page->buttons[bi];
 
             cJSON *label = cJSON_GetObjectItem(btn_obj, "label");
-            if (cJSON_IsString(label) && label->valuestring) {
+            if (cJSON_IsString(label) && label->valuestring)
                 snprintf(btn->label, UI_CONFIG_LABEL_LEN, "%s", label->valuestring);
-            } else {
+            else
                 snprintf(btn->label, UI_CONFIG_LABEL_LEN, "%d", bi + 1);
-            }
 
             cJSON *icon = cJSON_GetObjectItem(btn_obj, "icon");
-            if (cJSON_IsString(icon) && icon->valuestring) {
+            if (cJSON_IsString(icon) && icon->valuestring)
                 snprintf(btn->icon, UI_CONFIG_ICON_LEN, "%s", icon->valuestring);
-            }
         }
     }
 
     cJSON_Delete(root);
-
     ESP_LOGI(TAG, "Loaded %d page(s)", cfg->page_count);
     return true;
 }
@@ -259,7 +211,6 @@ bool ui_config_load(deck_cfg_t *cfg)
 void ui_config_free(deck_cfg_t *cfg)
 {
     if (!cfg) return;
-
     if (cfg->pages) {
         for (int i = 0; i < cfg->page_count; i++) {
             if (cfg->pages[i].buttons) {
@@ -270,7 +221,6 @@ void ui_config_free(deck_cfg_t *cfg)
         free(cfg->pages);
         cfg->pages = NULL;
     }
-
     cfg->page_count = 0;
 }
 
@@ -278,19 +228,20 @@ json_scan_result_t ui_config_scan(void)
 {
     json_scan_result_t res = { .names = NULL, .count = 0 };
 
-    DIR *dir = opendir(UI_CONFIG_JSON_PATH);
+    DIR *dir = opendir(UI_CONFIG_DECK_PATH);
     if (!dir) {
-        ESP_LOGE(TAG, "Cannot open %s", UI_CONFIG_JSON_PATH);
+        ESP_LOGE(TAG, "Deck config directory not found: %s", UI_CONFIG_DECK_PATH);
+        res.count = -1;
         return res;
     }
 
-    /* First pass: count matching files */
+    /* First pass: count .json files */
     int total = 0;
     struct dirent *de;
     while ((de = readdir(dir)) != NULL) {
         if (de->d_type != DT_REG) continue;
         size_t len = strlen(de->d_name);
-        if (len < 5) continue;  /* need at least "x.json" */
+        if (len < 5) continue;
         if (strcmp(de->d_name + len - 5, ".json") != 0) continue;
         total++;
     }
@@ -319,7 +270,6 @@ json_scan_result_t ui_config_scan(void)
         res.names[idx] = strndup(de->d_name, UI_CONFIG_FNAME_LEN - 1);
         if (!res.names[idx]) {
             ESP_LOGE(TAG, "OOM copying filename");
-            /* free what we have so far, return partial result */
             res.count = idx;
             closedir(dir);
             return res;
@@ -329,7 +279,7 @@ json_scan_result_t ui_config_scan(void)
 
     closedir(dir);
     res.count = idx;
-    ESP_LOGI(TAG, "Scan found %d JSON file(s)", res.count);
+    ESP_LOGI(TAG, "Scan found %d JSON file(s) in %s", res.count, UI_CONFIG_DECK_PATH);
     return res;
 }
 

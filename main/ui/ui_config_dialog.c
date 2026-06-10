@@ -220,12 +220,52 @@ static void next_cb(lv_event_t *e)
 /* -----------------------------------------------------------------------
  * Public
  * ----------------------------------------------------------------------- */
+static void warn_dismiss_cb(lv_event_t *e)
+{
+    lv_obj_del(lv_event_get_target(e));
+}
+
 void ui_config_dialog_show(void)
 {
     s_scan = ui_config_scan();
+
+    if (s_scan.count == -1) {
+        /* Directory does not exist */
+        ui_config_scan_free(&s_scan);
+        ESP_LOGE("CFG_DLG", "Deck config directory not found: %s", UI_CONFIG_DECK_PATH);
+
+        lv_obj_t *scr = lv_scr_act();
+        lv_obj_t *warn_root = lv_obj_create(scr);
+        lv_obj_set_size(warn_root, SCREEN_W, SCREEN_H);
+        lv_obj_set_pos(warn_root, 0, 0);
+        lv_obj_set_style_bg_color(warn_root, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_bg_opa(warn_root, LV_OPA_60, 0);
+        lv_obj_set_style_border_width(warn_root, 0, 0);
+        lv_obj_set_style_radius(warn_root, 0, 0);
+        lv_obj_clear_flag(warn_root, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(warn_root, warn_dismiss_cb, LV_EVENT_CLICKED, NULL);
+
+        lv_obj_t *box = lv_obj_create(warn_root);
+        lv_obj_set_size(box, 440, 160);
+        lv_obj_center(box);
+        lv_obj_set_style_bg_color(box, lv_color_hex(0x2a2a2a), 0);
+        lv_obj_set_style_border_color(box, lv_color_hex(0x444444), 0);
+        lv_obj_set_style_border_width(box, 1, 0);
+        lv_obj_set_style_radius(box, 12, 0);
+        lv_obj_set_style_pad_all(box, 24, 0);
+        lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *lbl = lv_label_create(box);
+        lv_label_set_text(lbl, "Directory not found:\n" UI_CONFIG_DECK_PATH "\n\nTap to dismiss.");
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xcccccc), 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_center(lbl);
+        return;
+    }
+
     if (s_scan.count == 0) {
         ui_config_scan_free(&s_scan);
-        ESP_LOGW("CFG_DLG", "No JSON files found in %s", UI_CONFIG_JSON_PATH);
+        ESP_LOGW("CFG_DLG", "No JSON files found in %s", UI_CONFIG_DECK_PATH);
         return;
     }
 
