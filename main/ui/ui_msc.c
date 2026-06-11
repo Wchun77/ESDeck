@@ -1,5 +1,7 @@
 #include "ui_msc.h"
 #include "usb/usb_manager.h"
+#include "ui_settings.h"
+#include "ui_monitor.h"
 #include "lvgl.h"
 
 #define SCREEN_W  800
@@ -67,6 +69,12 @@ static void dialog_confirm_cb(lv_event_t *e)
         lv_obj_del(s_overlay);
         s_overlay = NULL;
     }
+
+    /* If currently in monitor mode, exit cleanly before MSC takes over */
+    if (ui_settings_get_mode() == UI_MODE_MONITOR) {
+        ui_monitor_exit();
+    }
+
     lv_obj_t *black = lv_obj_create(lv_scr_act());
     lv_obj_set_size(black, LV_HOR_RES, LV_VER_RES);
     lv_obj_set_pos(black, 0, 0);

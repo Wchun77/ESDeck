@@ -1,4 +1,5 @@
 #include "ui_monitor.h"
+#include "ui_clock_widget.h"
 #include "ui.h"
 #include "usb/usb_hid.h"
 #include "esp_log.h"
@@ -33,10 +34,8 @@ static lv_obj_t  *s_pages[MON_PAGE_COUNT];
 static int        s_cur_page       = MON_PAGE_CLOCK;
 static lv_timer_t *s_clock_timer   = NULL;
 
-/* Clock page widgets */
-static lv_obj_t  *s_clock_time_lbl  = NULL;  /* HH:MM */
-static lv_obj_t  *s_clock_sec_lbl   = NULL;  /* SS, bottom-right */
-static lv_obj_t  *s_clock_date_lbl  = NULL;  /* date + weekday */
+/* Clock page widget */
+static ui_clock_widget_t s_clock_widget;
 
 /* System page widgets */
 static lv_obj_t  *s_sys_cpu_bar   = NULL;
@@ -119,53 +118,24 @@ static lv_obj_t *make_page(lv_obj_t *parent)
  * ----------------------------------------------------------------------- */
 static void build_clock_page(lv_obj_t *parent)
 {
-    /* Date + weekday */
-    s_clock_date_lbl = lv_label_create(parent);
-    lv_obj_set_style_text_font(s_clock_date_lbl, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(s_clock_date_lbl, lv_color_hex(0x888888), 0);
-    lv_obj_align(s_clock_date_lbl, LV_ALIGN_CENTER, 0, -80);
-
-    /* HH:MM */
-    s_clock_time_lbl = lv_label_create(parent);
-    lv_obj_set_style_text_font(s_clock_time_lbl, &lv_font_montserrat_48, 0);
-    lv_obj_set_style_text_color(s_clock_time_lbl, lv_color_hex(0xffffff), 0);
-    lv_obj_align(s_clock_time_lbl, LV_ALIGN_CENTER, 0, 0);
-
-    /* SS — bottom-right */
-    s_clock_sec_lbl = lv_label_create(parent);
-    lv_obj_set_style_text_font(s_clock_sec_lbl, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(s_clock_sec_lbl, lv_color_hex(0x555555), 0);
-    lv_obj_align(s_clock_sec_lbl, LV_ALIGN_BOTTOM_RIGHT, -24, -20);
+    /* Widget positions itself relative to (0,0) inside the content page.
+     * The root container is transparent, so parent bg shows through. */
+    ui_clock_widget_create(&s_clock_widget, parent);
+    ui_clock_widget_set_no_data(&s_clock_widget);
 }
 
 static void update_clock(void)
 {
-    if (!s_clock_time_lbl) return;
+    if (!s_clock_widget.root) return;
 
     if (!s_time_received) {
-        lv_label_set_text(s_clock_time_lbl, "--:--");
-        lv_label_set_text(s_clock_sec_lbl,  "--");
-        lv_label_set_text(s_clock_date_lbl, "--/--  ---");
+        ui_clock_widget_set_no_data(&s_clock_widget);
         return;
     }
 
-    static const char *days[] = {
-        "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
-    };
-
-    char hhmm[8];
-    char ss[4];
-    char date[24];
-
-    snprintf(hhmm, sizeof(hhmm), "%02d:%02d", s_time.hour, s_time.min);
-    snprintf(ss,   sizeof(ss),   "%02d",       s_time.sec);
-    snprintf(date, sizeof(date), "%02d/%02d  %s",
-             s_time.month, s_time.day,
-             s_time.wday < 7 ? days[s_time.wday] : "---");
-
-    lv_label_set_text(s_clock_time_lbl, hhmm);
-    lv_label_set_text(s_clock_sec_lbl,  ss);
-    lv_label_set_text(s_clock_date_lbl, date);
+    ui_clock_widget_update(&s_clock_widget,
+                            s_time.hour, s_time.min, s_time.sec,
+                            s_time.month, s_time.day, s_time.wday);
 }
 
 /* -----------------------------------------------------------------------
@@ -417,6 +387,11 @@ void ui_monitor_exit(void)
         s_clock_timer = NULL;
     }
 
+    /* Destroy clock widget before deleting its parent page.
+     * w->root is a child of s_pages[MON_PAGE_CLOCK] -- must be freed
+     * first, otherwise lv_obj_del on the page fires events into freed memory. */
+    ui_clock_widget_destroy(&s_clock_widget);
+
     if (s_sidebar_pages) {
         lv_obj_del(s_sidebar_pages);
         s_sidebar_pages = NULL;
@@ -430,10 +405,7 @@ void ui_monitor_exit(void)
         s_sidebar_btns[i] = NULL;
     }
 
-    /* Clear widget pointers so stale callbacks cannot fire */
-    s_clock_time_lbl = NULL;
-    s_clock_sec_lbl  = NULL;
-    s_clock_date_lbl = NULL;
+    /* Clear system widget pointers */
     s_sys_cpu_bar    = NULL;
     s_sys_cpu_lbl    = NULL;
     s_sys_ram_bar    = NULL;
