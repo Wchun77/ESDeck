@@ -1,5 +1,6 @@
 #include "ui_monitor.h"
 #include "ui_clock_widget.h"
+#include "ui_monitor_img.h"
 #include "ui.h"
 #include "usb/usb_hid.h"
 #include "esp_log.h"
@@ -21,9 +22,6 @@
 /* -----------------------------------------------------------------------
  * Page indices
  * ----------------------------------------------------------------------- */
-#define MON_PAGE_CLOCK   0
-#define MON_PAGE_SYSTEM  1
-#define MON_PAGE_COUNT   2
 
 /* -----------------------------------------------------------------------
  * State
@@ -118,8 +116,34 @@ static lv_obj_t *make_page(lv_obj_t *parent)
  * ----------------------------------------------------------------------- */
 static void build_clock_page(lv_obj_t *parent)
 {
-    /* Widget positions itself relative to (0,0) inside the content page.
-     * The root container is transparent, so parent bg shows through. */
+    /* Background image from monitor img manager */
+    lv_img_dsc_t *bg_dsc = ui_monitor_img_get(MON_PAGE_CLOCK);
+    if (bg_dsc) {
+        int      page_w   = CONTENT_W;
+        int      page_h   = CONTENT_H;
+        uint32_t zoom_x   = (uint32_t)page_w * 256 / bg_dsc->header.w;
+        uint32_t zoom_y   = (uint32_t)page_h * 256 / bg_dsc->header.h;
+        uint32_t zoom     = (zoom_x > zoom_y) ? zoom_x : zoom_y;
+        int32_t  scaled_w = (int32_t)bg_dsc->header.w * (int32_t)zoom / 256;
+        int32_t  offset_x = (page_w - scaled_w) / 2;
+
+        lv_obj_t *bg = lv_img_create(parent);
+        lv_img_set_src(bg, bg_dsc);
+        lv_img_set_pivot(bg, 0, 0);
+        lv_img_set_zoom(bg, (uint16_t)zoom);
+        lv_obj_set_pos(bg, offset_x, 0);
+    }
+
+    /* Semi-transparent overlay -- same opacity as deck pages */
+    lv_obj_t *mask = lv_obj_create(parent);
+    lv_obj_set_size(mask, CONTENT_W, CONTENT_H);
+    lv_obj_set_pos(mask, 0, 0);
+    lv_obj_set_style_bg_color(mask, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(mask, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(mask, 0, 0);
+    lv_obj_set_style_radius(mask, 0, 0);
+    lv_obj_clear_flag(mask, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
     ui_clock_widget_create(&s_clock_widget, parent);
     ui_clock_widget_set_no_data(&s_clock_widget);
 }
@@ -344,6 +368,11 @@ void ui_monitor_enter(lv_obj_t *sidebar)
     lv_obj_set_style_bg_color(s_sidebar_btns[MON_PAGE_CLOCK],
                               lv_color_hex(0x0055cc), 0);
 
+    /* Load background images -- paths hardcoded, config JSON later */
+    ui_monitor_img_set_path(MON_PAGE_CLOCK,  "S:/sdcard/IMG_3238.jpg");
+    ui_monitor_img_set_path(MON_PAGE_SYSTEM, "");   /* no bg for sys page */
+    ui_monitor_img_load_all();
+
     /* Content pages */
     s_pages[MON_PAGE_CLOCK]  = make_page(scr);
     s_pages[MON_PAGE_SYSTEM] = make_page(scr);
@@ -386,6 +415,9 @@ void ui_monitor_exit(void)
         lv_timer_del(s_clock_timer);
         s_clock_timer = NULL;
     }
+
+    /* Free background images before destroying widgets and pages */
+    ui_monitor_img_free_all();
 
     /* Destroy clock widget before deleting its parent page.
      * w->root is a child of s_pages[MON_PAGE_CLOCK] -- must be freed

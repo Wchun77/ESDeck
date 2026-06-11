@@ -14,6 +14,11 @@
  *   2. ui_deck_build(...)        -- caller rebuilds deck
  */
 
+/* Page indices */
+#define MON_PAGE_CLOCK   0
+#define MON_PAGE_SYSTEM  1
+#define MON_PAGE_COUNT   2
+
 /* Build monitor sidebar pages and content, start update timer.
  * sidebar is the shared static sidebar strip from ui_build_static(). */
 void ui_monitor_enter(lv_obj_t *sidebar);

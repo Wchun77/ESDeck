@@ -9,10 +9,10 @@
 #define CLK_FONT_PATH_DATE  "S:/sdcard/fonts/oxanium_36.bin"
 
 #define CLK_COL_TIME   0xf0f2ff
-#define CLK_COL_COLON  0x1e2e66
-#define CLK_COL_DATE   0x5577dd
-#define CLK_COL_DAY    0x4466bb
-#define CLK_COL_SEC    0x3d57aa
+#define CLK_COL_COLON  0xf0f2ff
+#define CLK_COL_DATE   0xf0f2ff
+#define CLK_COL_DAY    0xf0f2ff
+#define CLK_COL_SEC    0xf0f2ff
 
 typedef struct {
     lv_font_t  *font_time;
