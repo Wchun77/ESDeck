@@ -1,5 +1,7 @@
 #include "ui_config_dialog.h"
 #include "ui_config.h"
+#include "ui_monitor_config.h"
+#include "ui_settings.h"
 #include "ui_deck.h"
 #include "ui_img_pool.h"
 #include "ui.h"
@@ -37,6 +39,9 @@ static lv_obj_t *s_sel_row = NULL;
 
 /* New config loaded during the switch preload task. */
 static deck_cfg_t s_new_cfg;
+
+/* true = showing monitor config list, false = deck config list */
+static bool s_monitor_mode = false;
 
 /* -----------------------------------------------------------------------
  * Helpers
@@ -130,11 +135,23 @@ static void confirm_cb(lv_event_t *e)
     if (s_sel_idx < 0 || s_sel_idx >= s_scan.count) return;
 
     const char *fname = s_scan.names[s_sel_idx];
-    if (!ui_config_nvs_save(fname)) {
-        ESP_LOGE("CFG_DLG", "Failed to save config to NVS");
+    ESP_LOGI("CFG_DLG", "switching config: %s", fname);
+
+    if (s_monitor_mode) {
+        if (!ui_monitor_config_nvs_save(fname)) {
+            ESP_LOGE("CFG_DLG", "Failed to save monitor config to NVS");
+            return;
+        }
+        dialog_close();
+        ui_settings_monitor_reload();
         return;
     }
-    ESP_LOGI("CFG_DLG", "switching config: %s", fname);
+
+    /* Deck config */
+    if (!ui_config_nvs_save(fname)) {
+        ESP_LOGE("CFG_DLG", "Failed to save deck config to NVS");
+        return;
+    }
 
     dialog_close();
     ui_deck_destroy();
@@ -225,9 +242,16 @@ static void warn_dismiss_cb(lv_event_t *e)
     lv_obj_del(lv_event_get_target(e));
 }
 
-void ui_config_dialog_show(void)
+static void dialog_show_internal(bool monitor_mode)
 {
-    s_scan = ui_config_scan();
+    s_monitor_mode = monitor_mode;
+    s_scan = monitor_mode ? (json_scan_result_t){ .names = NULL, .count = 0 }
+                          : ui_config_scan();
+    if (monitor_mode) {
+        mon_scan_result_t mres = ui_monitor_config_scan();
+        s_scan.names = mres.names;
+        s_scan.count = mres.count;
+    }
 
     if (s_scan.count == -1) {
         /* Directory does not exist */
@@ -310,7 +334,8 @@ void ui_config_dialog_show(void)
     lv_obj_set_style_pad_hor(title_bar, 16, 0);
     lv_obj_clear_flag(title_bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *title_lbl = lv_label_create(title_bar);
-    lv_label_set_text(title_lbl, "Select Config");
+    lv_label_set_text(title_lbl, s_monitor_mode ? "Select Monitor Config"
+                                                 : "Select Config");
     lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title_lbl, lv_color_hex(0xffffff), 0);
     lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, 0, 0);
@@ -424,7 +449,10 @@ void ui_config_dialog_show(void)
 
     /* Pre-select the currently active config. */
     s_active_fname[0] = '\0';
-    ui_config_nvs_load(s_active_fname, sizeof(s_active_fname));
+    if (s_monitor_mode)
+        ui_monitor_config_nvs_load(s_active_fname, sizeof(s_active_fname));
+    else
+        ui_config_nvs_load(s_active_fname, sizeof(s_active_fname));
     for (int i = 0; i < s_scan.count; i++) {
         if (strcmp(s_scan.names[i], s_active_fname) == 0) {
             s_sel_idx  = i;
@@ -434,4 +462,14 @@ void ui_config_dialog_show(void)
     }
 
     render_page();
+}
+
+void ui_config_dialog_show(void)
+{
+    dialog_show_internal(false);
+}
+
+void ui_monitor_config_dialog_show(void)
+{
+    dialog_show_internal(true);
 }

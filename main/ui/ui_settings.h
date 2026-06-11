@@ -18,3 +18,7 @@ void ui_settings_toggle(void);
 
 /* Return the current UI mode. */
 ui_mode_t ui_settings_get_mode(void);
+
+/* Exit and re-enter monitor mode to apply a new config.
+ * Shows switching screen and re-enters asynchronously. */
+void ui_settings_monitor_reload(void);

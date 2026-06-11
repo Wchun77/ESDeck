@@ -1,6 +1,7 @@
 #include "ui_monitor.h"
 #include "ui_clock_widget.h"
 #include "ui_monitor_img.h"
+#include "ui_monitor_config.h"
 #include "ui.h"
 #include "usb/usb_hid.h"
 #include "esp_log.h"
@@ -34,6 +35,9 @@ static lv_timer_t *s_clock_timer   = NULL;
 
 /* Clock page widget */
 static ui_clock_widget_t s_clock_widget;
+
+/* Current monitor config -- loaded on enter, valid until exit */
+static monitor_cfg_t s_mon_cfg;
 
 /* System page widgets */
 static lv_obj_t  *s_sys_cpu_bar   = NULL;
@@ -144,7 +148,7 @@ static void build_clock_page(lv_obj_t *parent)
     lv_obj_set_style_radius(mask, 0, 0);
     lv_obj_clear_flag(mask, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
 
-    ui_clock_widget_create(&s_clock_widget, parent);
+    ui_clock_widget_create(&s_clock_widget, parent, &s_mon_cfg.clock);
     ui_clock_widget_set_no_data(&s_clock_widget);
 }
 
@@ -368,9 +372,16 @@ void ui_monitor_enter(lv_obj_t *sidebar)
     lv_obj_set_style_bg_color(s_sidebar_btns[MON_PAGE_CLOCK],
                               lv_color_hex(0x0055cc), 0);
 
-    /* Load background images -- paths hardcoded, config JSON later */
-    ui_monitor_img_set_path(MON_PAGE_CLOCK,  "S:/sdcard/IMG_3238.jpg");
-    ui_monitor_img_set_path(MON_PAGE_SYSTEM, "");   /* no bg for sys page */
+    /* Load config then background images */
+    ui_monitor_config_load(&s_mon_cfg);
+
+    char bg_path[MON_CFG_BG_LEN + 16];
+    ui_monitor_config_bg_path(s_mon_cfg.clock.bg_image, bg_path, sizeof(bg_path));
+    ui_monitor_img_set_path(MON_PAGE_CLOCK, bg_path);
+
+    ui_monitor_config_bg_path(s_mon_cfg.system.bg_image, bg_path, sizeof(bg_path));
+    ui_monitor_img_set_path(MON_PAGE_SYSTEM, bg_path);
+
     ui_monitor_img_load_all();
 
     /* Content pages */

@@ -1,6 +1,7 @@
 #include "ui_settings.h"
 #include "ui_msc.h"
 #include "ui_config_dialog.h"
+#include "ui_monitor_config.h"
 #include "ui_keyboard.h"
 #include "ui_monitor.h"
 #include "ui_deck.h"
@@ -93,6 +94,14 @@ static void back_to_deck_task(void *arg)
     vTaskDelete(NULL);
 }
 
+void ui_settings_monitor_reload(void)
+{
+    ui_monitor_exit();
+    ui_show_switching_screen("Applying config...");
+    lv_refr_now(NULL);
+    xTaskCreate(enter_monitor_task, "mon_reload", 4096, NULL, 3, NULL);
+}
+
 /* -----------------------------------------------------------------------
  * Item callbacks
  * ----------------------------------------------------------------------- */
@@ -105,7 +114,10 @@ static void item_msc_cb(lv_event_t *e)
 static void item_config_cb(lv_event_t *e)
 {
     hide_menu();
-    ui_config_dialog_show();
+    if (s_mode == UI_MODE_MONITOR)
+        ui_monitor_config_dialog_show();
+    else
+        ui_config_dialog_show();
 }
 
 static void item_keyboard_cb(lv_event_t *e)

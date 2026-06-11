@@ -1,22 +1,11 @@
 #pragma once
 
 #include "lvgl.h"
+#include "ui_monitor_config.h"
 #include <stdint.h>
 #include <stdbool.h>
 
-#define CLK_FONT_PATH_TIME  "S:/sdcard/fonts/oxanium_270.bin"
-#define CLK_FONT_PATH_SEC   "S:/sdcard/fonts/oxanium_48.bin"
-#define CLK_FONT_PATH_DATE  "S:/sdcard/fonts/oxanium_36.bin"
-
-#define CLK_COL_TIME   0xf0f2ff
-#define CLK_COL_COLON  0x1e2e66
-#define CLK_COL_DATE   0xf0f2ff
-#define CLK_COL_DAY    0xf0f2ff
-#define CLK_COL_SEC    0xf0f2ff
-
-#define CLK_SEP_COLOR  0xf0f2ff   /* separator line colour */
-#define CLK_SEP_WIDTH  2          /* separator line width px */
-#define CLK_SEP_LEN    160        /* separator line length px */
+#define CLK_SEP_LEN  160   /* separator line length px */
 
 typedef struct {
     lv_font_t  *font_time;
@@ -34,11 +23,21 @@ typedef struct {
     uint8_t     cur_sec;   /* 0xFF = not yet received */
     bool        has_data;
 
+    /* Cached config values */
+    uint32_t    cfg_col_time;
+    uint32_t    cfg_col_colon;
+    uint32_t    cfg_col_date;
+    uint32_t    cfg_col_day;
+    uint32_t    cfg_col_sec;
+    uint32_t    cfg_sep_color;
+    int         cfg_sep_width;
+
     lv_obj_t   *root;
     bool        font_fallback;
 } ui_clock_widget_t;
 
-void ui_clock_widget_create(ui_clock_widget_t *w, lv_obj_t *parent);
+void ui_clock_widget_create(ui_clock_widget_t *w, lv_obj_t *parent,
+                             const mon_clock_cfg_t *cfg);
 
 void ui_clock_widget_update(ui_clock_widget_t *w,
                              uint8_t hour, uint8_t min, uint8_t sec,
