@@ -83,6 +83,9 @@ static void on_back_to_deck_done(void *arg)
 
 static void back_to_deck_task(void *arg)
 {
+    /* Invalidate LVGL image cache so stale entries from Monitor do not
+     * render with freed buffer addresses on the first Deck frame. */
+    lv_img_cache_invalidate_src(NULL);
     ui_img_pool_load(&s_back_cfg);
     /* Ensure at least 1 second on the switching screen. */
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -123,8 +126,10 @@ static void item_mode_cb(lv_event_t *e)
         ui_show_switching_screen("Entering Monitor Mode...");
         xTaskCreate(enter_monitor_task, "enter_mon", 4096, NULL, 3, NULL);
     } else {
-        /* Monitor -> Deck */
-        ui_monitor_exit();
+        /* Monitor -> Deck
+         * Show the switching screen FIRST so LVGL renders a clean frame
+         * before ui_monitor_exit() frees the background image buffer.
+         * Without this, the last Monitor frame may render with a freed buffer. */
         s_mode = UI_MODE_DECK;
         update_mode_label();
 
@@ -138,6 +143,8 @@ static void item_mode_cb(lv_event_t *e)
         }
 
         ui_show_switching_screen("Returning to Deck...");
+        lv_refr_now(NULL);   /* flush switching screen before freeing monitor buffers */
+        ui_monitor_exit();
         xTaskCreate(back_to_deck_task, "back_deck", 8192, NULL, 3, NULL);
     }
 }

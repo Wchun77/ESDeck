@@ -107,11 +107,11 @@ void ui_clock_widget_create(ui_clock_widget_t *w, lv_obj_t *parent)
     lv_label_set_recolor(w->day_label, true);
     lv_label_set_text(w->day_label, "#111118 XXX#");
 
-    static lv_point_t sep_pts[2] = {{ 0, 0 }, { 160, 0 }};
+    static lv_point_t sep_pts[2] = {{ 0, 0 }, { CLK_SEP_LEN, 0 }};
     lv_obj_t *sep = lv_line_create(date_panel);
     lv_line_set_points(sep, sep_pts, 2);
-    lv_obj_set_style_line_color(sep, lv_color_hex(0x1a2a55), 0);
-    lv_obj_set_style_line_width(sep, 1, 0);
+    lv_obj_set_style_line_color(sep, lv_color_hex(CLK_SEP_COLOR), 0);
+    lv_obj_set_style_line_width(sep, CLK_SEP_WIDTH, 0);
     lv_obj_align(sep, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 
     /* ---- Time panel ---- */

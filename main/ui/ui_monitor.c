@@ -416,9 +416,6 @@ void ui_monitor_exit(void)
         s_clock_timer = NULL;
     }
 
-    /* Free background images before destroying widgets and pages */
-    ui_monitor_img_free_all();
-
     /* Destroy clock widget before deleting its parent page.
      * w->root is a child of s_pages[MON_PAGE_CLOCK] -- must be freed
      * first, otherwise lv_obj_del on the page fires events into freed memory. */
@@ -436,6 +433,10 @@ void ui_monitor_exit(void)
         }
         s_sidebar_btns[i] = NULL;
     }
+
+    /* Free background image buffers after all LVGL objects are deleted.
+     * Must come after lv_obj_del so no lv_img is still referencing the buffer. */
+    ui_monitor_img_free_all();
 
     /* Clear system widget pointers */
     s_sys_cpu_bar    = NULL;
