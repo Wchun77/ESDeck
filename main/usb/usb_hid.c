@@ -1,5 +1,6 @@
 #include "usb_hid.h"
 #include "esp_log.h"
+#include <string.h>
 #include "tinyusb.h"
 #include "class/hid/hid_device.h"
 #include "freertos/FreeRTOS.h"
@@ -67,6 +68,13 @@ static const tusb_desc_device_t s_device_desc = {
     .bNumConfigurations = 0x01,
 };
 
+static const char *s_string_desc[] = {
+    "\x09\x04",  // 0: Language (English)
+    "Hank",      // 1: Manufacturer
+    "ESDeck",    // 2: Product name  ← 改這裡
+    "000001",    // 3: Serial number
+};
+
 /* -----------------------------------------------------------------------
  * Callbacks registered by upper layers
  * ----------------------------------------------------------------------- */
@@ -118,8 +126,8 @@ void usb_hid_driver_install(void)
         .descriptor = {
             .device            = &s_device_desc,
             .qualifier         = NULL,
-            .string            = NULL,
-            .string_count      = 0,
+            .string            = s_string_desc,
+            .string_count      = sizeof(s_string_desc) / sizeof(s_string_desc[0]),
             .full_speed_config = s_config_desc,
             .high_speed_config = NULL,
         },
@@ -127,6 +135,16 @@ void usb_hid_driver_install(void)
         .event_arg = NULL,
     };
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
+
+    /* On reset-while-USB-connected, the ROM bootloader briefly puts the
+     * USB Serial/JTAG peripheral on the bus (same GPIO19/20 as OTG).
+     * When TinyUSB switches the mux, Windows sees a glitch rather than a
+     * clean disconnect → reconnect, leaving the HID driver in a bad state.
+     * Force an explicit disconnect/reconnect so Windows re-enumerates cleanly. */
+    tud_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    tud_connect();
+
     s_active = true;
     ESP_LOGI(TAG, "HID driver installed");
 }
@@ -235,5 +253,11 @@ uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
                                 hid_report_type_t report_type,
                                 uint8_t *buffer, uint16_t reqlen)
 {
+    if (report_type == HID_REPORT_TYPE_FEATURE ||
+        report_type == HID_REPORT_TYPE_INPUT) {
+        uint16_t len = reqlen < 8 ? reqlen : 8;
+        memset(buffer, 0, len);
+        return len;
+    }
     return 0;
 }
