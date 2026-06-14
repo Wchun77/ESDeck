@@ -14,7 +14,11 @@ typedef struct {
 
     lv_obj_t   *date_label;
     lv_obj_t   *day_label;
-    lv_obj_t   *time_label;
+    lv_obj_t   *h_tens_label;    /* hour tens digit  */
+    lv_obj_t   *h_units_label;   /* hour units digit */
+    lv_obj_t   *colon_label;
+    lv_obj_t   *m_tens_label;    /* minute tens digit  */
+    lv_obj_t   *m_units_label;   /* minute units digit */
     lv_obj_t   *sec_label;
 
     bool        colon_visible;

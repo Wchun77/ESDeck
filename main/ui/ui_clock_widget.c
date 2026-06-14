@@ -33,19 +33,38 @@ static lv_obj_t *make_panel(lv_obj_t *parent, int x, int y, int w, int h)
     return p;
 }
 
-static void rebuild_time_label(ui_clock_widget_t *w)
+static void rebuild_time_labels(ui_clock_widget_t *w)
 {
-    if (!w->time_label) return;
+    if (!w->h_tens_label) return;
 
-    char buf[32];
-    if (!w->has_data) {
-        snprintf(buf, sizeof(buf), "#111118 00:00#");
-    } else {
-        uint32_t col = w->colon_visible ? w->cfg_col_time : 0x0a0a14;
-        snprintf(buf, sizeof(buf), "%02d#%06lx :#%02d",
-                 w->cur_hour, (unsigned long)col, w->cur_min);
-    }
-    lv_label_set_text(w->time_label, buf);
+    uint32_t col_time  = w->has_data ? w->cfg_col_time  : 0x111118;
+    uint32_t col_colon = w->has_data
+                         ? (w->colon_visible ? w->cfg_col_colon : 0x0a0a14)
+                         : 0x111118;
+
+    int hour = w->has_data ? w->cur_hour : 0;
+    int min  = w->has_data ? w->cur_min  : 0;
+
+    char d[2] = {'0', '\0'};
+
+    d[0] = '0' + hour / 10;
+    lv_label_set_text(w->h_tens_label, d);
+    lv_obj_set_style_text_color(w->h_tens_label, lv_color_hex(col_time), 0);
+
+    d[0] = '0' + hour % 10;
+    lv_label_set_text(w->h_units_label, d);
+    lv_obj_set_style_text_color(w->h_units_label, lv_color_hex(col_time), 0);
+
+    lv_label_set_text(w->colon_label, ":");
+    lv_obj_set_style_text_color(w->colon_label, lv_color_hex(col_colon), 0);
+
+    d[0] = '0' + min / 10;
+    lv_label_set_text(w->m_tens_label, d);
+    lv_obj_set_style_text_color(w->m_tens_label, lv_color_hex(col_time), 0);
+
+    d[0] = '0' + min % 10;
+    lv_label_set_text(w->m_units_label, d);
+    lv_obj_set_style_text_color(w->m_units_label, lv_color_hex(col_time), 0);
 }
 
 static lv_font_t *load_font(const char *path, bool *fallback_flag,
@@ -143,18 +162,66 @@ void ui_clock_widget_create(ui_clock_widget_t *w, lv_obj_t *parent,
     }
 
     /* ---- Time panel ---- */
+    /* Layout: [ h_tens | h_units | : | m_tens | m_units ]
+     *          <-180px->|<-180px->|   |<-180px->|<-180px->
+     * Colon fixed at center. Each digit cell = TIME_PANEL_W/4.
+     * Inner cells have COLON_GAP padding away from center. */
     int time_panel_y = (CH - TIME_PANEL_H) / 2;
     lv_obj_t *time_panel = make_panel(w->root,
                                        TIME_PANEL_X, time_panel_y,
                                        TIME_PANEL_W, TIME_PANEL_H);
 
-    w->time_label = lv_label_create(time_panel);
-    lv_obj_set_style_text_font(w->time_label, w->font_time, 0);
-    lv_obj_set_style_text_color(w->time_label, lv_color_hex(w->cfg_col_time), 0);
-    lv_obj_set_style_bg_opa(w->time_label, LV_OPA_TRANSP, 0);
-    lv_label_set_recolor(w->time_label, true);
-    lv_obj_align(w->time_label, LV_ALIGN_CENTER, 0, 0);
-    rebuild_time_label(w);
+    /* Each digit occupies 1/4 of TIME_PANEL_W = 180px.
+     * Colon is fixed at center. h_units and m_tens have inner padding
+     * to leave a gap between the digit and the colon. */
+    #define DIGIT_W    (TIME_PANEL_W / 4)   /* 180px */
+    #define COLON_GAP  30
+
+    /* h_tens: cell 0 */
+    lv_obj_t *p_ht = make_panel(time_panel, 0, 0, DIGIT_W, TIME_PANEL_H);
+    w->h_tens_label = lv_label_create(p_ht);
+    lv_obj_set_style_text_font(w->h_tens_label, w->font_time, 0);
+    lv_obj_set_style_bg_opa(w->h_tens_label, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_align(w->h_tens_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(w->h_tens_label, DIGIT_W);
+    lv_obj_align(w->h_tens_label, LV_ALIGN_CENTER, 0, 0);
+
+    /* h_units: cell 1, right-padded to gap before colon */
+    lv_obj_t *p_hu = make_panel(time_panel, DIGIT_W, 0, DIGIT_W, TIME_PANEL_H);
+    lv_obj_set_style_pad_right(p_hu, COLON_GAP, 0);
+    w->h_units_label = lv_label_create(p_hu);
+    lv_obj_set_style_text_font(w->h_units_label, w->font_time, 0);
+    lv_obj_set_style_bg_opa(w->h_units_label, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_align(w->h_units_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(w->h_units_label, DIGIT_W - COLON_GAP);
+    lv_obj_align(w->h_units_label, LV_ALIGN_RIGHT_MID, 0, 0);
+
+    /* Colon: fixed at center of time_panel */
+    w->colon_label = lv_label_create(time_panel);
+    lv_obj_set_style_text_font(w->colon_label, w->font_time, 0);
+    lv_obj_set_style_bg_opa(w->colon_label, LV_OPA_TRANSP, 0);
+    lv_obj_align(w->colon_label, LV_ALIGN_CENTER, 0, 0);
+
+    /* m_tens: cell 2, left-padded to gap after colon */
+    lv_obj_t *p_mt = make_panel(time_panel, DIGIT_W * 2, 0, DIGIT_W, TIME_PANEL_H);
+    lv_obj_set_style_pad_left(p_mt, COLON_GAP, 0);
+    w->m_tens_label = lv_label_create(p_mt);
+    lv_obj_set_style_text_font(w->m_tens_label, w->font_time, 0);
+    lv_obj_set_style_bg_opa(w->m_tens_label, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_align(w->m_tens_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(w->m_tens_label, DIGIT_W - COLON_GAP);
+    lv_obj_align(w->m_tens_label, LV_ALIGN_LEFT_MID, 0, 0);
+
+    /* m_units: cell 3 */
+    lv_obj_t *p_mu = make_panel(time_panel, DIGIT_W * 3, 0, DIGIT_W, TIME_PANEL_H);
+    w->m_units_label = lv_label_create(p_mu);
+    lv_obj_set_style_text_font(w->m_units_label, w->font_time, 0);
+    lv_obj_set_style_bg_opa(w->m_units_label, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_align(w->m_units_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(w->m_units_label, DIGIT_W);
+    lv_obj_align(w->m_units_label, LV_ALIGN_CENTER, 0, 0);
+
+    rebuild_time_labels(w);
 
     /* ---- Sec panel ---- */
     int sec_x = CW - SEC_PANEL_W - 4;
@@ -189,7 +256,7 @@ void ui_clock_widget_update(ui_clock_widget_t *w,
     w->has_data = true;
     w->cur_hour = hour;
     w->cur_min  = min;
-    rebuild_time_label(w);
+    rebuild_time_labels(w);
 
     char buf[16];
 
@@ -208,7 +275,7 @@ void ui_clock_widget_set_no_data(ui_clock_widget_t *w)
     if (!w->root) return;
     w->has_data = false;
     w->cur_sec  = 0xFF;
-    rebuild_time_label(w);
+    rebuild_time_labels(w);
     lv_label_set_text(w->sec_label,  "#111118 00#");
     lv_label_set_text(w->date_label, "#111118 00/00#");
     lv_label_set_text(w->day_label,  "#111118 XXX#");
@@ -218,7 +285,11 @@ void ui_clock_widget_destroy(ui_clock_widget_t *w)
 {
     if (!w->root) return;
 
-    w->time_label = NULL;
+    w->h_tens_label  = NULL;
+    w->h_units_label = NULL;
+    w->colon_label   = NULL;
+    w->m_tens_label  = NULL;
+    w->m_units_label = NULL;
     w->sec_label  = NULL;
     w->date_label = NULL;
     w->day_label  = NULL;
