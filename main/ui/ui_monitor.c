@@ -347,7 +347,7 @@ void ui_monitor_enter(lv_obj_t *sidebar)
     lv_obj_set_flex_flow(s_sidebar_pages, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scrollbar_mode(s_sidebar_pages, LV_SCROLLBAR_MODE_OFF);
 
-    static const char *page_names[MON_PAGE_COUNT] = { "Clock", "Sys" };
+    static const char *page_names[MON_PAGE_COUNT] = { "Clock", "System" };
 
     for (int i = 0; i < MON_PAGE_COUNT; i++) {
         lv_obj_t *btn = lv_btn_create(s_sidebar_pages);
