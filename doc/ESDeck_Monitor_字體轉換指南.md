@@ -73,7 +73,7 @@ lv_font_conv --font Oxanium-Bold.ttf --size 48 --bpp 4 --range 0x30-0x39 --forma
 ### 日期 + 星期字體（中字）
 
 ```cmd
-lv_font_conv --font Oxanium-Bold.ttf --size 36 --bpp 4 --range 0x2F,0x30-0x39,0x41-0x5A --format bin -o oxanium_36.bin
+lv_font_conv --font Oxanium-Bold.ttf --size 36 --bpp 4 -r 0x2F -r 0x30-0x39 -r 0x41-0x5A --format bin -o oxanium_36.bin
 ```
 
 字元範圍包含：`/`、`0`–`9`、`A`–`Z`
