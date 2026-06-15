@@ -1,7 +1,6 @@
 #include "usb_manager.h"
 #include "usb_hid.h"
 #include "usb_msc.h"
-#include "fs_manager/fs_flash.h"
 #include "fs_manager/fs_sd.h"
 #include "descriptors_control.h"
 #include "tinyusb.h"
@@ -35,7 +34,6 @@ static void usb_manager_task(void *arg)
 
         tud_disconnect();
 
-        fs_flash_unmount_for_usb();
         fs_sd_unmount_fat();
 
         const tinyusb_desc_config_t desc = {
