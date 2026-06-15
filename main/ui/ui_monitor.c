@@ -177,17 +177,23 @@ static void update_clock(void)
  * Cell size: 320x200, gap: 20
  * Grid origin: (20, 40) relative to content area
  * ----------------------------------------------------------------------- */
-#define CELL_W   320
-#define CELL_H   200
-#define CELL_GAP  20
+#define CELL_W      320
+#define CELL_H      200
+
+/* Each quadrant of the 720x480 content area is 360x240.
+ * Center the cell inside its quadrant. */
+#define QUAD_W      (CONTENT_W / 2)
+#define QUAD_H      (CONTENT_H / 2)
+#define CELL_OFF_X  ((QUAD_W - CELL_W) / 2)
+#define CELL_OFF_Y  ((QUAD_H - CELL_H) / 2)
 
 static lv_obj_t *make_cell(lv_obj_t *parent, int col, int row,
                             const char *title,
                             lv_obj_t **out_val_lbl,
                             lv_obj_t **out_bar)
 {
-    int x = CELL_GAP + col * (CELL_W + CELL_GAP);
-    int y = CELL_GAP + row * (CELL_H + CELL_GAP);
+    int x = col * QUAD_W + CELL_OFF_X;
+    int y = row * QUAD_H + CELL_OFF_Y;
 
     lv_obj_t *cell = lv_obj_create(parent);
     lv_obj_set_pos(cell, x, y);
