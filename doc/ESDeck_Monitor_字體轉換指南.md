@@ -121,9 +121,9 @@ lv_font_conv --font Oxanium-Bold.ttf --size 270 --bpp 4 --range 0x30-0x3A --form
 將轉換好的 `.bin` 檔透過 MSC 模式放進 SD card 的 `fonts/` 資料夾：
 
 ```
-/sdcard/fonts/oxanium_270.bin
-/sdcard/fonts/oxanium_48.bin
-/sdcard/fonts/oxanium_36.bin
+/sdcard/assets/fonts/oxanium_270.bin
+/sdcard/assets/fonts/oxanium_48.bin
+/sdcard/assets/fonts/oxanium_36.bin
 ```
 
 在 Monitor Select Config 選好 config 後，重新套用即生效。
