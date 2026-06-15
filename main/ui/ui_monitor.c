@@ -199,6 +199,7 @@ static lv_obj_t *make_cell(lv_obj_t *parent, int col, int row,
     lv_obj_set_pos(cell, x, y);
     lv_obj_set_size(cell, CELL_W, CELL_H);
     lv_obj_set_style_bg_color(cell, lv_color_hex(0x1e1e1e), 0);
+    lv_obj_set_style_bg_opa(cell, LV_OPA_50, 0);
     lv_obj_set_style_border_color(cell, lv_color_hex(0x333333), 0);
     lv_obj_set_style_border_width(cell, 1, 0);
     lv_obj_set_style_radius(cell, 10, 0);
@@ -239,6 +240,33 @@ static lv_obj_t *make_cell(lv_obj_t *parent, int col, int row,
 
 static void build_system_page(lv_obj_t *parent)
 {
+    /* Background image -- same zoom-fill logic as build_clock_page */
+    lv_img_dsc_t *bg_dsc = ui_monitor_img_get(MON_PAGE_SYSTEM);
+    if (bg_dsc) {
+        int      page_w   = CONTENT_W;
+        int      page_h   = CONTENT_H;
+        uint32_t zoom_x   = (uint32_t)page_w * 256 / bg_dsc->header.w;
+        uint32_t zoom_y   = (uint32_t)page_h * 256 / bg_dsc->header.h;
+        uint32_t zoom     = (zoom_x > zoom_y) ? zoom_x : zoom_y;
+        int32_t  scaled_w = (int32_t)bg_dsc->header.w * (int32_t)zoom / 256;
+        int32_t  offset_x = (page_w - scaled_w) / 2;
+
+        lv_obj_t *bg = lv_img_create(parent);
+        lv_img_set_src(bg, bg_dsc);
+        lv_img_set_pivot(bg, 0, 0);
+        lv_img_set_zoom(bg, (uint16_t)zoom);
+        lv_obj_set_pos(bg, offset_x, 0);
+
+        lv_obj_t *mask = lv_obj_create(parent);
+        lv_obj_set_size(mask, CONTENT_W, CONTENT_H);
+        lv_obj_set_pos(mask, 0, 0);
+        lv_obj_set_style_bg_color(mask, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_bg_opa(mask, LV_OPA_50, 0);
+        lv_obj_set_style_border_width(mask, 0, 0);
+        lv_obj_set_style_radius(mask, 0, 0);
+        lv_obj_clear_flag(mask, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    }
+
     make_cell(parent, 0, 0, "CPU Usage",
               &s_sys_cpu_lbl, &s_sys_cpu_bar);
     make_cell(parent, 1, 0, "CPU Temp",
