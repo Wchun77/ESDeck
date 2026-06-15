@@ -11,9 +11,9 @@
 #define UI_CONFIG_ICON_LEN     32
 #define UI_CONFIG_NAME_LEN     32
 
-#define UI_CONFIG_ICON_PATH    "/sdcard"
-#define UI_CONFIG_BG_PATH      "/sdcard"
-#define UI_CONFIG_DECK_PATH    "/flash/deck"
+#define UI_CONFIG_ICON_PATH    "/sdcard/assets/icons"
+#define UI_CONFIG_BG_PATH      "/sdcard/assets/backgrounds"
+#define UI_CONFIG_DECK_PATH    "/sdcard/config/deck"
 #define UI_CONFIG_JSON_PREFIX  "esp_"
 
 #define UI_CONFIG_BG_LEN       64

@@ -1,9 +1,6 @@
 #include "usb_msc.h"
 #include "tinyusb_msc.h"
-#include "fs_manager/fs_flash.h"
 #include "fs_manager/fs_sd.h"
-#include "esp_partition.h"
-#include "wear_levelling.h"
 #include "driver/sdmmc_host.h"
 #include "sdmmc_cmd.h"
 #include "esp_log.h"
@@ -11,13 +8,9 @@
 
 static const char *TAG = "USB_MSC";
 
-#define PARTITION_LABEL  "storage"
-
 #define TUSB_MSC_DESC_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_MSC_DESC_LEN)
 
-static tinyusb_msc_storage_handle_t s_flash_hdl  = NULL;
-static tinyusb_msc_storage_handle_t s_sd_hdl     = NULL;
-static wl_handle_t                  s_wl_handle   = WL_INVALID_HANDLE;
+static tinyusb_msc_storage_handle_t s_sd_hdl = NULL;
 
 static const uint8_t s_config_desc[] = {
     TUD_CONFIG_DESCRIPTOR(1, 1, 0, TUSB_MSC_DESC_TOTAL_LEN, 0, 100),
@@ -59,27 +52,13 @@ void usb_msc_class_init(void)
     };
     ESP_ERROR_CHECK(tinyusb_msc_install_driver(&drv_cfg));
 
-    /* Flash LUN */
-    const esp_partition_t *part = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA,
-        ESP_PARTITION_SUBTYPE_DATA_FAT,
-        PARTITION_LABEL);
-    ESP_ERROR_CHECK(wl_mount(part, &s_wl_handle));
-
-    const tinyusb_msc_storage_config_t flash_cfg = {
-        .medium.wl_handle = s_wl_handle,
-        .mount_point      = TINYUSB_MSC_STORAGE_MOUNT_USB,
-    };
-    ESP_ERROR_CHECK(tinyusb_msc_new_storage_spiflash(&flash_cfg, &s_flash_hdl));
-    ESP_LOGI(TAG, "Flash LUN ready");
-
-    /* SD LUN - reuse card handle from fs_sd */
     sdmmc_card_t *card = fs_sd_get_card();
     if (card == NULL) {
-        ESP_LOGW(TAG, "SD not available, skipping SD LUN");
+        ESP_LOGW(TAG, "SD not available, MSC has no LUN");
         return;
     }
-    ESP_LOGI(TAG, "SD card: %s, %lluMB", card->cid.name, (uint64_t)card->csd.capacity * card->csd.sector_size / (1024 * 1024));
+    ESP_LOGI(TAG, "SD card: %s, %lluMB", card->cid.name,
+             (uint64_t)card->csd.capacity * card->csd.sector_size / (1024 * 1024));
 
     const tinyusb_msc_storage_config_t sd_cfg = {
         .medium.card = card,
@@ -87,7 +66,7 @@ void usb_msc_class_init(void)
     };
     esp_err_t err = tinyusb_msc_new_storage_sdmmc(&sd_cfg, &s_sd_hdl);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SD storage init failed: %s, skipping SD LUN", esp_err_to_name(err));
+        ESP_LOGW(TAG, "SD storage init failed: %s", esp_err_to_name(err));
         return;
     }
 
@@ -100,15 +79,6 @@ void usb_msc_class_deinit(void)
         tinyusb_msc_delete_storage(s_sd_hdl);
         s_sd_hdl = NULL;
     }
-    if (s_flash_hdl) {
-        tinyusb_msc_delete_storage(s_flash_hdl);
-        s_flash_hdl = NULL;
-    }
     tinyusb_msc_uninstall_driver();
-
-    if (s_wl_handle != WL_INVALID_HANDLE) {
-        wl_unmount(s_wl_handle);
-        s_wl_handle = WL_INVALID_HANDLE;
-    }
     ESP_LOGI(TAG, "MSC class deinit done");
 }

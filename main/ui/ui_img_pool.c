@@ -106,7 +106,7 @@ lv_img_dsc_t *ui_img_pool_decode(const char *path)
             for (int p = 0; p < n; p++) {
                 const char *bg = ui_deck_page_bg_image(p);
                 if (!bg || !bg[0]) continue;
-                char chk[UI_CONFIG_BG_LEN + 12];
+                char chk[sizeof("S:") + sizeof(UI_CONFIG_BG_PATH) + 1 + UI_CONFIG_BG_LEN];
                 snprintf(chk, sizeof(chk), "S:%s/%s", UI_CONFIG_BG_PATH, bg);
                 if (strcmp(chk, s_pool[lru_idx].key) == 0) {
                     ui_deck_lazy_bg_remove_widgets(p);
@@ -212,7 +212,7 @@ void ui_img_pool_load(const deck_cfg_t *cfg)
     for (int p = 0; p < cfg->page_count; p++) {
         for (int b = 0; b < cfg->pages[p].button_count; b++) {
             if (!cfg->pages[p].buttons[b].icon[0]) continue;
-            char path[UI_CONFIG_ICON_LEN + 12];
+            char path[sizeof("S:") + sizeof(UI_CONFIG_ICON_PATH) + 1 + UI_CONFIG_ICON_LEN];
             snprintf(path, sizeof(path), "S:%s/%s",
                      UI_CONFIG_ICON_PATH, cfg->pages[p].buttons[b].icon);
             FILE *f = fopen(path + 2, "r");

@@ -4,9 +4,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define UI_MONITOR_PATH        "/flash/monitor"
-#define UI_MONITOR_BG_PATH     "/sdcard"
-#define UI_MONITOR_FONT_PATH   "/sdcard/fonts"
+#define UI_MONITOR_PATH        "/sdcard/config/monitor"
+#define UI_MONITOR_BG_PATH     "/sdcard/assets/backgrounds"
+#define UI_MONITOR_FONT_PATH   "/sdcard/assets/fonts"
 
 #define MON_CFG_FNAME_LEN   64
 #define MON_CFG_BG_LEN      64

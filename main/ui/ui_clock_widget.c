@@ -102,9 +102,9 @@ void ui_clock_widget_create(ui_clock_widget_t *w, lv_obj_t *parent,
     w->cfg_sep_width = cfg ? cfg->sep_width : MON_CFG_DEF_SEP_WIDTH;
 
     /* Build font paths from config filenames */
-    char path_time[MON_CFG_FONT_LEN + 24];
-    char path_sec[MON_CFG_FONT_LEN + 24];
-    char path_date[MON_CFG_FONT_LEN + 24];
+    char path_time[sizeof("S:") + sizeof(UI_MONITOR_FONT_PATH) + 1 + MON_CFG_FONT_LEN];
+    char path_sec[sizeof("S:") + sizeof(UI_MONITOR_FONT_PATH) + 1 + MON_CFG_FONT_LEN];
+    char path_date[sizeof("S:") + sizeof(UI_MONITOR_FONT_PATH) + 1 + MON_CFG_FONT_LEN];
 
     if (cfg) {
         ui_monitor_config_font_path(cfg->font_time, path_time, sizeof(path_time));

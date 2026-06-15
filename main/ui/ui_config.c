@@ -11,7 +11,7 @@
 
 #define TAG  "[UI_CFG]"
 
-#define STARTUP_TXT_PATH  "/flash/deck/startup.txt"
+#define STARTUP_TXT_PATH  "/sdcard/config/deck/startup.txt"
 
 /* --------------------------------------------------------------------------
  * Internal helpers
@@ -110,7 +110,7 @@ bool ui_config_load(deck_cfg_t *cfg)
 
     apply_startup_txt();
 
-    char json_path[UI_CONFIG_FNAME_LEN + 16];
+    char json_path[sizeof(UI_CONFIG_DECK_PATH) + 1 + UI_CONFIG_FNAME_LEN];
     char nvs_fname[UI_CONFIG_FNAME_LEN];
 
     if (ui_config_nvs_load(nvs_fname, sizeof(nvs_fname))) {

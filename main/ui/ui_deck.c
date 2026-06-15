@@ -70,7 +70,7 @@ void ui_deck_lazy_bg_set(int page_idx)
     int page_w = SCREEN_W - SIDEBAR_W;
     int page_h = SCREEN_H;
 
-    char bg_path[UI_CONFIG_BG_LEN + 12];
+    char bg_path[sizeof("S:") + sizeof(UI_CONFIG_BG_PATH) + 1 + UI_CONFIG_BG_LEN];
     snprintf(bg_path, sizeof(bg_path), "S:%s/%s",
              UI_CONFIG_BG_PATH, page_cfg->bg_image);
 
@@ -207,7 +207,7 @@ static void create_buttons(lv_obj_t *btn_cont, int page_idx,
         bool has_icon = false;
 
         if (bcfg->icon[0] != '\0') {
-            char icon_path[UI_CONFIG_ICON_LEN + 12];
+            char icon_path[sizeof("S:") + sizeof(UI_CONFIG_ICON_PATH) + 1 + UI_CONFIG_ICON_LEN];
             snprintf(icon_path, sizeof(icon_path), "S:%s/%s",
                      UI_CONFIG_ICON_PATH, bcfg->icon);
 
