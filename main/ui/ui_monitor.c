@@ -63,6 +63,12 @@ static QueueHandle_t  s_time_queue    = NULL;
 static monitor_data_t s_data          = { 0 };
 static monitor_time_t s_time          = { 0 };
 
+/* Self-incrementing clock state.
+ * s_time holds the last value received from PC.
+ * s_display_time is what actually gets shown — incremented every timer tick
+ * and only hard-corrected when the PC value diverges by more than 1 second. */
+static monitor_time_t s_display_time  = { 0 };
+
 static bool s_data_received  = false;
 static int  s_data_timeout   = 0;
 static bool s_time_received  = false;
@@ -70,7 +76,8 @@ static int  s_time_timeout   = 0;
 
 /* Forward declarations — called from TinyUSB task via usb_hid */
 static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
-                                   uint8_t ram_usage, uint8_t gpu_usage);
+                                   uint8_t ram_usage, uint8_t gpu_usage,
+                                   uint8_t gpu_temp);
 static void ui_monitor_on_hid_time(uint8_t hour, uint8_t min, uint8_t sec,
                                    uint8_t month, uint8_t day, uint8_t wday);
 
@@ -162,8 +169,8 @@ static void update_clock(void)
     }
 
     ui_clock_widget_update(&s_clock_widget,
-                            s_time.hour, s_time.min, s_time.sec,
-                            s_time.month, s_time.day, s_time.wday);
+                            s_display_time.hour, s_display_time.min, s_display_time.sec,
+                            s_display_time.month, s_display_time.day, s_display_time.wday);
 }
 
 /* -----------------------------------------------------------------------
@@ -314,11 +321,41 @@ static void update_system(void)
 }
 
 /* -----------------------------------------------------------------------
+ * Self-incrementing clock helpers
+ * ----------------------------------------------------------------------- */
+
+/* Advance display time by one second in-place. */
+static void time_tick(monitor_time_t *t)
+{
+    t->sec++;
+    if (t->sec < 60) return;
+    t->sec = 0;
+    t->min++;
+    if (t->min < 60) return;
+    t->min = 0;
+    t->hour++;
+    if (t->hour < 24) return;
+    t->hour = 0;
+}
+
+/* Return the absolute second-of-day difference between two time structs.
+ * Handles midnight wrap-around (max gap = 43200 s = 12 h). */
+static int time_sec_diff(const monitor_time_t *a, const monitor_time_t *b)
+{
+    int sa = (int)a->hour * 3600 + (int)a->min * 60 + (int)a->sec;
+    int sb = (int)b->hour * 3600 + (int)b->min * 60 + (int)b->sec;
+    int d  = sa - sb;
+    if (d >  43200) d -= 86400;
+    if (d < -43200) d += 86400;
+    return d < 0 ? -d : d;
+}
+
+/* -----------------------------------------------------------------------
  * Master 1-second timer — runs on LVGL task, safe to touch widgets
  * ----------------------------------------------------------------------- */
 static void monitor_timer_cb(lv_timer_t *t)
 {
-    /* Drain time queue */
+    /* Drain time queue — keep only the latest entry */
     monitor_time_t time_d;
     bool got_time = false;
     while (s_time_queue && xQueueReceive(s_time_queue, &time_d, 0) == pdTRUE)
@@ -328,12 +365,34 @@ static void monitor_timer_cb(lv_timer_t *t)
         s_time          = time_d;
         s_time_received = true;
         s_time_timeout  = 0;
+
+        if (!s_time_received) {
+            /* First sync: initialise display time directly */
+            s_display_time = time_d;
+        } else {
+            /* Already running: only correct if drift exceeds 1 second.
+             * Small jitter from WinForms timer is ignored so the display
+             * does not flicker on every tick. */
+            if (time_sec_diff(&time_d, &s_display_time) > 1) {
+                s_display_time = time_d;
+            }
+        }
     } else if (s_time_received) {
         s_time_timeout++;
         if (s_time_timeout >= 3) {
             s_time_received = false;
             s_time_timeout  = 0;
         }
+    }
+
+    /* Advance display clock by one second regardless of whether the PC sent
+     * a packet this tick — keeps the display smooth even if a packet is late. */
+    if (s_time_received) {
+        time_tick(&s_display_time);
+        /* Carry over date/wday fields from last received packet */
+        s_display_time.month = s_time.month;
+        s_display_time.day   = s_time.day;
+        s_display_time.wday  = s_time.wday;
     }
 
     /* Drain data queue */
@@ -513,13 +572,15 @@ void ui_monitor_push_data(const monitor_data_t *data)
  * Only queue operations allowed here; no LVGL calls.
  * ----------------------------------------------------------------------- */
 static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
-                                   uint8_t ram_usage, uint8_t gpu_usage)
+                                   uint8_t ram_usage, uint8_t gpu_usage,
+                                   uint8_t gpu_temp)
 {
     monitor_data_t d = {
         .cpu_usage = (float)cpu_usage,
         .cpu_temp  = (float)cpu_temp,
         .ram_usage = (float)ram_usage,
         .gpu_usage = (float)gpu_usage,
+        .gpu_temp  = (float)gpu_temp,
     };
     ui_monitor_push_data(&d);
 }

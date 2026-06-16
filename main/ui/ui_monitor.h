@@ -33,6 +33,7 @@ typedef struct {
     float    cpu_temp;    /* degrees C   */
     float    ram_usage;   /* 0.0 - 100.0 */
     float    gpu_usage;   /* 0.0 - 100.0 */
+    float    gpu_temp;    /* degrees C   */
 } monitor_data_t;
 
 void ui_monitor_push_data(const monitor_data_t *data);

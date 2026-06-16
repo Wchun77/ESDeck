@@ -5,6 +5,10 @@
 #include "tinyusb.h"
 #include "tusb.h"
 
+/* Feature report payload size (bytes). Must match the HID descriptor
+ * Report Count and the PC-side REPORT_SIZE (which adds 1 for Report ID). */
+#define HID_FEATURE_PAYLOAD_SIZE 64
+
 /* Monitor OUT report command bytes (PC -> ESP) */
 #define HID_MON_CMD_DATA         0x03
 #define HID_MON_CMD_TIME         0x04
@@ -37,7 +41,8 @@ void usb_hid_monitor_reply_mode(bool in_monitor);
 /* Register callback invoked when PC sends monitor data (OUT report).
  * Pass NULL to unregister. Called from the TinyUSB task context. */
 void usb_hid_set_monitor_cb(void (*cb)(uint8_t cpu_usage, uint8_t cpu_temp,
-                                       uint8_t ram_usage, uint8_t gpu_usage));
+                                       uint8_t ram_usage, uint8_t gpu_usage,
+                                       uint8_t gpu_temp));
 
 /* Register callback invoked when PC sends CMD_TIME.
  * Pass NULL to unregister. Called from the TinyUSB task context. */
