@@ -35,13 +35,42 @@ typedef struct {
     int      sep_width;
 } mon_clock_cfg_t;
 
-typedef struct {
-    char bg_image[MON_CFG_BG_LEN];
-} mon_system_cfg_t;
+/* Maximum number of data pages (excluding the fixed clock page). */
+#define MON_PAGE_MAX        3
+
+/* Maximum cells per data page. */
+#define MON_PAGE_CELLS      4
+
+/* Maximum length of a page name. */
+#define MON_PAGE_NAME_LEN   32
+
+/* Cell data source identifiers.
+ * MON_CELL_NONE means the slot is empty (null in JSON). */
+typedef enum {
+    MON_CELL_NONE = 0,
+    MON_CELL_CPU_USAGE,
+    MON_CELL_CPU_TEMP,
+    MON_CELL_CPU_FREQ,
+    MON_CELL_RAM_USAGE,
+    MON_CELL_GPU_USAGE,
+    MON_CELL_GPU_TEMP,
+    MON_CELL_GPU_VRAM,
+    MON_CELL_NET_UP,
+    MON_CELL_NET_DOWN,
+    MON_CELL_DISK_USAGE,
+    MON_CELL_COUNT,
+} mon_cell_id_t;
 
 typedef struct {
-    mon_clock_cfg_t  clock;
-    mon_system_cfg_t system;
+    char         name[MON_PAGE_NAME_LEN];
+    char         bg_image[MON_CFG_BG_LEN];
+    mon_cell_id_t cells[MON_PAGE_CELLS];  /* MON_CELL_NONE = empty slot */
+} mon_page_cfg_t;
+
+typedef struct {
+    mon_clock_cfg_t clock;
+    mon_page_cfg_t  pages[MON_PAGE_MAX];
+    int             page_count;           /* 0 = no data pages */
 } monitor_cfg_t;
 
 /*

@@ -42,7 +42,7 @@ void usb_hid_monitor_reply_mode(bool in_monitor);
  * Pass NULL to unregister. Called from the TinyUSB task context. */
 void usb_hid_set_monitor_cb(void (*cb)(uint8_t cpu_usage, uint8_t cpu_temp,
                                        uint8_t ram_usage, uint8_t gpu_usage,
-                                       uint8_t gpu_temp));
+                                       uint8_t gpu_temp, uint8_t gpu_vram));
 
 /* Register callback invoked when PC sends CMD_TIME.
  * Pass NULL to unregister. Called from the TinyUSB task context. */

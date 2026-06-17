@@ -24,13 +24,18 @@
  * Page indices
  * ----------------------------------------------------------------------- */
 
+/* Maximum total pages: 1 clock + MON_PAGE_MAX data pages */
+#define MON_TOTAL_PAGE_MAX  (1 + MON_PAGE_MAX)
+#define MON_PAGE_IDX_CLOCK  0
+
 /* -----------------------------------------------------------------------
  * State
  * ----------------------------------------------------------------------- */
 static lv_obj_t  *s_sidebar_pages  = NULL;
-static lv_obj_t  *s_sidebar_btns[MON_PAGE_COUNT];
-static lv_obj_t  *s_pages[MON_PAGE_COUNT];
-static int        s_cur_page       = MON_PAGE_CLOCK;
+static lv_obj_t  *s_sidebar_btns[MON_TOTAL_PAGE_MAX];
+static lv_obj_t  *s_pages[MON_TOTAL_PAGE_MAX];
+static int        s_total_pages    = 1;   /* clock always present */
+static int        s_cur_page       = MON_PAGE_IDX_CLOCK;
 static lv_timer_t *s_clock_timer   = NULL;
 
 /* Clock page widget */
@@ -39,15 +44,9 @@ static ui_clock_widget_t s_clock_widget;
 /* Current monitor config -- loaded on enter, valid until exit */
 static monitor_cfg_t s_mon_cfg;
 
-/* System page widgets */
-static lv_obj_t  *s_sys_cpu_bar   = NULL;
-static lv_obj_t  *s_sys_cpu_lbl   = NULL;
-static lv_obj_t  *s_sys_ram_bar   = NULL;
-static lv_obj_t  *s_sys_ram_lbl   = NULL;
-static lv_obj_t  *s_sys_temp_bar  = NULL;
-static lv_obj_t  *s_sys_temp_lbl  = NULL;
-static lv_obj_t  *s_sys_gpu_bar   = NULL;
-static lv_obj_t  *s_sys_gpu_lbl   = NULL;
+/* Data page cell widgets [page_idx][cell_idx] (page_idx=0 unused, clock is separate) */
+static lv_obj_t  *s_cell_lbl[MON_TOTAL_PAGE_MAX][MON_PAGE_CELLS];
+static lv_obj_t  *s_cell_bar[MON_TOTAL_PAGE_MAX][MON_PAGE_CELLS];
 
 /* -----------------------------------------------------------------------
  * Queues — written from TinyUSB task, read from LVGL timer (safe).
@@ -77,7 +76,7 @@ static int  s_time_timeout   = 0;
 /* Forward declarations — called from TinyUSB task via usb_hid */
 static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
                                    uint8_t ram_usage, uint8_t gpu_usage,
-                                   uint8_t gpu_temp);
+                                   uint8_t gpu_temp, uint8_t gpu_vram);
 static void ui_monitor_on_hid_time(uint8_t hour, uint8_t min, uint8_t sec,
                                    uint8_t month, uint8_t day, uint8_t wday);
 
@@ -87,6 +86,7 @@ static void ui_monitor_on_hid_time(uint8_t hour, uint8_t min, uint8_t sec,
 static void sidebar_btn_cb(lv_event_t *e)
 {
     int idx = (int)(uintptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_total_pages) return;
     if (idx == s_cur_page) return;
 
     lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page],
@@ -128,7 +128,7 @@ static lv_obj_t *make_page(lv_obj_t *parent)
 static void build_clock_page(lv_obj_t *parent)
 {
     /* Background image from monitor img manager */
-    lv_img_dsc_t *bg_dsc = ui_monitor_img_get(MON_PAGE_CLOCK);
+    lv_img_dsc_t *bg_dsc = ui_monitor_img_get(MON_PAGE_IDX_CLOCK);
     if (bg_dsc) {
         int      page_w   = CONTENT_W;
         int      page_h   = CONTENT_H;
@@ -245,10 +245,53 @@ static lv_obj_t *make_cell(lv_obj_t *parent, int col, int row,
     return cell;
 }
 
-static void build_system_page(lv_obj_t *parent)
+/* -----------------------------------------------------------------------
+ * Cell metadata lookup
+ * ----------------------------------------------------------------------- */
+typedef struct {
+    const char *label;   /* display name shown above the bar */
+    const char *unit;    /* unit suffix for value string     */
+    int         bar_max; /* bar upper bound                  */
+    bool        is_temp; /* true = clamp bar to 100          */
+} cell_meta_t;
+
+static const cell_meta_t s_cell_meta[MON_CELL_COUNT] = {
+    [MON_CELL_NONE]       = { "",           "",     100, false },
+    [MON_CELL_CPU_USAGE]  = { "CPU Usage",  "%",    100, false },
+    [MON_CELL_CPU_TEMP]   = { "CPU Temp",   " C",   100, true  },
+    [MON_CELL_CPU_FREQ]   = { "CPU Freq",   " GHz", 100, false },
+    [MON_CELL_RAM_USAGE]  = { "RAM Usage",  "%",    100, false },
+    [MON_CELL_GPU_USAGE]  = { "GPU Usage",  "%",    100, false },
+    [MON_CELL_GPU_TEMP]   = { "GPU Temp",   " C",   100, true  },
+    [MON_CELL_GPU_VRAM]   = { "VRAM",       "%",    100, false },
+    [MON_CELL_NET_UP]     = { "Net Up",     " MB/s",100, false },
+    [MON_CELL_NET_DOWN]   = { "Net Down",   " MB/s",100, false },
+    [MON_CELL_DISK_USAGE] = { "Disk",       "%",    100, false },
+};
+
+/* Retrieve the current float value for a given cell id from s_data. */
+static float cell_value(mon_cell_id_t id)
 {
-    /* Background image -- same zoom-fill logic as build_clock_page */
-    lv_img_dsc_t *bg_dsc = ui_monitor_img_get(MON_PAGE_SYSTEM);
+    switch (id) {
+        case MON_CELL_CPU_USAGE:  return s_data.cpu_usage;
+        case MON_CELL_CPU_TEMP:   return s_data.cpu_temp;
+        case MON_CELL_RAM_USAGE:  return s_data.ram_usage;
+        case MON_CELL_GPU_USAGE:  return s_data.gpu_usage;
+        case MON_CELL_GPU_TEMP:   return s_data.gpu_temp;
+        case MON_CELL_GPU_VRAM:   return s_data.gpu_vram;
+        default:                  return 0.0f;
+    }
+}
+
+/* -----------------------------------------------------------------------
+ * Dynamic data page builder
+ * ----------------------------------------------------------------------- */
+static void build_data_page(lv_obj_t *parent, int page_idx)
+{
+    const mon_page_cfg_t *pg = &s_mon_cfg.pages[page_idx - 1]; /* page_idx 1-based for data */
+
+    /* Background image */
+    lv_img_dsc_t *bg_dsc = ui_monitor_img_get(page_idx);
     if (bg_dsc) {
         int      page_w   = CONTENT_W;
         int      page_h   = CONTENT_H;
@@ -274,50 +317,56 @@ static void build_system_page(lv_obj_t *parent)
         lv_obj_clear_flag(mask, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     }
 
-    make_cell(parent, 0, 0, "CPU Usage",
-              &s_sys_cpu_lbl, &s_sys_cpu_bar);
-    make_cell(parent, 1, 0, "CPU Temp",
-              &s_sys_temp_lbl, &s_sys_temp_bar);
-    make_cell(parent, 0, 1, "RAM Usage",
-              &s_sys_ram_lbl, &s_sys_ram_bar);
-    make_cell(parent, 1, 1, "GPU Usage",
-              &s_sys_gpu_lbl, &s_sys_gpu_bar);
+    /* Build cells from JSON config -- 2x2 grid, col-major order:
+     * cell[0]=top-left  cell[1]=top-right
+     * cell[2]=bot-left  cell[3]=bot-right */
+    for (int j = 0; j < MON_PAGE_CELLS; j++) {
+        mon_cell_id_t id = pg->cells[j];
+        if (id == MON_CELL_NONE) continue;
+
+        int col = j % 2;
+        int row = j / 2;
+        make_cell(parent, col, row, s_cell_meta[id].label,
+                  &s_cell_lbl[page_idx][j],
+                  &s_cell_bar[page_idx][j]);
+    }
 }
 
-static void update_system(void)
+/* -----------------------------------------------------------------------
+ * Dynamic data page updater
+ * ----------------------------------------------------------------------- */
+static void update_data_pages(void)
 {
-    if (!s_sys_cpu_lbl) return;
-
     char buf[16];
 
-    if (!s_data_received) {
-        lv_label_set_text(s_sys_cpu_lbl,  "-");
-        lv_label_set_text(s_sys_temp_lbl, "-");
-        lv_label_set_text(s_sys_ram_lbl,  "-");
-        lv_label_set_text(s_sys_gpu_lbl,  "-");
-        lv_bar_set_value(s_sys_cpu_bar,  0, LV_ANIM_OFF);
-        lv_bar_set_value(s_sys_temp_bar, 0, LV_ANIM_OFF);
-        lv_bar_set_value(s_sys_ram_bar,  0, LV_ANIM_OFF);
-        lv_bar_set_value(s_sys_gpu_bar,  0, LV_ANIM_OFF);
-        return;
+    for (int pi = 1; pi < s_total_pages; pi++) {
+        const mon_page_cfg_t *pg = &s_mon_cfg.pages[pi - 1];
+
+        for (int j = 0; j < MON_PAGE_CELLS; j++) {
+            lv_obj_t *lbl = s_cell_lbl[pi][j];
+            lv_obj_t *bar = s_cell_bar[pi][j];
+            if (!lbl || !bar) continue;
+
+            mon_cell_id_t id = pg->cells[j];
+
+            if (!s_data_received) {
+                lv_label_set_text(lbl, "-");
+                lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+                continue;
+            }
+
+            float v = cell_value(id);
+            const cell_meta_t *m = &s_cell_meta[id];
+
+            if (m->is_temp)
+                snprintf(buf, sizeof(buf), "%.0f%s", v, m->unit);
+            else
+                snprintf(buf, sizeof(buf), "%.1f%s", v, m->unit);
+
+            lv_label_set_text(lbl, buf);
+            lv_bar_set_value(bar, (int)fminf(v, (float)m->bar_max), LV_ANIM_ON);
+        }
     }
-
-    snprintf(buf, sizeof(buf), "%.1f%%", s_data.cpu_usage);
-    lv_label_set_text(s_sys_cpu_lbl, buf);
-    lv_bar_set_value(s_sys_cpu_bar, (int)s_data.cpu_usage, LV_ANIM_ON);
-
-    snprintf(buf, sizeof(buf), "%.0f C", s_data.cpu_temp);
-    lv_label_set_text(s_sys_temp_lbl, buf);
-    lv_bar_set_value(s_sys_temp_bar,
-                     (int)fminf(s_data.cpu_temp, 100.0f), LV_ANIM_ON);
-
-    snprintf(buf, sizeof(buf), "%.1f%%", s_data.ram_usage);
-    lv_label_set_text(s_sys_ram_lbl, buf);
-    lv_bar_set_value(s_sys_ram_bar, (int)s_data.ram_usage, LV_ANIM_ON);
-
-    snprintf(buf, sizeof(buf), "%.1f%%", s_data.gpu_usage);
-    lv_label_set_text(s_sys_gpu_lbl, buf);
-    lv_bar_set_value(s_sys_gpu_bar, (int)s_data.gpu_usage, LV_ANIM_ON);
 }
 
 /* -----------------------------------------------------------------------
@@ -414,7 +463,7 @@ static void monitor_timer_cb(lv_timer_t *t)
     }
 
     update_clock();
-    update_system();
+    update_data_pages();
 }
 
 /* -----------------------------------------------------------------------
@@ -440,9 +489,23 @@ void ui_monitor_enter(lv_obj_t *sidebar)
     lv_obj_set_flex_flow(s_sidebar_pages, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scrollbar_mode(s_sidebar_pages, LV_SCROLLBAR_MODE_OFF);
 
-    static const char *page_names[MON_PAGE_COUNT] = { "Clock", "System" };
+    /* Load config first so page_count is known */
+    ui_monitor_config_load(&s_mon_cfg);
+    s_total_pages = 1 + s_mon_cfg.page_count;   /* clock + data pages */
 
-    for (int i = 0; i < MON_PAGE_COUNT; i++) {
+    /* Clamp to array bounds just in case */
+    if (s_total_pages > MON_TOTAL_PAGE_MAX)
+        s_total_pages = MON_TOTAL_PAGE_MAX;
+
+    memset(s_cell_lbl, 0, sizeof(s_cell_lbl));
+    memset(s_cell_bar, 0, sizeof(s_cell_bar));
+
+    /* Sidebar buttons -- clock first, then data pages in JSON order */
+    for (int i = 0; i < s_total_pages; i++) {
+        const char *name = (i == MON_PAGE_IDX_CLOCK)
+                           ? "Clock"
+                           : s_mon_cfg.pages[i - 1].name;
+
         lv_obj_t *btn = lv_btn_create(s_sidebar_pages);
         lv_obj_set_size(btn, 64, 56);
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x2a2a2a), 0);
@@ -452,7 +515,7 @@ void ui_monitor_enter(lv_obj_t *sidebar)
         s_sidebar_btns[i] = btn;
 
         lv_obj_t *lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, page_names[i]);
+        lv_label_set_text(lbl, name);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xcccccc), 0);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
@@ -461,29 +524,32 @@ void ui_monitor_enter(lv_obj_t *sidebar)
         lv_obj_center(lbl);
     }
 
-    /* Highlight first page */
-    lv_obj_set_style_bg_color(s_sidebar_btns[MON_PAGE_CLOCK],
+    /* Highlight clock button */
+    lv_obj_set_style_bg_color(s_sidebar_btns[MON_PAGE_IDX_CLOCK],
                               lv_color_hex(0x0055cc), 0);
 
-    /* Load config then background images */
-    ui_monitor_config_load(&s_mon_cfg);
-
+    /* Load background images */
     char bg_path[MON_CFG_BG_LEN + 16];
     ui_monitor_config_bg_path(s_mon_cfg.clock.bg_image, bg_path, sizeof(bg_path));
-    ui_monitor_img_set_path(MON_PAGE_CLOCK, bg_path);
+    ui_monitor_img_set_path(MON_PAGE_IDX_CLOCK, bg_path);
 
-    ui_monitor_config_bg_path(s_mon_cfg.system.bg_image, bg_path, sizeof(bg_path));
-    ui_monitor_img_set_path(MON_PAGE_SYSTEM, bg_path);
+    for (int i = 0; i < s_mon_cfg.page_count; i++) {
+        ui_monitor_config_bg_path(s_mon_cfg.pages[i].bg_image, bg_path, sizeof(bg_path));
+        ui_monitor_img_set_path(i + 1, bg_path);
+    }
 
     ui_monitor_img_load_all();
 
     /* Content pages */
-    s_pages[MON_PAGE_CLOCK]  = make_page(scr);
-    s_pages[MON_PAGE_SYSTEM] = make_page(scr);
-    lv_obj_add_flag(s_pages[MON_PAGE_SYSTEM], LV_OBJ_FLAG_HIDDEN);
+    for (int i = 0; i < s_total_pages; i++) {
+        s_pages[i] = make_page(scr);
+        if (i != MON_PAGE_IDX_CLOCK)
+            lv_obj_add_flag(s_pages[i], LV_OBJ_FLAG_HIDDEN);
+    }
 
-    build_clock_page(s_pages[MON_PAGE_CLOCK]);
-    build_system_page(s_pages[MON_PAGE_SYSTEM]);
+    build_clock_page(s_pages[MON_PAGE_IDX_CLOCK]);
+    for (int i = 1; i < s_total_pages; i++)
+        build_data_page(s_pages[i], i);
 
     /* Bring sidebar and context panel above the new content pages */
     lv_obj_t *ctx = ui_get_context_panel();
@@ -494,7 +560,7 @@ void ui_monitor_enter(lv_obj_t *sidebar)
     s_clock_timer = lv_timer_create(monitor_timer_cb, 1000, NULL);
     lv_timer_ready(s_clock_timer);
 
-    s_cur_page = MON_PAGE_CLOCK;
+    s_cur_page = MON_PAGE_IDX_CLOCK;
 
     /* Register HID callbacks and notify PC to start sending data */
     usb_hid_set_monitor_cb(ui_monitor_on_hid_data);
@@ -521,7 +587,7 @@ void ui_monitor_exit(void)
     }
 
     /* Destroy clock widget before deleting its parent page.
-     * w->root is a child of s_pages[MON_PAGE_CLOCK] -- must be freed
+     * w->root is a child of s_pages[MON_PAGE_IDX_CLOCK] -- must be freed
      * first, otherwise lv_obj_del on the page fires events into freed memory. */
     ui_clock_widget_destroy(&s_clock_widget);
 
@@ -530,7 +596,7 @@ void ui_monitor_exit(void)
         s_sidebar_pages = NULL;
     }
 
-    for (int i = 0; i < MON_PAGE_COUNT; i++) {
+    for (int i = 0; i < s_total_pages; i++) {
         if (s_pages[i]) {
             lv_obj_del(s_pages[i]);
             s_pages[i] = NULL;
@@ -542,17 +608,11 @@ void ui_monitor_exit(void)
      * Must come after lv_obj_del so no lv_img is still referencing the buffer. */
     ui_monitor_img_free_all();
 
-    /* Clear system widget pointers */
-    s_sys_cpu_bar    = NULL;
-    s_sys_cpu_lbl    = NULL;
-    s_sys_ram_bar    = NULL;
-    s_sys_ram_lbl    = NULL;
-    s_sys_temp_bar   = NULL;
-    s_sys_temp_lbl   = NULL;
-    s_sys_gpu_bar    = NULL;
-    s_sys_gpu_lbl    = NULL;
+    memset(s_cell_lbl, 0, sizeof(s_cell_lbl));
+    memset(s_cell_bar, 0, sizeof(s_cell_bar));
+    s_total_pages = 1;
 
-    s_cur_page      = MON_PAGE_CLOCK;
+    s_cur_page      = MON_PAGE_IDX_CLOCK;
     s_data_received = false;
     s_data_timeout  = 0;
     s_time_received = false;
@@ -573,7 +633,7 @@ void ui_monitor_push_data(const monitor_data_t *data)
  * ----------------------------------------------------------------------- */
 static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
                                    uint8_t ram_usage, uint8_t gpu_usage,
-                                   uint8_t gpu_temp)
+                                   uint8_t gpu_temp, uint8_t gpu_vram)
 {
     monitor_data_t d = {
         .cpu_usage = (float)cpu_usage,
@@ -581,6 +641,7 @@ static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
         .ram_usage = (float)ram_usage,
         .gpu_usage = (float)gpu_usage,
         .gpu_temp  = (float)gpu_temp,
+        .gpu_vram  = (float)gpu_vram,
     };
     ui_monitor_push_data(&d);
 }

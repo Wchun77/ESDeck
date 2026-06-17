@@ -81,8 +81,30 @@ static int int_field(cJSON *obj, const char *key, int fallback)
 }
 
 /* -----------------------------------------------------------------------
- * Public API
+ * Cell ID lookup table
  * ----------------------------------------------------------------------- */
+static const struct { const char *name; mon_cell_id_t id; } s_cell_map[] = {
+    { "cpu_usage",  MON_CELL_CPU_USAGE  },
+    { "cpu_temp",   MON_CELL_CPU_TEMP   },
+    { "cpu_freq",   MON_CELL_CPU_FREQ   },
+    { "ram_usage",  MON_CELL_RAM_USAGE  },
+    { "gpu_usage",  MON_CELL_GPU_USAGE  },
+    { "gpu_temp",   MON_CELL_GPU_TEMP   },
+    { "gpu_vram",   MON_CELL_GPU_VRAM   },
+    { "net_up",     MON_CELL_NET_UP     },
+    { "net_down",   MON_CELL_NET_DOWN   },
+    { "disk_usage", MON_CELL_DISK_USAGE },
+};
+
+static mon_cell_id_t parse_cell_id(const char *s)
+{
+    if (!s) return MON_CELL_NONE;
+    for (size_t i = 0; i < sizeof(s_cell_map) / sizeof(s_cell_map[0]); i++) {
+        if (strcmp(s, s_cell_map[i].name) == 0)
+            return s_cell_map[i].id;
+    }
+    return MON_CELL_NONE;
+}
 void ui_monitor_config_load(monitor_cfg_t *cfg)
 {
     set_defaults(cfg);
@@ -127,10 +149,37 @@ void ui_monitor_config_load(monitor_cfg_t *cfg)
         cfg->clock.sep_width = int_field  (clk, "sep_width", MON_CFG_DEF_SEP_WIDTH);
     }
 
-    /* System section */
-    cJSON *sys = cJSON_GetObjectItem(root, "system");
-    if (cJSON_IsObject(sys)) {
-        str_field(sys, "bg_image", cfg->system.bg_image, MON_CFG_BG_LEN);
+    /* Pages array */
+    cJSON *pages = cJSON_GetObjectItem(root, "pages");
+    if (cJSON_IsArray(pages)) {
+        int n = cJSON_GetArraySize(pages);
+        if (n > MON_PAGE_MAX) n = MON_PAGE_MAX;
+        cfg->page_count = n;
+
+        for (int i = 0; i < n; i++) {
+            cJSON *pg = cJSON_GetArrayItem(pages, i);
+            if (!cJSON_IsObject(pg)) continue;
+
+            mon_page_cfg_t *p = &cfg->pages[i];
+            str_field(pg, "name",     p->name,     MON_PAGE_NAME_LEN);
+            str_field(pg, "bg_image", p->bg_image,  MON_CFG_BG_LEN);
+
+            /* Default page name if absent */
+            if (p->name[0] == '\0')
+                snprintf(p->name, MON_PAGE_NAME_LEN, "Page %d", i + 1);
+
+            cJSON *cells = cJSON_GetObjectItem(pg, "cells");
+            if (cJSON_IsArray(cells)) {
+                int nc = cJSON_GetArraySize(cells);
+                if (nc > MON_PAGE_CELLS) nc = MON_PAGE_CELLS;
+                for (int j = 0; j < nc; j++) {
+                    cJSON *cell = cJSON_GetArrayItem(cells, j);
+                    if (cJSON_IsString(cell))
+                        p->cells[j] = parse_cell_id(cell->valuestring);
+                    /* null in JSON -> MON_CELL_NONE (already zero from memset) */
+                }
+            }
+        }
     }
 
     cJSON_Delete(root);
