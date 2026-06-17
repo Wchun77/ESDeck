@@ -24,8 +24,7 @@
  * Page indices
  * ----------------------------------------------------------------------- */
 
-/* Maximum total pages: 1 clock + MON_PAGE_MAX data pages */
-#define MON_TOTAL_PAGE_MAX  (1 + MON_PAGE_MAX)
+/* Clock page is always index 0. */
 #define MON_PAGE_IDX_CLOCK  0
 
 /* -----------------------------------------------------------------------
@@ -76,7 +75,10 @@ static int  s_time_timeout   = 0;
 /* Forward declarations — called from TinyUSB task via usb_hid */
 static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
                                    uint8_t ram_usage, uint8_t gpu_usage,
-                                   uint8_t gpu_temp, uint8_t gpu_vram);
+                                   uint8_t gpu_temp,  uint8_t gpu_vram,
+                                   uint8_t cpu_freq,  uint8_t net_up,
+                                   uint8_t net_down,  uint8_t disk_usage,
+                                   uint8_t reserved);
 static void ui_monitor_on_hid_time(uint8_t hour, uint8_t min, uint8_t sec,
                                    uint8_t month, uint8_t day, uint8_t wday);
 
@@ -197,7 +199,8 @@ static void update_clock(void)
 static lv_obj_t *make_cell(lv_obj_t *parent, int col, int row,
                             const char *title,
                             lv_obj_t **out_val_lbl,
-                            lv_obj_t **out_bar)
+                            lv_obj_t **out_bar,
+                            int bar_max)
 {
     int x = col * QUAD_W + CELL_OFF_X;
     int y = row * QUAD_H + CELL_OFF_Y;
@@ -220,27 +223,29 @@ static lv_obj_t *make_cell(lv_obj_t *parent, int col, int row,
     lv_obj_set_style_text_color(title_lbl, lv_color_hex(0x666666), 0);
     lv_obj_align(title_lbl, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    /* Value */
+    /* Value label -- same position regardless of bar presence */
     lv_obj_t *val_lbl = lv_label_create(cell);
     lv_obj_set_style_text_font(val_lbl, &lv_font_montserrat_36, 0);
     lv_obj_set_style_text_color(val_lbl, lv_color_hex(0xffffff), 0);
     lv_obj_align(val_lbl, LV_ALIGN_CENTER, 0, -10);
     lv_label_set_text(val_lbl, "-");
 
-    /* Progress bar */
-    lv_obj_t *bar = lv_bar_create(cell);
-    lv_obj_set_size(bar, CELL_W - 32, 8);
-    lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_bg_color(bar, lv_color_hex(0x333333), 0);
-    lv_obj_set_style_bg_color(bar, lv_color_hex(0x0055cc),
-                              LV_PART_INDICATOR);
-    lv_obj_set_style_radius(bar, 4, 0);
-    lv_obj_set_style_radius(bar, 4, LV_PART_INDICATOR);
-    lv_bar_set_range(bar, 0, 100);
-    lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+    if (bar_max > 0) {
+        lv_obj_t *bar = lv_bar_create(cell);
+        lv_obj_set_size(bar, CELL_W - 32, 8);
+        lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_obj_set_style_bg_color(bar, lv_color_hex(0x333333), 0);
+        lv_obj_set_style_bg_color(bar, lv_color_hex(MON_BAR_COL_LOW), LV_PART_INDICATOR);
+        lv_obj_set_style_radius(bar, 4, 0);
+        lv_obj_set_style_radius(bar, 4, LV_PART_INDICATOR);
+        lv_bar_set_range(bar, 0, bar_max);
+        lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+        if (out_bar) *out_bar = bar;
+    } else {
+        if (out_bar) *out_bar = NULL;
+    }
 
     if (out_val_lbl) *out_val_lbl = val_lbl;
-    if (out_bar)     *out_bar     = bar;
 
     return cell;
 }
@@ -249,24 +254,24 @@ static lv_obj_t *make_cell(lv_obj_t *parent, int col, int row,
  * Cell metadata lookup
  * ----------------------------------------------------------------------- */
 typedef struct {
-    const char *label;   /* display name shown above the bar */
-    const char *unit;    /* unit suffix for value string     */
-    int         bar_max; /* bar upper bound                  */
-    bool        is_temp; /* true = clamp bar to 100          */
+    const char *label;    /* display name shown above the bar */
+    const char *unit;     /* unit suffix for value string     */
+    int         bar_max;  /* bar upper bound; 0 = no bar      */
+    bool        is_temp;  /* true = use 0 decimal for value   */
 } cell_meta_t;
 
 static const cell_meta_t s_cell_meta[MON_CELL_COUNT] = {
-    [MON_CELL_NONE]       = { "",           "",     100, false },
-    [MON_CELL_CPU_USAGE]  = { "CPU Usage",  "%",    100, false },
-    [MON_CELL_CPU_TEMP]   = { "CPU Temp",   " C",   100, true  },
-    [MON_CELL_CPU_FREQ]   = { "CPU Freq",   " GHz", 100, false },
-    [MON_CELL_RAM_USAGE]  = { "RAM Usage",  "%",    100, false },
-    [MON_CELL_GPU_USAGE]  = { "GPU Usage",  "%",    100, false },
-    [MON_CELL_GPU_TEMP]   = { "GPU Temp",   " C",   100, true  },
-    [MON_CELL_GPU_VRAM]   = { "VRAM",       "%",    100, false },
-    [MON_CELL_NET_UP]     = { "Net Up",     " MB/s",100, false },
-    [MON_CELL_NET_DOWN]   = { "Net Down",   " MB/s",100, false },
-    [MON_CELL_DISK_USAGE] = { "Disk",       "%",    100, false },
+    [MON_CELL_NONE]       = { "",           "",      0,                 false },
+    [MON_CELL_CPU_USAGE]  = { "CPU Usage",  "%",     MON_BAR_MAX_USAGE, false },
+    [MON_CELL_CPU_TEMP]   = { "CPU Temp",   " C",    MON_BAR_MAX_TEMP,  true  },
+    [MON_CELL_CPU_FREQ]   = { "CPU Freq",   " MHz",  0,                 false },
+    [MON_CELL_RAM_USAGE]  = { "RAM Usage",  "%",     MON_BAR_MAX_USAGE, false },
+    [MON_CELL_GPU_USAGE]  = { "GPU Usage",  "%",     MON_BAR_MAX_USAGE, false },
+    [MON_CELL_GPU_TEMP]   = { "GPU Temp",   " C",    MON_BAR_MAX_TEMP,  true  },
+    [MON_CELL_GPU_VRAM]   = { "VRAM",       "%",     MON_BAR_MAX_USAGE, false },
+    [MON_CELL_NET_UP]     = { "Net Up",     " MB/s", 0,                 false },
+    [MON_CELL_NET_DOWN]   = { "Net Down",   " MB/s", 0,                 false },
+    [MON_CELL_DISK_USAGE] = { "Disk",       "%",     MON_BAR_MAX_USAGE, false },
 };
 
 /* Retrieve the current float value for a given cell id from s_data. */
@@ -275,10 +280,14 @@ static float cell_value(mon_cell_id_t id)
     switch (id) {
         case MON_CELL_CPU_USAGE:  return s_data.cpu_usage;
         case MON_CELL_CPU_TEMP:   return s_data.cpu_temp;
+        case MON_CELL_CPU_FREQ:   return s_data.cpu_freq;
         case MON_CELL_RAM_USAGE:  return s_data.ram_usage;
         case MON_CELL_GPU_USAGE:  return s_data.gpu_usage;
         case MON_CELL_GPU_TEMP:   return s_data.gpu_temp;
         case MON_CELL_GPU_VRAM:   return s_data.gpu_vram;
+        case MON_CELL_NET_UP:     return s_data.net_up;
+        case MON_CELL_NET_DOWN:   return s_data.net_down;
+        case MON_CELL_DISK_USAGE: return s_data.disk_usage;
         default:                  return 0.0f;
     }
 }
@@ -328,7 +337,10 @@ static void build_data_page(lv_obj_t *parent, int page_idx)
         int row = j / 2;
         make_cell(parent, col, row, s_cell_meta[id].label,
                   &s_cell_lbl[page_idx][j],
-                  &s_cell_bar[page_idx][j]);
+                  &s_cell_bar[page_idx][j],
+                  s_cell_meta[id].bar_max);
+
+        /* bar range is already set via make_cell's bar_max param */
     }
 }
 
@@ -344,14 +356,14 @@ static void update_data_pages(void)
 
         for (int j = 0; j < MON_PAGE_CELLS; j++) {
             lv_obj_t *lbl = s_cell_lbl[pi][j];
-            lv_obj_t *bar = s_cell_bar[pi][j];
-            if (!lbl || !bar) continue;
+            if (!lbl) continue;
 
+            lv_obj_t *bar = s_cell_bar[pi][j];  /* may be NULL if show_bar=false */
             mon_cell_id_t id = pg->cells[j];
 
             if (!s_data_received) {
                 lv_label_set_text(lbl, "-");
-                lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+                if (bar) lv_bar_set_value(bar, 0, LV_ANIM_OFF);
                 continue;
             }
 
@@ -364,7 +376,20 @@ static void update_data_pages(void)
                 snprintf(buf, sizeof(buf), "%.1f%s", v, m->unit);
 
             lv_label_set_text(lbl, buf);
-            lv_bar_set_value(bar, (int)fminf(v, (float)m->bar_max), LV_ANIM_ON);
+            if (bar) {
+                int bar_val = (int)fminf(v, (float)m->bar_max);
+                lv_bar_set_value(bar, bar_val, LV_ANIM_ON);
+
+                /* Five-step colour based on % of bar_max */
+                float pct = v / (float)m->bar_max * 100.0f;
+                uint32_t col;
+                if      (pct >= MON_BAR_THR_CRIT) col = MON_BAR_COL_CRIT;
+                else if (pct >= MON_BAR_THR_HIGH) col = MON_BAR_COL_WARN;
+                else if (pct >= MON_BAR_THR_MID)  col = MON_BAR_COL_HIGH;
+                else if (pct >= MON_BAR_THR_LOW)  col = MON_BAR_COL_MID;
+                else                              col = MON_BAR_COL_LOW;
+                lv_obj_set_style_bg_color(bar, lv_color_hex(col), LV_PART_INDICATOR);
+            }
         }
     }
 }
@@ -633,15 +658,23 @@ void ui_monitor_push_data(const monitor_data_t *data)
  * ----------------------------------------------------------------------- */
 static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
                                    uint8_t ram_usage, uint8_t gpu_usage,
-                                   uint8_t gpu_temp, uint8_t gpu_vram)
+                                   uint8_t gpu_temp,  uint8_t gpu_vram,
+                                   uint8_t cpu_freq,  uint8_t net_up,
+                                   uint8_t net_down,  uint8_t disk_usage,
+                                   uint8_t reserved)
 {
+    (void)reserved;
     monitor_data_t d = {
-        .cpu_usage = (float)cpu_usage,
-        .cpu_temp  = (float)cpu_temp,
-        .ram_usage = (float)ram_usage,
-        .gpu_usage = (float)gpu_usage,
-        .gpu_temp  = (float)gpu_temp,
-        .gpu_vram  = (float)gpu_vram,
+        .cpu_usage  = (float)cpu_usage,
+        .cpu_temp   = (float)cpu_temp,
+        .ram_usage  = (float)ram_usage,
+        .gpu_usage  = (float)gpu_usage,
+        .gpu_temp   = (float)gpu_temp,
+        .gpu_vram   = (float)gpu_vram,
+        .cpu_freq   = (float)cpu_freq * 100.0f,   /* decode MHz/100 -> MHz */
+        .net_up     = (float)net_up,
+        .net_down   = (float)net_down,
+        .disk_usage = (float)disk_usage,
     };
     ui_monitor_push_data(&d);
 }

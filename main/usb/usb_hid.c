@@ -82,7 +82,10 @@ static const char *s_string_desc[] = {
 /* Called when PC sends CMD_DATA */
 static void (*s_monitor_data_cb)(uint8_t cpu_usage, uint8_t cpu_temp,
                                  uint8_t ram_usage, uint8_t gpu_usage,
-                                 uint8_t gpu_temp, uint8_t gpu_vram) = NULL;
+                                 uint8_t gpu_temp,  uint8_t gpu_vram,
+                                 uint8_t cpu_freq,  uint8_t net_up,
+                                 uint8_t net_down,  uint8_t disk_usage,
+                                 uint8_t reserved) = NULL;
 
 /* Called when PC sends CMD_TIME */
 static void (*s_time_cb)(uint8_t hour, uint8_t min, uint8_t sec,
@@ -91,7 +94,9 @@ static void (*s_time_cb)(uint8_t hour, uint8_t min, uint8_t sec,
 /* Called when PC sends CMD_QUERY; returns true if currently in monitor mode */
 static bool (*s_mode_query_cb)(void) = NULL;
 
-void usb_hid_set_monitor_cb(void (*cb)(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t))
+void usb_hid_set_monitor_cb(void (*cb)(uint8_t, uint8_t, uint8_t, uint8_t,
+                                       uint8_t, uint8_t, uint8_t, uint8_t,
+                                       uint8_t, uint8_t, uint8_t))
 {
     s_monitor_data_cb = cb;
 }
@@ -215,9 +220,11 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
 
     uint8_t cmd = buffer[0];
 
-    if (cmd == HID_MON_CMD_DATA && bufsize >= 7) {
+    if (cmd == HID_MON_CMD_DATA && bufsize >= 12) {
         if (s_monitor_data_cb)
-            s_monitor_data_cb(buffer[1], buffer[2], buffer[3], buffer[4], buffer[5], buffer[6]);
+            s_monitor_data_cb(buffer[1], buffer[2], buffer[3], buffer[4],
+                              buffer[5], buffer[6], buffer[7], buffer[8],
+                              buffer[9], buffer[10], buffer[11]);
     }
     else if (cmd == HID_MON_CMD_TIME && bufsize >= 7) {
         if (s_time_cb) {

@@ -38,6 +38,9 @@ typedef struct {
 /* Maximum number of data pages (excluding the fixed clock page). */
 #define MON_PAGE_MAX        3
 
+/* Total pages including the fixed clock page. */
+#define MON_TOTAL_PAGE_MAX  (1 + MON_PAGE_MAX)
+
 /* Maximum cells per data page. */
 #define MON_PAGE_CELLS      4
 

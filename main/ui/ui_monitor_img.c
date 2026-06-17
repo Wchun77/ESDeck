@@ -1,5 +1,6 @@
 #include "ui_monitor_img.h"
 #include "ui_monitor.h"
+#include "ui_monitor_config.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include <string.h>
@@ -13,7 +14,7 @@ typedef struct {
     bool          loaded;
 } mon_img_entry_t;
 
-static mon_img_entry_t s_imgs[MON_PAGE_COUNT];
+static mon_img_entry_t s_imgs[MON_TOTAL_PAGE_MAX];
 
 /* -----------------------------------------------------------------------
  * Decode one JPEG/PNG from LVGL FS into a PSRAM buffer.
@@ -87,7 +88,7 @@ static bool decode_to_psram(const char *path, lv_img_dsc_t *dsc)
  * ----------------------------------------------------------------------- */
 void ui_monitor_img_set_path(int page_idx, const char *path)
 {
-    if (page_idx < 0 || page_idx >= MON_PAGE_COUNT) return;
+    if (page_idx < 0 || page_idx >= MON_TOTAL_PAGE_MAX) return;
 
     if (!path || path[0] == '\0') {
         s_imgs[page_idx].path[0] = '\0';
@@ -98,7 +99,7 @@ void ui_monitor_img_set_path(int page_idx, const char *path)
 
 void ui_monitor_img_load_all(void)
 {
-    for (int i = 0; i < MON_PAGE_COUNT; i++) {
+    for (int i = 0; i < MON_TOTAL_PAGE_MAX; i++) {
         if (s_imgs[i].path[0] == '\0') continue;
         if (s_imgs[i].loaded)          continue;
 
@@ -110,14 +111,14 @@ void ui_monitor_img_load_all(void)
 
 lv_img_dsc_t *ui_monitor_img_get(int page_idx)
 {
-    if (page_idx < 0 || page_idx >= MON_PAGE_COUNT) return NULL;
+    if (page_idx < 0 || page_idx >= MON_TOTAL_PAGE_MAX) return NULL;
     if (!s_imgs[page_idx].loaded)                   return NULL;
     return &s_imgs[page_idx].dsc;
 }
 
 void ui_monitor_img_free_all(void)
 {
-    for (int i = 0; i < MON_PAGE_COUNT; i++) {
+    for (int i = 0; i < MON_TOTAL_PAGE_MAX; i++) {
         if (s_imgs[i].loaded && s_imgs[i].dsc.data) {
             heap_caps_free((void *)s_imgs[i].dsc.data);
             s_imgs[i].dsc.data = NULL;
