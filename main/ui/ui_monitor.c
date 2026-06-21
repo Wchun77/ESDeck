@@ -220,7 +220,7 @@ static lv_obj_t *make_cell(lv_obj_t *parent, int col, int row,
     lv_obj_t *title_lbl = lv_label_create(cell);
     lv_label_set_text(title_lbl, title);
     lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(title_lbl, lv_color_hex(0x666666), 0);
+    lv_obj_set_style_text_color(title_lbl, lv_color_hex(0xaaaaaa), 0);
     lv_obj_align(title_lbl, LV_ALIGN_TOP_LEFT, 0, 0);
 
     /* Value label -- same position regardless of bar presence */
