@@ -264,7 +264,7 @@ static const cell_meta_t s_cell_meta[MON_CELL_COUNT] = {
     [MON_CELL_NONE]       = { "",           "",      0,                 false },
     [MON_CELL_CPU_USAGE]  = { "CPU Usage",  "%",     MON_BAR_MAX_USAGE, false },
     [MON_CELL_CPU_TEMP]   = { "CPU Temp",   " C",    MON_BAR_MAX_TEMP,  true  },
-    [MON_CELL_CPU_FREQ]   = { "CPU Freq",   " MHz",  0,                 false },
+    [MON_CELL_CPU_FREQ]   = { "CPU Freq",   " GHz",  0,                 false },
     [MON_CELL_RAM_USAGE]  = { "RAM Usage",  "%",     MON_BAR_MAX_USAGE, false },
     [MON_CELL_GPU_USAGE]  = { "GPU Usage",  "%",     MON_BAR_MAX_USAGE, false },
     [MON_CELL_GPU_TEMP]   = { "GPU Temp",   " C",    MON_BAR_MAX_TEMP,  true  },
@@ -671,7 +671,7 @@ static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
         .gpu_usage  = (float)gpu_usage,
         .gpu_temp   = (float)gpu_temp,
         .gpu_vram   = (float)gpu_vram,
-        .cpu_freq   = (float)cpu_freq * 100.0f,   /* decode MHz/100 -> MHz */
+        .cpu_freq = (float)cpu_freq * 100.0f / 1000.0f,  // MHz -> GHz
         .net_up     = (float)net_up,
         .net_down   = (float)net_down,
         .disk_usage = (float)disk_usage,
