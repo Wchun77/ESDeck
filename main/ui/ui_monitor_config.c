@@ -24,6 +24,11 @@ static void set_defaults(monitor_cfg_t *cfg)
     cfg->clock.col_sec   = MON_CFG_DEF_COL_SEC;
     cfg->clock.sep_color = MON_CFG_DEF_SEP_COLOR;
     cfg->clock.sep_width = MON_CFG_DEF_SEP_WIDTH;
+    cfg->clock.opa_time  = 255;
+    cfg->clock.opa_colon = 255;
+    cfg->clock.opa_date  = 255;
+    cfg->clock.opa_day   = 255;
+    cfg->clock.opa_sec   = 255;
 }
 
 static uint32_t parse_hex_color(const char *s, uint32_t fallback)
@@ -147,6 +152,11 @@ void ui_monitor_config_load(monitor_cfg_t *cfg)
         cfg->clock.col_sec   = color_field(clk, "col_sec",   MON_CFG_DEF_COL_SEC);
         cfg->clock.sep_color = color_field(clk, "sep_color", MON_CFG_DEF_SEP_COLOR);
         cfg->clock.sep_width = int_field  (clk, "sep_width", MON_CFG_DEF_SEP_WIDTH);
+        cfg->clock.opa_time  = (uint8_t)int_field(clk, "opa_time",  255);
+        cfg->clock.opa_colon = (uint8_t)int_field(clk, "opa_colon", 255);
+        cfg->clock.opa_date  = (uint8_t)int_field(clk, "opa_date",  255);
+        cfg->clock.opa_day   = (uint8_t)int_field(clk, "opa_day",   255);
+        cfg->clock.opa_sec   = (uint8_t)int_field(clk, "opa_sec",   255);
     }
 
     /* Pages array */

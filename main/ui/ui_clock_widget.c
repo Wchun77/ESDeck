@@ -41,6 +41,8 @@ static void rebuild_time_labels(ui_clock_widget_t *w)
     uint32_t col_colon = w->has_data
                          ? (w->colon_visible ? w->cfg_col_colon : 0x0a0a14)
                          : 0x111118;
+    lv_opa_t opa_time  = w->has_data ? w->cfg_opa_time  : LV_OPA_TRANSP;
+    lv_opa_t opa_colon = w->has_data ? w->cfg_opa_colon : LV_OPA_TRANSP;
 
     int hour = w->has_data ? w->cur_hour : 0;
     int min  = w->has_data ? w->cur_min  : 0;
@@ -50,21 +52,26 @@ static void rebuild_time_labels(ui_clock_widget_t *w)
     d[0] = '0' + hour / 10;
     lv_label_set_text(w->h_tens_label, d);
     lv_obj_set_style_text_color(w->h_tens_label, lv_color_hex(col_time), 0);
+    lv_obj_set_style_text_opa(w->h_tens_label, opa_time, 0);
 
     d[0] = '0' + hour % 10;
     lv_label_set_text(w->h_units_label, d);
     lv_obj_set_style_text_color(w->h_units_label, lv_color_hex(col_time), 0);
+    lv_obj_set_style_text_opa(w->h_units_label, opa_time, 0);
 
     lv_label_set_text(w->colon_label, ":");
     lv_obj_set_style_text_color(w->colon_label, lv_color_hex(col_colon), 0);
+    lv_obj_set_style_text_opa(w->colon_label, opa_colon, 0);
 
     d[0] = '0' + min / 10;
     lv_label_set_text(w->m_tens_label, d);
     lv_obj_set_style_text_color(w->m_tens_label, lv_color_hex(col_time), 0);
+    lv_obj_set_style_text_opa(w->m_tens_label, opa_time, 0);
 
     d[0] = '0' + min % 10;
     lv_label_set_text(w->m_units_label, d);
     lv_obj_set_style_text_color(w->m_units_label, lv_color_hex(col_time), 0);
+    lv_obj_set_style_text_opa(w->m_units_label, opa_time, 0);
 }
 
 static lv_font_t *load_font(const char *path, bool *fallback_flag,
@@ -98,6 +105,11 @@ void ui_clock_widget_create(ui_clock_widget_t *w, lv_obj_t *parent,
     w->cfg_col_date  = cfg ? cfg->col_date  : MON_CFG_DEF_COL_DATE;
     w->cfg_col_day   = cfg ? cfg->col_day   : MON_CFG_DEF_COL_DAY;
     w->cfg_col_sec   = cfg ? cfg->col_sec   : MON_CFG_DEF_COL_SEC;
+    w->cfg_opa_time  = cfg ? cfg->opa_time  : 255;
+    w->cfg_opa_colon = cfg ? cfg->opa_colon : 255;
+    w->cfg_opa_date  = cfg ? cfg->opa_date  : 255;
+    w->cfg_opa_day   = cfg ? cfg->opa_day   : 255;
+    w->cfg_opa_sec   = cfg ? cfg->opa_sec   : 255;
     w->cfg_sep_color = cfg ? cfg->sep_color : MON_CFG_DEF_SEP_COLOR;
     w->cfg_sep_width = cfg ? cfg->sep_width : MON_CFG_DEF_SEP_WIDTH;
 
@@ -139,6 +151,7 @@ void ui_clock_widget_create(ui_clock_widget_t *w, lv_obj_t *parent,
     w->date_label = lv_label_create(date_panel);
     lv_obj_set_style_text_font(w->date_label, w->font_date, 0);
     lv_obj_set_style_text_color(w->date_label, lv_color_hex(w->cfg_col_date), 0);
+    lv_obj_set_style_text_opa(w->date_label, w->cfg_opa_date, 0);
     lv_obj_set_style_bg_opa(w->date_label, LV_OPA_TRANSP, 0);
     lv_obj_align(w->date_label, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_label_set_recolor(w->date_label, true);
@@ -147,6 +160,7 @@ void ui_clock_widget_create(ui_clock_widget_t *w, lv_obj_t *parent,
     w->day_label = lv_label_create(date_panel);
     lv_obj_set_style_text_font(w->day_label, w->font_date, 0);
     lv_obj_set_style_text_color(w->day_label, lv_color_hex(w->cfg_col_day), 0);
+    lv_obj_set_style_text_opa(w->day_label, w->cfg_opa_day, 0);
     lv_obj_set_style_bg_opa(w->day_label, LV_OPA_TRANSP, 0);
     lv_obj_align(w->day_label, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     lv_label_set_recolor(w->day_label, true);
@@ -232,6 +246,7 @@ void ui_clock_widget_create(ui_clock_widget_t *w, lv_obj_t *parent,
     w->sec_label = lv_label_create(sec_panel);
     lv_obj_set_style_text_font(w->sec_label, w->font_sec, 0);
     lv_obj_set_style_text_color(w->sec_label, lv_color_hex(w->cfg_col_sec), 0);
+    lv_obj_set_style_text_opa(w->sec_label, w->cfg_opa_sec, 0);
     lv_obj_set_style_bg_opa(w->sec_label, LV_OPA_TRANSP, 0);
     lv_label_set_recolor(w->sec_label, true);
     lv_label_set_text(w->sec_label, "#111118 00#");

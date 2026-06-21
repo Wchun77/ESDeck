@@ -35,6 +35,11 @@ typedef struct {
     uint32_t    cfg_col_sec;
     uint32_t    cfg_sep_color;
     int         cfg_sep_width;
+    uint8_t     cfg_opa_time;
+    uint8_t     cfg_opa_colon;
+    uint8_t     cfg_opa_date;
+    uint8_t     cfg_opa_day;
+    uint8_t     cfg_opa_sec;
 
     lv_obj_t   *root;
     bool        font_fallback;

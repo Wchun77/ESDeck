@@ -31,6 +31,11 @@ typedef struct {
     uint32_t col_date;
     uint32_t col_day;
     uint32_t col_sec;
+    uint8_t  opa_time;    /* 0-255, default 255 */
+    uint8_t  opa_colon;
+    uint8_t  opa_date;
+    uint8_t  opa_day;
+    uint8_t  opa_sec;
     uint32_t sep_color;
     int      sep_width;
 } mon_clock_cfg_t;
