@@ -45,7 +45,8 @@ void usb_hid_set_monitor_cb(void (*cb)(uint8_t cpu_usage, uint8_t cpu_temp,
                                        uint8_t gpu_temp,  uint8_t gpu_vram,
                                        uint8_t cpu_freq,  uint8_t net_up,
                                        uint8_t net_down,  uint8_t disk_usage,
-                                       uint8_t reserved));
+                                       uint8_t cpu_power, uint8_t gpu_power,
+                                       uint8_t ssd_life));
 
 /* Register callback invoked when PC sends CMD_TIME.
  * Pass NULL to unregister. Called from the TinyUSB task context. */

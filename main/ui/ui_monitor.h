@@ -51,10 +51,13 @@ typedef struct {
     float    gpu_usage;   /* 0.0 - 100.0 %      */
     float    gpu_temp;    /* degrees C           */
     float    gpu_vram;    /* 0.0 - 100.0 %      */
-    float    cpu_freq;    /* MHz (decoded)       */
+    float    cpu_freq;    /* GHz (decoded)       */
     float    net_up;      /* MB/s                */
     float    net_down;    /* MB/s                */
     float    disk_usage;  /* 0.0 - 100.0 %      */
+    float    cpu_power;   /* W                   */
+    float    gpu_power;   /* W (decoded x2)      */
+    float    ssd_life;    /* 0.0 - 100.0 %      */
 } monitor_data_t;
 
 void ui_monitor_push_data(const monitor_data_t *data);

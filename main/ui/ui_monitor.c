@@ -78,7 +78,8 @@ static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
                                    uint8_t gpu_temp,  uint8_t gpu_vram,
                                    uint8_t cpu_freq,  uint8_t net_up,
                                    uint8_t net_down,  uint8_t disk_usage,
-                                   uint8_t reserved);
+                                   uint8_t cpu_power, uint8_t gpu_power,
+                                   uint8_t ssd_life);
 static void ui_monitor_on_hid_time(uint8_t hour, uint8_t min, uint8_t sec,
                                    uint8_t month, uint8_t day, uint8_t wday);
 
@@ -258,20 +259,24 @@ typedef struct {
     const char *unit;     /* unit suffix for value string     */
     int         bar_max;  /* bar upper bound; 0 = no bar      */
     bool        is_temp;  /* true = use 0 decimal for value   */
+    bool        invert;   /* true = high value is good (e.g. SSD life) */
 } cell_meta_t;
 
 static const cell_meta_t s_cell_meta[MON_CELL_COUNT] = {
-    [MON_CELL_NONE]       = { "",           "",      0,                 false },
-    [MON_CELL_CPU_USAGE]  = { "CPU Usage",  "%",     MON_BAR_MAX_USAGE, false },
-    [MON_CELL_CPU_TEMP]   = { "CPU Temp",   " C",    MON_BAR_MAX_TEMP,  true  },
-    [MON_CELL_CPU_FREQ]   = { "CPU Freq",   " GHz",  0,                 false },
-    [MON_CELL_RAM_USAGE]  = { "RAM Usage",  "%",     MON_BAR_MAX_USAGE, false },
-    [MON_CELL_GPU_USAGE]  = { "GPU Usage",  "%",     MON_BAR_MAX_USAGE, false },
-    [MON_CELL_GPU_TEMP]   = { "GPU Temp",   " C",    MON_BAR_MAX_TEMP,  true  },
-    [MON_CELL_GPU_VRAM]   = { "VRAM",       "%",     MON_BAR_MAX_USAGE, false },
-    [MON_CELL_NET_UP]     = { "Net Up",     " MB/s", 0,                 false },
-    [MON_CELL_NET_DOWN]   = { "Net Down",   " MB/s", 0,                 false },
-    [MON_CELL_DISK_USAGE] = { "Disk",       "%",     MON_BAR_MAX_USAGE, false },
+    [MON_CELL_NONE]       = { "",           "",         0,                 false, false },
+    [MON_CELL_CPU_USAGE]  = { "CPU Usage",  "%",        MON_BAR_MAX_USAGE, false, false },
+    [MON_CELL_CPU_TEMP]   = { "CPU Temp",   " C",       MON_BAR_MAX_TEMP,  true,  false },
+    [MON_CELL_CPU_FREQ]   = { "CPU Freq",   " GHz",     0,                 false, false },
+    [MON_CELL_RAM_USAGE]  = { "RAM Usage",  "%",        MON_BAR_MAX_USAGE, false, false },
+    [MON_CELL_GPU_USAGE]  = { "GPU Usage",  "%",        MON_BAR_MAX_USAGE, false, false },
+    [MON_CELL_GPU_TEMP]   = { "GPU Temp",   " C",       MON_BAR_MAX_TEMP,  true,  false },
+    [MON_CELL_GPU_VRAM]   = { "VRAM",       "%",        MON_BAR_MAX_USAGE, false, false },
+    [MON_CELL_NET_UP]     = { "Net Up",     " MB/s",    0,                 false, false },
+    [MON_CELL_NET_DOWN]   = { "Net Down",   " MB/s",    0,                 false, false },
+    [MON_CELL_DISK_USAGE] = { "Disk",       "%",        MON_BAR_MAX_USAGE, false, false },
+    [MON_CELL_CPU_POWER]  = { "CPU Power",  " W",       0,                 false, false },
+    [MON_CELL_GPU_POWER]  = { "GPU Power",  " % TDP",   MON_BAR_MAX_USAGE, false, false },
+    [MON_CELL_SSD_LIFE]   = { "SSD Life",   "%",        MON_BAR_MAX_USAGE, false, true  },
 };
 
 /* Retrieve the current float value for a given cell id from s_data. */
@@ -288,6 +293,9 @@ static float cell_value(mon_cell_id_t id)
         case MON_CELL_NET_UP:     return s_data.net_up;
         case MON_CELL_NET_DOWN:   return s_data.net_down;
         case MON_CELL_DISK_USAGE: return s_data.disk_usage;
+        case MON_CELL_CPU_POWER:  return s_data.cpu_power;
+        case MON_CELL_GPU_POWER:  return s_data.gpu_power;
+        case MON_CELL_SSD_LIFE:   return s_data.ssd_life;
         default:                  return 0.0f;
     }
 }
@@ -380,8 +388,10 @@ static void update_data_pages(void)
                 int bar_val = (int)fminf(v, (float)m->bar_max);
                 lv_bar_set_value(bar, bar_val, LV_ANIM_ON);
 
-                /* Five-step colour based on % of bar_max */
+                /* Five-step colour based on % of bar_max.
+                 * Inverted sensors (e.g. SSD life): high = good, low = bad. */
                 float pct = v / (float)m->bar_max * 100.0f;
+                if (m->invert) pct = 100.0f - pct;
                 uint32_t col;
                 if      (pct >= MON_BAR_THR_CRIT) col = MON_BAR_COL_CRIT;
                 else if (pct >= MON_BAR_THR_HIGH) col = MON_BAR_COL_WARN;
@@ -661,9 +671,9 @@ static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
                                    uint8_t gpu_temp,  uint8_t gpu_vram,
                                    uint8_t cpu_freq,  uint8_t net_up,
                                    uint8_t net_down,  uint8_t disk_usage,
-                                   uint8_t reserved)
+                                   uint8_t cpu_power, uint8_t gpu_power,
+                                   uint8_t ssd_life)
 {
-    (void)reserved;
     monitor_data_t d = {
         .cpu_usage  = (float)cpu_usage,
         .cpu_temp   = (float)cpu_temp,
@@ -671,10 +681,13 @@ static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
         .gpu_usage  = (float)gpu_usage,
         .gpu_temp   = (float)gpu_temp,
         .gpu_vram   = (float)gpu_vram,
-        .cpu_freq = (float)cpu_freq * 100.0f / 1000.0f,  // MHz -> GHz
+        .cpu_freq   = (float)cpu_freq * 100.0f / 1000.0f,   /* MHz/100 -> GHz */
         .net_up     = (float)net_up,
         .net_down   = (float)net_down,
         .disk_usage = (float)disk_usage,
+        .cpu_power  = (float)cpu_power,
+        .gpu_power  = (float)gpu_power,                             /* % of TDP */
+        .ssd_life   = (float)ssd_life,
     };
     ui_monitor_push_data(&d);
 }

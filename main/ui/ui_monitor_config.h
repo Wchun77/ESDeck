@@ -66,6 +66,9 @@ typedef enum {
     MON_CELL_NET_UP,
     MON_CELL_NET_DOWN,
     MON_CELL_DISK_USAGE,
+    MON_CELL_CPU_POWER,
+    MON_CELL_GPU_POWER,
+    MON_CELL_SSD_LIFE,
     MON_CELL_COUNT,
 } mon_cell_id_t;
 

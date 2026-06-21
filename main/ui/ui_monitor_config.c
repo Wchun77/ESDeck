@@ -99,6 +99,9 @@ static const struct { const char *name; mon_cell_id_t id; } s_cell_map[] = {
     { "net_up",     MON_CELL_NET_UP     },
     { "net_down",   MON_CELL_NET_DOWN   },
     { "disk_usage", MON_CELL_DISK_USAGE },
+    { "cpu_power",  MON_CELL_CPU_POWER  },
+    { "gpu_power",  MON_CELL_GPU_POWER  },
+    { "ssd_life",   MON_CELL_SSD_LIFE   },
 };
 
 static mon_cell_id_t parse_cell_id(const char *s)
