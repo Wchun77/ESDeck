@@ -29,6 +29,7 @@ static void set_defaults(monitor_cfg_t *cfg)
     cfg->clock.opa_date  = 255;
     cfg->clock.opa_day   = 255;
     cfg->clock.opa_sec   = 255;
+    cfg->clock.colon_gap = 30;
 }
 
 static uint32_t parse_hex_color(const char *s, uint32_t fallback)
@@ -160,6 +161,7 @@ void ui_monitor_config_load(monitor_cfg_t *cfg)
         cfg->clock.opa_date  = (uint8_t)int_field(clk, "opa_date",  255);
         cfg->clock.opa_day   = (uint8_t)int_field(clk, "opa_day",   255);
         cfg->clock.opa_sec   = (uint8_t)int_field(clk, "opa_sec",   255);
+        cfg->clock.colon_gap = int_field(clk, "colon_gap", 30);
     }
 
     /* Pages array */

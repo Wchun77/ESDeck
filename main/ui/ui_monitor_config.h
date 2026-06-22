@@ -36,6 +36,7 @@ typedef struct {
     uint8_t  opa_date;
     uint8_t  opa_day;
     uint8_t  opa_sec;
+    int      colon_gap;   /* px gap between digits and colon, default 30 */
     uint32_t sep_color;
     int      sep_width;
 } mon_clock_cfg_t;

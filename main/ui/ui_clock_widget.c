@@ -105,11 +105,12 @@ void ui_clock_widget_create(ui_clock_widget_t *w, lv_obj_t *parent,
     w->cfg_col_date  = cfg ? cfg->col_date  : MON_CFG_DEF_COL_DATE;
     w->cfg_col_day   = cfg ? cfg->col_day   : MON_CFG_DEF_COL_DAY;
     w->cfg_col_sec   = cfg ? cfg->col_sec   : MON_CFG_DEF_COL_SEC;
-    w->cfg_opa_time  = cfg ? cfg->opa_time  : 255;
-    w->cfg_opa_colon = cfg ? cfg->opa_colon : 255;
-    w->cfg_opa_date  = cfg ? cfg->opa_date  : 255;
-    w->cfg_opa_day   = cfg ? cfg->opa_day   : 255;
-    w->cfg_opa_sec   = cfg ? cfg->opa_sec   : 255;
+    w->cfg_opa_time   = cfg ? cfg->opa_time   : 255;
+    w->cfg_opa_colon  = cfg ? cfg->opa_colon  : 255;
+    w->cfg_opa_date   = cfg ? cfg->opa_date   : 255;
+    w->cfg_opa_day    = cfg ? cfg->opa_day    : 255;
+    w->cfg_opa_sec    = cfg ? cfg->opa_sec    : 255;
+    w->cfg_colon_gap  = cfg ? cfg->colon_gap  : 30;
     w->cfg_sep_color = cfg ? cfg->sep_color : MON_CFG_DEF_SEP_COLOR;
     w->cfg_sep_width = cfg ? cfg->sep_width : MON_CFG_DEF_SEP_WIDTH;
 
@@ -189,7 +190,7 @@ void ui_clock_widget_create(ui_clock_widget_t *w, lv_obj_t *parent,
      * Colon is fixed at center. h_units and m_tens have inner padding
      * to leave a gap between the digit and the colon. */
     #define DIGIT_W    (TIME_PANEL_W / 4)   /* 180px */
-    #define COLON_GAP  30
+    int COLON_GAP = w->cfg_colon_gap;
 
     /* h_tens: cell 0 */
     lv_obj_t *p_ht = make_panel(time_panel, 0, 0, DIGIT_W, TIME_PANEL_H);

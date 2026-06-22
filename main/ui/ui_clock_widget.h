@@ -40,6 +40,7 @@ typedef struct {
     uint8_t     cfg_opa_date;
     uint8_t     cfg_opa_day;
     uint8_t     cfg_opa_sec;
+    int         cfg_colon_gap;
 
     lv_obj_t   *root;
     bool        font_fallback;
