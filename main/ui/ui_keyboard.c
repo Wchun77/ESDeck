@@ -62,6 +62,7 @@ static lv_obj_t *kb_btn(lv_obj_t *parent, int x, int y, int w, int h,
     lv_obj_set_style_border_width(btn, 0, 0);
     lv_obj_set_style_pad_all(btn, 0, 0);
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, (void *)(uintptr_t)keycode);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_PRESS_LOCK);
 
     lv_obj_t *lbl = lv_label_create(btn);
     lv_label_set_text(lbl, text);

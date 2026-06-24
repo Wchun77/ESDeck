@@ -158,6 +158,7 @@ void ui_msc_show_confirm_dialog(void)
     lv_obj_set_style_border_width(btn_cancel, 1, 0);
     lv_obj_set_style_radius(btn_cancel, 6, 0);
     lv_obj_add_event_cb(btn_cancel, dialog_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_clear_flag(btn_cancel, LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_t *lbl_cancel = lv_label_create(btn_cancel);
     lv_label_set_text(lbl_cancel, "Cancel");
     lv_obj_set_style_text_color(lbl_cancel, lv_color_hex(0xcccccc), 0);
@@ -170,6 +171,7 @@ void ui_msc_show_confirm_dialog(void)
     lv_obj_set_style_border_width(btn_confirm, 0, 0);
     lv_obj_set_style_radius(btn_confirm, 6, 0);
     lv_obj_add_event_cb(btn_confirm, dialog_confirm_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_clear_flag(btn_confirm, LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_t *lbl_confirm = lv_label_create(btn_confirm);
     lv_label_set_text(lbl_confirm, "Switch");
     lv_obj_set_style_text_color(lbl_confirm, lv_color_hex(0xffffff), 0);

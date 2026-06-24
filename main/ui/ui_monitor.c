@@ -547,6 +547,7 @@ void ui_monitor_enter(lv_obj_t *sidebar)
         lv_obj_set_style_radius(btn, 8, 0);
         lv_obj_add_event_cb(btn, sidebar_btn_cb, LV_EVENT_CLICKED,
                             (void *)(uintptr_t)i);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_PRESS_LOCK);
         s_sidebar_btns[i] = btn;
 
         lv_obj_t *lbl = lv_label_create(btn);

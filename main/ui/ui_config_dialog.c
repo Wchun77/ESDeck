@@ -370,6 +370,7 @@ static void dialog_show_internal(bool monitor_mode)
         lv_obj_set_style_radius(row, 6, 0);
         lv_obj_set_style_border_width(row, 0, 0);
         lv_obj_add_event_cb(row, item_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_PRESS_LOCK);
         lv_obj_t *lbl = lv_label_create(row);
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xcccccc), 0);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
@@ -397,6 +398,7 @@ static void dialog_show_internal(bool monitor_mode)
     lv_obj_set_style_border_width(s_btn_prev, 0, 0);
     lv_obj_set_style_radius(s_btn_prev, 6, 0);
     lv_obj_add_event_cb(s_btn_prev, prev_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_clear_flag(s_btn_prev, LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_t *lbl_prev = lv_label_create(s_btn_prev);
     lv_label_set_text(lbl_prev, LV_SYMBOL_UP);
     lv_obj_set_style_text_color(lbl_prev, lv_color_hex(0xcccccc), 0);
@@ -415,6 +417,7 @@ static void dialog_show_internal(bool monitor_mode)
     lv_obj_set_style_border_width(s_btn_next, 0, 0);
     lv_obj_set_style_radius(s_btn_next, 6, 0);
     lv_obj_add_event_cb(s_btn_next, next_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_clear_flag(s_btn_next, LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_t *lbl_next = lv_label_create(s_btn_next);
     lv_label_set_text(lbl_next, LV_SYMBOL_DOWN);
     lv_obj_set_style_text_color(lbl_next, lv_color_hex(0xcccccc), 0);
@@ -428,6 +431,7 @@ static void dialog_show_internal(bool monitor_mode)
     lv_obj_set_style_border_width(btn_cancel, 0, 0);
     lv_obj_set_style_radius(btn_cancel, 6, 0);
     lv_obj_add_event_cb(btn_cancel, cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_clear_flag(btn_cancel, LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_t *lbl_cancel = lv_label_create(btn_cancel);
     lv_label_set_text(lbl_cancel, "Cancel");
     lv_obj_set_style_text_color(lbl_cancel, lv_color_hex(0xcccccc), 0);
@@ -442,6 +446,7 @@ static void dialog_show_internal(bool monitor_mode)
     lv_obj_set_style_radius(s_confirm_btn, 6, 0);
     lv_obj_add_state(s_confirm_btn, LV_STATE_DISABLED);
     lv_obj_add_event_cb(s_confirm_btn, confirm_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_clear_flag(s_confirm_btn, LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_t *lbl_confirm = lv_label_create(s_confirm_btn);
     lv_label_set_text(lbl_confirm, "Confirm");
     lv_obj_set_style_text_color(lbl_confirm, lv_color_hex(0x555555), 0);

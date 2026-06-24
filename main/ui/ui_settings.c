@@ -177,6 +177,7 @@ static lv_obj_t *add_item(lv_obj_t *panel, const char *text, lv_event_cb_t cb)
     lv_obj_set_style_bg_color(item, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
     lv_obj_set_style_radius(item, 4, 0);
     lv_obj_add_event_cb(item, cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_clear_flag(item, LV_OBJ_FLAG_PRESS_LOCK);
 
     lv_obj_t *lbl = lv_label_create(item);
     lv_label_set_text(lbl, text);

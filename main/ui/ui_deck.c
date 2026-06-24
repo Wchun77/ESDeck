@@ -252,6 +252,7 @@ static void create_buttons(lv_obj_t *btn_cont, int page_idx,
 
         uintptr_t packed = ((uintptr_t)(uint8_t)page_idx << 8) | (uint8_t)i;
         lv_obj_add_event_cb(btn, btn_event_cb, LV_EVENT_CLICKED, (void *)packed);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_PRESS_LOCK);
     }
 }
 
@@ -296,6 +297,7 @@ void ui_deck_build(lv_obj_t *sidebar, deck_cfg_t *cfg)
         lv_obj_set_style_radius(btn, 8, 0);
         lv_obj_add_event_cb(btn, sidebar_btn_cb, LV_EVENT_CLICKED,
                             (void *)(uintptr_t)i);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_PRESS_LOCK);
         s_sidebar_btns[i] = btn;
 
         lv_obj_t *lbl = lv_label_create(btn);

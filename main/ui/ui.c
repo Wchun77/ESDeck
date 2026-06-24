@@ -91,6 +91,7 @@ static void ui_build_static(void)
     lv_obj_set_style_bg_color(settings_btn, lv_color_hex(0x2a2a2a), 0);
     lv_obj_set_style_radius(settings_btn, 8, 0);
     lv_obj_add_event_cb(settings_btn, settings_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_clear_flag(settings_btn, LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_t *settings_label = lv_label_create(settings_btn);
     lv_label_set_text(settings_label, LV_SYMBOL_SETTINGS);
     lv_obj_set_style_text_font(settings_label, &lv_font_montserrat_24, 0);
