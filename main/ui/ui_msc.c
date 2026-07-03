@@ -40,7 +40,7 @@ static void show_msc_screen(void)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
 
     lv_obj_t *sub = lv_label_create(cont);
-    lv_label_set_text(sub, "Flash + SD card connected\nRestart to return to HID mode");
+    lv_label_set_text(sub, "SD card connected\nRestart to return to HID mode");
     lv_obj_set_style_text_color(sub, lv_color_hex(0x888888), 0);
     lv_obj_set_style_text_align(sub, LV_TEXT_ALIGN_CENTER, 0);
 }
@@ -129,7 +129,7 @@ void ui_msc_show_confirm_dialog(void)
 
     lv_obj_t *body = lv_label_create(box);
     lv_label_set_text(body,
-        "Flash and SD card will be available to PC.\n"
+        "SD card will be available to PC.\n"
         "Device must restart to return to HID mode.");
     lv_obj_set_style_text_color(body, lv_color_hex(0x999999), 0);
     lv_obj_set_style_text_font(body, &lv_font_montserrat_14, 0);
