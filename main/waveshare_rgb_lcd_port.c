@@ -149,6 +149,13 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init()
 #if CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_GT911
     ESP_LOGI(TAG, "Initialize I2C bus"); // Log the initialization of the I2C bus
     i2c_master_init(); // Initialize the I2C master
+
+    /* 背光只能透過 CH422G(I2C)控制,在這之前(esp_lcd_panel_init 已經讓面板
+     * 開始主動掃描 framebuffer 了)完全沒辦法碰。這裡I2C一通就立刻關背光,
+     * 避免電源開啟當下背光預設為亮、把還沒初始化的 framebuffer 內容顯示出來
+     * 造成白畫面閃現。boot_anim_play() 準備好第一幀後會自己重新開背光。 */
+    wavesahre_rgb_lcd_bl_off();
+
     ESP_LOGI(TAG, "Initialize GPIO"); // Log GPIO initialization
     gpio_init(); // Initialize GPIO pins
     ESP_LOGI(TAG, "Initialize Touch LCD"); // Log touch LCD initialization
