@@ -69,6 +69,7 @@ void ui_config_scan_free(json_scan_result_t *res);
 #define CFG_NVS_NAMESPACE   "esdeck"
 #define CFG_NVS_KEY_DECK    "deck_cfg"
 #define CFG_NVS_KEY_MONITOR "mon_cfg"
+#define CFG_NVS_KEY_BOOT_ANIM "boot_anim"
 
 /*
  * Save / load selected deck config filename to NVS.

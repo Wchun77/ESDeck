@@ -8,6 +8,8 @@
 
 #include "app_config.h"
 #include "fs_manager/fs_sd.h"
+#include "nvs_manager/nvs_manager.h"
+#include "ui_config.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_jpeg_dec.h"
@@ -263,7 +265,13 @@ static void start_animations(void)
 /* -----------------------------------------------------------------------
  * Custom boot animation (JPEG frame sequence from SD card)
  *
- * Frames: SD_PATH_ASSETS_BOOT/frame_0000.jpg, frame_0001.jpg, ...
+ * Multiple animation sets can live side by side under SD_PATH_ASSETS_BOOT,
+ * one subfolder each, e.g. assets/boot/xmas/frame_0000.jpg, frame_0001.jpg,
+ * ... The active set's folder name is stored in NVS (CFG_NVS_KEY_BOOT_ANIM,
+ * settings menu -> Boot Animation); "none"/unset disables the custom
+ * animation entirely and falls back to the built-in procedural one below.
+ * Keeping each set in its own folder also means swapping animations never
+ * mixes leftover frames from a previous, differently-sized set.
  *
  * Decoded with Espressif's esp_new_jpeg (SIMD-accelerated on S3), which
  * is meaningfully faster than the classic TJpgDec-family decoders --
@@ -416,12 +424,32 @@ static bool decode_jpeg_frame(const char *sd_path, uint8_t *rgb_buf, bool *out_m
  * cleared and backlight already on). Returns false if there's no custom
  * animation on the SD card (or PSRAM/decoding failed on frame 0), in which
  * case the caller should fall back to the built-in procedural animation. */
+/* 讀NVS裡使用者選定的開機動畫子資料夾名稱,組出完整路徑寫進out_path。
+ * 沒設定過、或使用者選的是"none",回傳false(交給程序動畫)。 */
+static bool get_selected_anim_dir(char *out_path, size_t out_size)
+{
+    char name[64];
+    if (!nvs_manager_get_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_BOOT_ANIM, name, sizeof(name))) {
+        return false;   /* 從沒選過 */
+    }
+    if (name[0] == '\0' || strcmp(name, "none") == 0) {
+        return false;
+    }
+    snprintf(out_path, out_size, "%s/%s", SD_PATH_ASSETS_BOOT, name);
+    return true;
+}
+
 static bool play_custom_boot_anim(void)
 {
     if (!fs_sd_status()) return false;
 
+    char anim_dir[288];
+    if (!get_selected_anim_dir(anim_dir, sizeof(anim_dir))) {
+        return false;   /* 使用者選了 None,或還沒選過 */
+    }
+
     char path[320];
-    snprintf(path, sizeof(path), "%s/frame_0000.jpg", SD_PATH_ASSETS_BOOT);
+    snprintf(path, sizeof(path), "%s/frame_0000.jpg", anim_dir);
 
     /* esp_new_jpeg 建議輸出buffer要16 byte對齊 */
     uint8_t *rgb_buf = heap_caps_aligned_alloc(16, SCREEN_W * SCREEN_H * 2, MALLOC_CAP_SPIRAM);
@@ -491,7 +519,7 @@ static bool play_custom_boot_anim(void)
     int frame_idx = 1;
 
     for (;; frame_idx++) {
-        snprintf(path, sizeof(path), "%s/frame_%04d.jpg", SD_PATH_ASSETS_BOOT, frame_idx);
+        snprintf(path, sizeof(path), "%s/frame_%04d.jpg", anim_dir, frame_idx);
 
         TickType_t frame_start = xTaskGetTickCount();
 

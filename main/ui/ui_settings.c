@@ -6,12 +6,16 @@
 #include "ui_monitor.h"
 #include "ui_deck.h"
 #include "ui_img_pool.h"
+#include "ui_config.h"
 #include "ui.h"
 #include "lvgl.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_ota_ops.h"
 #include "esp_app_format.h"
+#include "app_config.h"
+#include "nvs_manager/nvs_manager.h"
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -234,6 +238,114 @@ static void item_info_cb(lv_event_t *e)
 }
 
 /* -----------------------------------------------------------------------
+ * Boot animation picker
+ *
+ * Each animation set lives in its own subfolder under SD_PATH_ASSETS_BOOT
+ * (e.g. assets/boot/xmas/frame_0000.jpg...). The chosen folder name is
+ * stored in NVS (CFG_NVS_KEY_BOOT_ANIM); "none" disables the custom
+ * animation and falls back to the built-in one (see boot_anim.c).
+ * ----------------------------------------------------------------------- */
+#define BOOT_ANIM_LIST_MAX  12
+#define BOOT_ANIM_NAME_LEN  32
+
+static char s_boot_anim_names[BOOT_ANIM_LIST_MAX][BOOT_ANIM_NAME_LEN];
+static int  s_boot_anim_count = 0;
+
+static void scan_boot_anim_dirs(void)
+{
+    s_boot_anim_count = 0;
+
+    DIR *dir = opendir(SD_PATH_ASSETS_BOOT);
+    if (!dir) return;
+
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL && s_boot_anim_count < BOOT_ANIM_LIST_MAX) {
+        if (de->d_type != DT_DIR) continue;
+        if (de->d_name[0] == '.') continue;   /* skip "." / ".." */
+        snprintf(s_boot_anim_names[s_boot_anim_count], BOOT_ANIM_NAME_LEN, "%.31s", de->d_name);
+        s_boot_anim_count++;
+    }
+    closedir(dir);
+}
+
+static void boot_anim_pick_cb(lv_event_t *e)
+{
+    const char *value = (const char *)lv_event_get_user_data(e);
+    nvs_manager_set_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_BOOT_ANIM, value);
+
+    /* dialog hierarchy: root -> box -> this button */
+    lv_obj_t *btn  = lv_event_get_target(e);
+    lv_obj_t *box  = lv_obj_get_parent(btn);
+    lv_obj_t *root = lv_obj_get_parent(box);
+    lv_obj_del(root);
+}
+
+/* value must stay valid for the app's lifetime (string literal, or a
+ * pointer into s_boot_anim_names[], both satisfy this -- no heap alloc). */
+static void add_pick_item(lv_obj_t *box, const char *label,
+                           const char *selected_name, const char *value)
+{
+    lv_obj_t *item = lv_btn_create(box);
+    lv_obj_set_width(item, LV_PCT(100));
+    bool is_selected = (strcmp(selected_name, value) == 0);
+    lv_obj_set_style_bg_color(item, is_selected ? lv_color_hex(0x2a5a8a) : lv_color_hex(0x2a2a2a), 0);
+    lv_obj_set_style_bg_color(item, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(item, 4, 0);
+    lv_obj_clear_flag(item, LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_add_event_cb(item, boot_anim_pick_cb, LV_EVENT_CLICKED, (void *)value);
+
+    lv_obj_t *lbl = lv_label_create(item);
+    lv_label_set_text(lbl, label);
+    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 4, 0);
+}
+
+static void item_boot_anim_cb(lv_event_t *e)
+{
+    hide_menu();
+    scan_boot_anim_dirs();
+
+    char selected[BOOT_ANIM_NAME_LEN];
+    if (!nvs_manager_get_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_BOOT_ANIM, selected, sizeof(selected)) ||
+        selected[0] == '\0') {
+        snprintf(selected, sizeof(selected), "none");
+    }
+
+    lv_obj_t *scr = lv_scr_act();
+    lv_obj_t *root = lv_obj_create(scr);
+    lv_obj_set_size(root, SCREEN_W, SCREEN_H);
+    lv_obj_set_pos(root, 0, 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(root, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(root, 0, 0);
+    lv_obj_set_style_radius(root, 0, 0);
+    lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(root, info_dismiss_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *box = lv_obj_create(root);
+    lv_obj_set_size(box, 320, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(box, 380, 0);
+    lv_obj_center(box);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x1e1e1e), 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x444444), 0);
+    lv_obj_set_style_border_width(box, 1, 0);
+    lv_obj_set_style_radius(box, 12, 0);
+    lv_obj_set_style_pad_all(box, 16, 0);
+    lv_obj_set_layout(box, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(box, 8, 0);
+
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text(title, "Boot Animation");
+    lv_obj_set_style_text_color(title, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+
+    add_pick_item(box, "None", selected, "none");
+    for (int i = 0; i < s_boot_anim_count; i++) {
+        add_pick_item(box, s_boot_anim_names[i], selected, s_boot_anim_names[i]);
+    }
+}
+
+/* -----------------------------------------------------------------------
  * Helper: create a single menu item button
  * ----------------------------------------------------------------------- */
 static lv_obj_t *add_item(lv_obj_t *panel, const char *text, lv_event_cb_t cb)
@@ -279,6 +391,7 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr)
     s_mode_item_lbl = add_item(s_panel, "", item_mode_cb);
     update_mode_label();
 
+    add_item(s_panel, "Boot Animation", item_boot_anim_cb);
     add_item(s_panel, "Info", item_info_cb);
 
     lv_obj_update_layout(s_panel);
