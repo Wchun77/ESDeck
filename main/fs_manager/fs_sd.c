@@ -8,8 +8,10 @@
 #include "driver/sdmmc_host.h"
 #include "ff.h"
 #include "diskio_impl.h"
+#include "diskio_sdmmc.h"
 #include "string.h"
 #include "dirent.h"
+#include "sys/stat.h"
 
 /*
  * Board: Waveshare ESP32-S3-Touch-LCD-7 V1.2
@@ -73,6 +75,7 @@ bool fs_sd_init(void)
     ESP_LOGI(TAG, "SD card mounted");
     sdmmc_card_print_info(stdout, s_card);
     fs_sd_usage_printf();
+    fs_sd_ensure_layout();
     fs_sd_scan();
     return true;
 }
@@ -88,8 +91,15 @@ void fs_sd_unmount_fat(void)
 {
     if (!s_mounted) return;
 
-    /* 只解除 VFS 註冊，不碰 SDMMC host */
-    ff_diskio_unregister(s_card->host.slot);
+    /* 只解除 VFS 註冊，不碰 SDMMC host.
+     * 注意：pdrv 是 FatFs 註冊時分配的邏輯磁碟代號，
+     * 跟 s_card->host.slot（SDMMC 硬體插槽編號）是兩回事，不能混用。 */
+    BYTE pdrv = ff_diskio_get_pdrv_card(s_card);
+    if (pdrv != 0xff) {
+        ff_diskio_unregister(pdrv);
+    } else {
+        ESP_LOGW(TAG, "fs_sd_unmount_fat: pdrv not found for card");
+    }
     esp_vfs_fat_unregister_path(FS_SD_MOUNT_POINT);
 
     s_mounted = false;
@@ -137,7 +147,7 @@ void fs_sd_usage_printf(void)
     FATFS  *fs;
     DWORD   free_clusters;
 
-    FRESULT res = f_getfree("1:", &free_clusters, &fs);
+    FRESULT res = f_getfree("0:", &free_clusters, &fs);
     if (res != FR_OK) {
         ESP_LOGW(TAG, "f_getfree failed (%d)", res);
         return;
@@ -154,7 +164,7 @@ size_t fs_sd_total(void)
 {
     FATFS  *fs;
     DWORD   free_clusters;
-    FRESULT res = f_getfree("1:", &free_clusters, &fs);
+    FRESULT res = f_getfree("0:", &free_clusters, &fs);
     if (res != FR_OK) return 0;
     return (size_t)((fs->n_fatent - 2) * fs->csize) * fs->ssize / 1024;
 }
@@ -163,7 +173,7 @@ size_t fs_sd_free(void)
 {
     FATFS  *fs;
     DWORD   free_clusters;
-    FRESULT res = f_getfree("1:", &free_clusters, &fs);
+    FRESULT res = f_getfree("0:", &free_clusters, &fs);
     if (res != FR_OK) return 0;
     return (size_t)(free_clusters * fs->csize) * fs->ssize / 1024;
 }
@@ -213,6 +223,59 @@ esp_err_t fs_sd_write_sector(uint32_t lba, uint32_t offset, size_t size, const v
 
     memcpy(tmp + offset, src, size);
     return sdmmc_write_sectors(s_card, tmp, lba, 1);
+}
+
+/* --------------------------------------------------------------------------
+ * App folder layout
+ * -------------------------------------------------------------------------- */
+
+/* Keep in sync with UI_CONFIG_ICON_PATH / UI_CONFIG_BG_PATH / UI_CONFIG_DECK_PATH
+ * (ui_config.h) and UI_MONITOR_PATH / UI_MONITOR_FONT_PATH (ui_monitor_config.h). */
+static const char * const s_app_dirs[] = {
+    "config/deck",
+    "config/monitor",
+    "assets/icons",
+    "assets/backgrounds",
+    "assets/fonts",
+};
+
+/* Create dir and any missing parent dirs, relative to FS_SD_MOUNT_POINT.
+ * Only creates missing path segments; existing files/folders are left
+ * untouched (stat is checked before every mkdir). */
+static void mkdir_p(const char *rel_path)
+{
+    char path[128];
+    size_t prefix_len = strlen(FS_SD_MOUNT_POINT);
+    snprintf(path, sizeof(path), "%s/%s", FS_SD_MOUNT_POINT, rel_path);
+
+    struct stat st;
+
+    /* mkdir each intermediate "/sdcard/a", "/sdcard/a/b", ... in turn */
+    for (char *p = path + prefix_len + 1; *p != '\0'; p++) {
+        if (*p != '/') continue;
+
+        *p = '\0';
+        if (stat(path, &st) != 0 && mkdir(path, 0775) != 0) {
+            ESP_LOGW(TAG, "mkdir failed: %s", path);
+            *p = '/';
+            return;
+        }
+        *p = '/';
+    }
+
+    /* final segment */
+    if (stat(path, &st) != 0 && mkdir(path, 0775) != 0) {
+        ESP_LOGW(TAG, "mkdir failed: %s", path);
+    }
+}
+
+void fs_sd_ensure_layout(void)
+{
+    if (!s_mounted) return;
+
+    for (size_t i = 0; i < sizeof(s_app_dirs) / sizeof(s_app_dirs[0]); i++) {
+        mkdir_p(s_app_dirs[i]);
+    }
 }
 
 /* --------------------------------------------------------------------------
