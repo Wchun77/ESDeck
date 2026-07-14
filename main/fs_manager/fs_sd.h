@@ -7,8 +7,9 @@
 #include "esp_err.h"
 #include "driver/sdmmc_host.h"
 #include "sdmmc_cmd.h"
+#include "app_config.h"
 
-#define FS_SD_MOUNT_POINT    "/sdcard"
+#define FS_SD_MOUNT_POINT    SD_MOUNT_POINT
 
 bool        fs_sd_init(void);
 void        fs_sd_deinit(void);

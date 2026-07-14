@@ -274,7 +274,7 @@ int fs_list_files(const char *path, const char *extension,
         }
 
         snprintf(out_list[count].filepath, sizeof(out_list[count].filepath),
-                 "%s/%s", path, entry->d_name);
+                 "%.255s/%.255s", path, entry->d_name);
 
         out_list[count].size = fs_get_file_size(out_list[count].filepath);
         count++;

@@ -7,6 +7,7 @@ file(GLOB_RECURSE usb_srcs      "usb/*.c")
 file(GLOB_RECURSE fs_manager    "fs_manager/*.c")
 file(GLOB_RECURSE anim_srcs     "anim/*.c")
 file(GLOB_RECURSE nvs_manager   "nvs_manager/*.c")
+file(GLOB_RECURSE ota_manager   "ota_manager/*.c")
 
 # ============================================================
 #   Component sources
@@ -22,6 +23,7 @@ set(COMPONENT_SRCS
     ${fs_manager}
     ${anim_srcs}
     ${nvs_manager}
+    ${ota_manager}
 )
 
 # ============================================================
@@ -35,6 +37,7 @@ set(COMPONENT_ADD_INCLUDEDIRS
     "fs_manager"
     "anim"
     "nvs_manager"
+    "ota_manager"
 )
 
 # ============================================================
@@ -54,6 +57,7 @@ idf_component_register(
         espressif__esp_tinyusb
         json
         nvs_flash
+        app_update
 )
 
 idf_component_get_property(lvgl_lib lvgl__lvgl COMPONENT_LIB)

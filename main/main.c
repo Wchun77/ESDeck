@@ -2,6 +2,7 @@
 #include "usb_hid.h"
 #include "ui.h"
 #include "ui_img_pool.h"
+#include "ui_ota_dialog.h"
 #include "fs_manager/fs_sd.h"
 #include "usb/usb_manager.h"
 #include "boot_anim.h"
@@ -15,6 +16,12 @@ void app_main(void)
     fs_sd_init();
     ui_preload_start();   /* load config, kick off background preload task */
     boot_anim_play();     /* animation plays while preload task runs */
+
+    /* If a valid update.bin sits on the SD card, ask the user before
+     * touching anything. Blocks until answered; "Yes" reboots the
+     * device on success and never returns. */
+    ui_ota_check_and_prompt();
+
     ui_preload_wait();
     usb_manager_init();   /* preload task continues in background after this */
 

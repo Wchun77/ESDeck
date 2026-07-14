@@ -229,14 +229,14 @@ esp_err_t fs_sd_write_sector(uint32_t lba, uint32_t offset, size_t size, const v
  * App folder layout
  * -------------------------------------------------------------------------- */
 
-/* Keep in sync with UI_CONFIG_ICON_PATH / UI_CONFIG_BG_PATH / UI_CONFIG_DECK_PATH
- * (ui_config.h) and UI_MONITOR_PATH / UI_MONITOR_FONT_PATH (ui_monitor_config.h). */
+/* Sourced from app_config.h -- single place that owns the SD folder layout. */
 static const char * const s_app_dirs[] = {
-    "config/deck",
-    "config/monitor",
-    "assets/icons",
-    "assets/backgrounds",
-    "assets/fonts",
+    SD_DIR_CONFIG_DECK,
+    SD_DIR_CONFIG_MONITOR,
+    SD_DIR_ASSETS_ICONS,
+    SD_DIR_ASSETS_BG,
+    SD_DIR_ASSETS_FONTS,
+    SD_DIR_UPDATE,
 };
 
 /* Create dir and any missing parent dirs, relative to FS_SD_MOUNT_POINT.

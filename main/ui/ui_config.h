@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "app_config.h"
 
 #define UI_CONFIG_MAX_PAGES    255
 #define UI_CONFIG_MAX_BUTTONS  255
@@ -11,9 +12,9 @@
 #define UI_CONFIG_ICON_LEN     32
 #define UI_CONFIG_NAME_LEN     32
 
-#define UI_CONFIG_ICON_PATH    "/sdcard/assets/icons"
-#define UI_CONFIG_BG_PATH      "/sdcard/assets/backgrounds"
-#define UI_CONFIG_DECK_PATH    "/sdcard/config/deck"
+#define UI_CONFIG_ICON_PATH    SD_PATH_ASSETS_ICONS
+#define UI_CONFIG_BG_PATH      SD_PATH_ASSETS_BG
+#define UI_CONFIG_DECK_PATH    SD_PATH_CONFIG_DECK
 #define UI_CONFIG_JSON_PREFIX  "esp_"
 
 #define UI_CONFIG_BG_LEN       64

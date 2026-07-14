@@ -10,6 +10,8 @@
 #include "lvgl.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_ota_ops.h"
+#include "esp_app_format.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -166,6 +168,71 @@ static void overlay_cb(lv_event_t *e)
     hide_menu();
 }
 
+static void info_dismiss_cb(lv_event_t *e)
+{
+    lv_obj_del(lv_event_get_target(e));
+}
+
+static void item_info_cb(lv_event_t *e)
+{
+    hide_menu();
+
+    esp_app_desc_t desc;
+    bool ok = (esp_ota_get_partition_description(esp_ota_get_running_partition(), &desc) == ESP_OK);
+
+    lv_obj_t *scr = lv_scr_act();
+    lv_obj_t *root = lv_obj_create(scr);
+    lv_obj_set_size(root, SCREEN_W, SCREEN_H);
+    lv_obj_set_pos(root, 0, 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(root, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(root, 0, 0);
+    lv_obj_set_style_radius(root, 0, 0);
+    lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(root, info_dismiss_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *box = lv_obj_create(root);
+    lv_obj_set_size(box, 420, 240);
+    lv_obj_center(box);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x1e1e1e), 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x444444), 0);
+    lv_obj_set_style_border_width(box, 1, 0);
+    lv_obj_set_style_radius(box, 12, 0);
+    lv_obj_set_style_pad_all(box, 28, 0);
+    lv_obj_set_layout(box, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(box, 16, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *name_lbl = lv_label_create(box);
+    lv_label_set_text(name_lbl, ok ? desc.project_name : "ESDeck");
+    lv_obj_set_style_text_color(name_lbl, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_font(name_lbl, &lv_font_montserrat_24, 0);
+
+    char ver_buf[64];
+    char built_buf[64];
+    if (ok) {
+        snprintf(ver_buf, sizeof(ver_buf), "Version %s", desc.version);
+        snprintf(built_buf, sizeof(built_buf), "Built %s %s", desc.date, desc.time);
+    } else {
+        snprintf(ver_buf, sizeof(ver_buf), "Version info unavailable");
+        built_buf[0] = '\0';
+    }
+
+    lv_obj_t *ver_lbl = lv_label_create(box);
+    lv_label_set_text(ver_lbl, ver_buf);
+    lv_obj_set_style_text_color(ver_lbl, lv_color_hex(0xcccccc), 0);
+    lv_obj_set_style_text_font(ver_lbl, &lv_font_montserrat_20, 0);
+
+    if (built_buf[0] != '\0') {
+        lv_obj_t *built_lbl = lv_label_create(box);
+        lv_label_set_text(built_lbl, built_buf);
+        lv_obj_set_style_text_color(built_lbl, lv_color_hex(0x888888), 0);
+        lv_obj_set_style_text_font(built_lbl, &lv_font_montserrat_16, 0);
+    }
+}
+
 /* -----------------------------------------------------------------------
  * Helper: create a single menu item button
  * ----------------------------------------------------------------------- */
@@ -211,6 +278,8 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr)
     /* Mode switch item — label updates dynamically */
     s_mode_item_lbl = add_item(s_panel, "", item_mode_cb);
     update_mode_label();
+
+    add_item(s_panel, "Info", item_info_cb);
 
     lv_obj_update_layout(s_panel);
     lv_obj_set_pos(s_panel,
