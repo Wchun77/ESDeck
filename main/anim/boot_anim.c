@@ -28,6 +28,11 @@
 /* 每幀JPEG檔案大小上限,超過就跳過該幀(留很多餘裕,壓縮後的幀通常只有幾十KB) */
 #define BOOT_ANIM_MAX_JPEG_SIZE  (256 * 1024)
 
+/* look-ahead預讀深度:背景task最多預先讀幾幀進緩衝區。見下方
+ * prefetch_task()註解 -- 4幀 * 256KB上限 = 1MB PSRAM,遠低於整包預讀
+ * 需要的容量,而且不需要等全部讀完才能開始播放。 */
+#define BOOT_ANIM_PREFETCH_DEPTH  4
+
 /* 等LVGL的渲染task(lvgl_port_task)把剛剛set_src的畫面真的畫完。
  *
  * 不能直接呼叫 lv_refr_now() 自己畫(這個專案的LVGL避免撕裂模式是
@@ -292,7 +297,6 @@ static void start_animations(void)
  * ----------------------------------------------------------------------- */
 
 static jpeg_dec_handle_t s_jpeg_dec     = NULL;
-static uint8_t          *s_jpeg_in_buf  = NULL;   /* reused compressed-frame read buffer */
 
 static void jpeg_dec_teardown(void)
 {
@@ -300,21 +304,11 @@ static void jpeg_dec_teardown(void)
         jpeg_dec_close(s_jpeg_dec);
         s_jpeg_dec = NULL;
     }
-    if (s_jpeg_in_buf) {
-        heap_caps_free(s_jpeg_in_buf);
-        s_jpeg_in_buf = NULL;
-    }
 }
 
 static bool jpeg_dec_setup(void)
 {
-    if (s_jpeg_dec && s_jpeg_in_buf) return true;
-
-    s_jpeg_in_buf = heap_caps_malloc(BOOT_ANIM_MAX_JPEG_SIZE, MALLOC_CAP_SPIRAM);
-    if (!s_jpeg_in_buf) {
-        ESP_LOGW(TAG, "PSRAM alloc failed for jpeg input buffer");
-        return false;
-    }
+    if (s_jpeg_dec) return true;
 
     jpeg_dec_config_t cfg = DEFAULT_JPEG_DEC_CONFIG();
     cfg.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
@@ -367,57 +361,216 @@ static void jpeg_prewarm_wait(void)
     s_jpeg_prewarm_done = NULL;
 }
 
-/* Decode one JPEG file straight into rgb_buf (must be 16-byte aligned and
- * SCREEN_W*SCREEN_H*2 bytes). Returns false (and logs a warning) on any
- * I/O, size-mismatch or decode error -- caller decides whether that's
- * fatal (frame 0) or just a dropped frame (mid-sequence).
- *
- * *out_missing is set to true only when the file itself doesn't exist --
- * that's how the caller tells "no more frames, animation is done" apart
- * from "this one frame is corrupt, skip it and keep going". Doing the
- * existence check via this single fopen (instead of a separate probe
- * fopen before calling this function) avoids opening every frame file
- * twice per loop iteration. */
-static bool decode_jpeg_frame(const char *sd_path, uint8_t *rgb_buf, bool *out_missing)
+/* Decode already-in-memory JPEG bytes straight into rgb_buf (must be
+ * 16-byte aligned and SCREEN_W*SCREEN_H*2 bytes). Shared by both the
+ * SD-streaming path (decode_jpeg_frame, below) and the PSRAM-preload
+ * path (play_custom_boot_anim) -- the actual esp_new_jpeg call sequence
+ * doesn't care whether the compressed bytes came from a fresh fread or
+ * from a blob that was loaded up front. */
+static bool decode_jpeg_mem(const uint8_t *data, size_t len, uint8_t *rgb_buf)
 {
-    *out_missing = false;
     if (!jpeg_dec_setup()) return false;
 
-    FILE *f = fopen(sd_path, "rb");
-    if (!f) {
-        *out_missing = true;
-        return false;
-    }
-    size_t n = fread(s_jpeg_in_buf, 1, BOOT_ANIM_MAX_JPEG_SIZE, f);
-    bool truncated = (n == BOOT_ANIM_MAX_JPEG_SIZE) && !feof(f);
-    fclose(f);
-
-    if (truncated) {
-        ESP_LOGW(TAG, "frame exceeds %u byte cap, skipped: %s",
-                 (unsigned)BOOT_ANIM_MAX_JPEG_SIZE, sd_path);
-        return false;
-    }
-
     jpeg_dec_io_t io = { 0 };
-    io.inbuf     = s_jpeg_in_buf;
-    io.inbuf_len = (int)n;
+    io.inbuf     = (uint8_t *)data;
+    io.inbuf_len = (int)len;
     io.outbuf    = rgb_buf;
 
     jpeg_dec_header_info_t info = { 0 };
     if (jpeg_dec_parse_header(s_jpeg_dec, &io, &info) != JPEG_ERR_OK) {
-        ESP_LOGW(TAG, "header parse failed: %s", sd_path);
+        ESP_LOGW(TAG, "header parse failed");
         return false;
     }
     if (info.width != SCREEN_W || info.height != SCREEN_H) {
-        ESP_LOGW(TAG, "size mismatch %ux%u (expect %dx%d): %s",
-                 info.width, info.height, SCREEN_W, SCREEN_H, sd_path);
+        ESP_LOGW(TAG, "size mismatch %ux%u (expect %dx%d)",
+                 info.width, info.height, SCREEN_W, SCREEN_H);
         return false;
     }
     if (jpeg_dec_process(s_jpeg_dec, &io) != JPEG_ERR_OK) {
-        ESP_LOGW(TAG, "decode failed: %s", sd_path);
+        ESP_LOGW(TAG, "decode failed");
         return false;
     }
     return true;
+}
+
+/* -----------------------------------------------------------------------
+ * Background look-ahead prefetch (producer/consumer ring buffer)
+ *
+ * Reading one frame at a time synchronously (in the same task that's
+ * decoding/displaying) means every frame's SD read collides with
+ * img_preload's own SD reads (icons) *and* stalls the visible frame
+ * pacing while it waits -- task priority alone can't fix this because
+ * it's a hardware bus contention problem, not a CPU scheduling one.
+ * Measured effect: fps settled around 5 even after fixing the earlier
+ * CPU-contention bug.
+ *
+ * A first attempt at fixing this read the *entire* animation into one
+ * PSRAM blob before showing frame 0 -- that removed SD contention during
+ * playback, but pushed all of it into one big upfront blocking burst,
+ * so the screen stayed black for several seconds before anything
+ * appeared (worse total wait, even though it's technically hidden behind
+ * backlight-off).
+ *
+ * This replaces that with a small ring buffer (BOOT_ANIM_PREFETCH_DEPTH
+ * slots) filled continuously by a background task while the main task
+ * plays back whatever's already buffered. Only frame 0 needs to be ready
+ * before playback starts, so startup latency is back to roughly what it
+ * was before any of this -- but as long as the producer stays ahead of
+ * playback, decode is fed straight from RAM the same as the old
+ * whole-animation preload, so it's still insulated from SD jitter.
+ * ----------------------------------------------------------------------- */
+
+typedef struct {
+    uint8_t *data;   /* BOOT_ANIM_MAX_JPEG_SIZE bytes, PSRAM */
+    size_t   len;    /* 0 means "end of animation" sentinel */
+} prefetch_slot_t;
+
+static prefetch_slot_t   s_pf_slots[BOOT_ANIM_PREFETCH_DEPTH];
+static SemaphoreHandle_t s_pf_free_sem   = NULL;   /* counts empty slots */
+static SemaphoreHandle_t s_pf_filled_sem = NULL;   /* counts ready slots */
+static SemaphoreHandle_t s_pf_exited_sem = NULL;   /* producer task exit signal */
+static volatile bool     s_pf_stop       = false;
+static char               s_pf_anim_dir[288];
+static int                s_pf_consume_slot = 0;
+
+static void prefetch_task(void *arg)
+{
+    int frame_idx = 0;
+    int slot = 0;
+    char path[320];
+
+    for (;;) {
+        xSemaphoreTake(s_pf_free_sem, portMAX_DELAY);
+        if (s_pf_stop) break;
+
+        snprintf(path, sizeof(path), "%s/frame_%04d.jpg", s_pf_anim_dir, frame_idx);
+        FILE *f = fopen(path, "rb");
+        if (!f || s_pf_stop) {
+            if (f) fclose(f);
+            s_pf_slots[slot].len = 0;   /* sentinel: no more frames */
+            xSemaphoreGive(s_pf_filled_sem);
+            break;
+        }
+        size_t n = fread(s_pf_slots[slot].data, 1, BOOT_ANIM_MAX_JPEG_SIZE, f);
+        bool truncated = (n == BOOT_ANIM_MAX_JPEG_SIZE) && !feof(f);
+        fclose(f);
+
+        if (truncated) {
+            /* len==0是"動畫已結束"的專用訊號(見prefetch_next),不能拿
+             * 來表示"這幀太大"，否則會被誤判成提早結束整段動畫。保留
+             * 截斷後的實際位元組數(>0)，讓消費端照常嘗試解碼──不完整
+             * 的JPEG理論上會被esp_new_jpeg判斷解碼失敗，走"跳過這幀,
+             * 繼續下一幀"那條路徑，而不是誤觸發"動畫結束"。 */
+            ESP_LOGW(TAG, "frame exceeds %u byte slot, likely corrupt: %s",
+                     (unsigned)BOOT_ANIM_MAX_JPEG_SIZE, path);
+        }
+        s_pf_slots[slot].len = n;
+        xSemaphoreGive(s_pf_filled_sem);
+
+        slot = (slot + 1) % BOOT_ANIM_PREFETCH_DEPTH;
+        frame_idx++;
+    }
+
+    xSemaphoreGive(s_pf_exited_sem);
+    vTaskDelete(NULL);
+}
+
+/* Allocates the ring buffer and starts the background producer task.
+ * anim_dir must stay valid for the lifetime of the prefetch session
+ * (play_custom_boot_anim keeps it on its own stack, which outlives this). */
+static bool prefetch_start(const char *anim_dir)
+{
+    int allocated = 0;
+    for (; allocated < BOOT_ANIM_PREFETCH_DEPTH; allocated++) {
+        s_pf_slots[allocated].data = heap_caps_malloc(BOOT_ANIM_MAX_JPEG_SIZE, MALLOC_CAP_SPIRAM);
+        s_pf_slots[allocated].len  = 0;
+        if (!s_pf_slots[allocated].data) {
+            ESP_LOGW(TAG, "PSRAM alloc failed for prefetch slot %d", allocated);
+            goto fail;
+        }
+    }
+
+    snprintf(s_pf_anim_dir, sizeof(s_pf_anim_dir), "%s", anim_dir);
+    s_pf_consume_slot = 0;
+    s_pf_stop = false;
+
+    s_pf_free_sem   = xSemaphoreCreateCounting(BOOT_ANIM_PREFETCH_DEPTH, BOOT_ANIM_PREFETCH_DEPTH);
+    s_pf_filled_sem = xSemaphoreCreateCounting(BOOT_ANIM_PREFETCH_DEPTH, 0);
+    s_pf_exited_sem = xSemaphoreCreateBinary();
+    if (!s_pf_free_sem || !s_pf_filled_sem || !s_pf_exited_sem) {
+        ESP_LOGW(TAG, "semaphore alloc failed for prefetch");
+        goto fail;
+    }
+
+    if (xTaskCreate(prefetch_task, "boot_anim_pf", 4096, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "prefetch task create failed");
+        goto fail;
+    }
+    return true;
+
+fail:
+    if (s_pf_free_sem)   { vSemaphoreDelete(s_pf_free_sem);   s_pf_free_sem = NULL; }
+    if (s_pf_filled_sem) { vSemaphoreDelete(s_pf_filled_sem); s_pf_filled_sem = NULL; }
+    if (s_pf_exited_sem) { vSemaphoreDelete(s_pf_exited_sem); s_pf_exited_sem = NULL; }
+    for (int i = 0; i < allocated; i++) {
+        heap_caps_free(s_pf_slots[i].data);
+        s_pf_slots[i].data = NULL;
+    }
+    return false;
+}
+
+/* Blocks for the next ready slot, decodes it into rgb_buf, and frees the
+ * slot back to the producer. *out_missing mirrors decode_jpeg_frame's old
+ * contract: true only means "animation is over", not "this frame broke". */
+static bool prefetch_next(uint8_t *rgb_buf, bool *out_missing)
+{
+    *out_missing = false;
+    if (xSemaphoreTake(s_pf_filled_sem, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGW(TAG, "prefetch stalled, aborting animation");
+        *out_missing = true;
+        return false;
+    }
+
+    int slot = s_pf_consume_slot;
+    size_t len = s_pf_slots[slot].len;
+    bool ok = false;
+    if (len == 0) {
+        *out_missing = true;
+    } else {
+        ok = decode_jpeg_mem(s_pf_slots[slot].data, len, rgb_buf);
+    }
+
+    xSemaphoreGive(s_pf_free_sem);
+    s_pf_consume_slot = (slot + 1) % BOOT_ANIM_PREFETCH_DEPTH;
+    return ok;
+}
+
+/* Stops the producer task (if still running) and frees the ring buffer.
+ * Safe to call even if the animation ended on its own (producer already
+ * self-terminated after hitting the "no more frames" sentinel). */
+static void prefetch_stop(void)
+{
+    if (!s_pf_exited_sem) return;   /* never started, or already torn down */
+
+    s_pf_stop = true;
+    /* Wake the producer whether it's blocked waiting for a free slot or
+     * about to loop back and check the stop flag -- harmless either way,
+     * it exits on the very next check. */
+    for (int i = 0; i < BOOT_ANIM_PREFETCH_DEPTH; i++) {
+        xSemaphoreGive(s_pf_free_sem);
+    }
+    xSemaphoreTake(s_pf_exited_sem, pdMS_TO_TICKS(3000));
+
+    vSemaphoreDelete(s_pf_free_sem);   s_pf_free_sem   = NULL;
+    vSemaphoreDelete(s_pf_filled_sem); s_pf_filled_sem = NULL;
+    vSemaphoreDelete(s_pf_exited_sem); s_pf_exited_sem = NULL;
+
+    for (int i = 0; i < BOOT_ANIM_PREFETCH_DEPTH; i++) {
+        if (s_pf_slots[i].data) {
+            heap_caps_free(s_pf_slots[i].data);
+            s_pf_slots[i].data = NULL;
+        }
+    }
 }
 
 /* Returns true if a custom animation was found and played (screen is left
@@ -448,9 +601,6 @@ static bool play_custom_boot_anim(void)
         return false;   /* 使用者選了 None,或還沒選過 */
     }
 
-    char path[320];
-    snprintf(path, sizeof(path), "%s/frame_0000.jpg", anim_dir);
-
     /* esp_new_jpeg 建議輸出buffer要16 byte對齊 */
     uint8_t *rgb_buf = heap_caps_aligned_alloc(16, SCREEN_W * SCREEN_H * 2, MALLOC_CAP_SPIRAM);
     if (!rgb_buf) {
@@ -460,19 +610,26 @@ static bool play_custom_boot_anim(void)
 
     jpeg_prewarm_wait();   /* 如果main.c有先呼叫boot_anim_prewarm_jpeg,這裡通常瞬間返回 */
 
-    /* 診斷用:量測第一幀實際解碼耗時 */
+    if (!prefetch_start(anim_dir)) {
+        ESP_LOGW(TAG, "prefetch setup failed, falling back to built-in animation");
+        heap_caps_free(rgb_buf);
+        return false;
+    }
+
+    /* 診斷用:量測第一幀實際等待+解碼耗時(背景task這時才剛開始讀,
+     * 這裡就是新版真正的「動畫出現前延遲」數字) */
     TickType_t decode0_start = xTaskGetTickCount();
     bool frame0_missing = false;
-    bool frame0_ok = decode_jpeg_frame(path, rgb_buf, &frame0_missing);
+    bool frame0_ok = prefetch_next(rgb_buf, &frame0_missing);
     uint32_t decode0_ms = (xTaskGetTickCount() - decode0_start) * portTICK_PERIOD_MS;
     if (!frame0_missing) {
-        ESP_LOGI(TAG, "frame 0 decode: %s, %u ms",
-                 frame0_ok ? "OK" : "FAILED", (unsigned)decode0_ms);
+        ESP_LOGI(TAG, "frame 0 ready: %s, %u ms", frame0_ok ? "OK" : "FAILED", (unsigned)decode0_ms);
     }
 
     if (!frame0_ok) {
         /* frame0_missing == 沒放自訂動畫,交給原本的程序動畫;
          * 否則是解碼失敗,一樣退回內建動畫 */
+        prefetch_stop();
         heap_caps_free(rgb_buf);
         jpeg_dec_teardown();
         return false;
@@ -488,6 +645,7 @@ static bool play_custom_boot_anim(void)
 
     lv_obj_t *img = NULL;
     if (!lvgl_port_lock(-1)) {
+        prefetch_stop();
         heap_caps_free(rgb_buf);
         jpeg_dec_teardown();
         return false;
@@ -519,12 +677,12 @@ static bool play_custom_boot_anim(void)
     int frame_idx = 1;
 
     for (;; frame_idx++) {
-        snprintf(path, sizeof(path), "%s/frame_%04d.jpg", anim_dir, frame_idx);
-
         TickType_t frame_start = xTaskGetTickCount();
 
         bool missing = false;
-        if (decode_jpeg_frame(path, rgb_buf, &missing)) {
+        bool ok = prefetch_next(rgb_buf, &missing);
+
+        if (ok) {
             if (lvgl_port_lock(-1)) {
                 lv_img_cache_invalidate_src(&dsc);
                 lv_img_set_src(img, &dsc);
@@ -534,9 +692,9 @@ static bool play_custom_boot_anim(void)
              * 蓋掉還沒被畫出來的這幀,導致畫面被靜默跳過。 */
             wait_for_render_idle(500);
         } else if (missing) {
-            break;   /* 讀不到下一幀,動畫播完 */
+            break;   /* 沒有下一幀了,動畫播完 */
         }
-        /* 檔案存在但解碼失敗就跳過這一幀,不中斷整段動畫 */
+        /* 檔案/資料存在但解碼失敗就跳過這一幀,不中斷整段動畫 */
 
         TickType_t elapsed = xTaskGetTickCount() - frame_start;
         if (elapsed < frame_ticks) {
@@ -558,6 +716,7 @@ static bool play_custom_boot_anim(void)
         lvgl_port_unlock();
     }
 
+    prefetch_stop();
     heap_caps_free(rgb_buf);
     jpeg_dec_teardown();
     return true;
