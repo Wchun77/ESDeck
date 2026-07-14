@@ -7,6 +7,8 @@
 #include "usb/usb_manager.h"
 #include "boot_anim.h"
 #include "nvs_manager/nvs_manager.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 void app_main(void)
 {
@@ -21,12 +23,19 @@ void app_main(void)
     nvs_manager_init();
     fs_sd_init();
 
-    /* boot_anim_play() 要在 ui_preload_start() 之前執行:preload的背景
-     * task優先權比較高(3),如果跟boot_anim同時跑,會一直搶走CPU,讓
-     * JPEG開機動畫的解碼被拖慢(實測從~200ms/幀拖到~780ms/幀)。開機
-     * 動畫播完之後再讓icon預載開始跑,兩邊就不會互搶。 */
-    boot_anim_play();
     ui_preload_start();   /* load config, kick off background preload task */
+
+    /* icon背景預載的task優先權是3,如果跟boot_anim同時跑,會搶走main
+     * task的CPU,讓JPEG開機動畫的解碼被拖慢(實測從~200ms/幀拖到
+     * ~780ms/幀)。與其把兩者完全序列化(那樣IMG快取log就不會在動畫
+     * 播放期間出現,總開機時間變成兩段相加),這裡改成暫時把main task
+     * 自己的優先權拉到比預載task更高,讓動畫解碼在CPU競爭時一定贏,
+     * 但預載task還是能利用動畫這邊等待SD I/O、frame pacing delay的
+     * 空檔繼續跑,兩者維持平行、只是動畫優先,播完動畫就把優先權還原。 */
+    UBaseType_t main_task_prio = uxTaskPriorityGet(NULL);
+    vTaskPrioritySet(NULL, main_task_prio + 3);
+    boot_anim_play();     /* animation plays while preload task runs */
+    vTaskPrioritySet(NULL, main_task_prio);
 
     /* If a valid update.bin sits on the SD card, ask the user before
      * touching anything. Blocks until answered; "Yes" reboots the
