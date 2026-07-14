@@ -236,6 +236,7 @@ static const char * const s_app_dirs[] = {
     SD_DIR_ASSETS_ICONS,
     SD_DIR_ASSETS_BG,
     SD_DIR_ASSETS_FONTS,
+    SD_DIR_ASSETS_BOOT,
     SD_DIR_UPDATE,
 };
 

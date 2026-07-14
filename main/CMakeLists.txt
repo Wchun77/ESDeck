@@ -55,6 +55,7 @@ idf_component_register(
         spi_flash
         wear_levelling
         espressif__esp_tinyusb
+        espressif__esp_new_jpeg
         json
         nvs_flash
         app_update

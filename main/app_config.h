@@ -32,6 +32,7 @@
 #define SD_DIR_ASSETS_ICONS     "assets/icons"
 #define SD_DIR_ASSETS_BG        "assets/backgrounds"
 #define SD_DIR_ASSETS_FONTS     "assets/fonts"
+#define SD_DIR_ASSETS_BOOT      "assets/boot"
 #define SD_DIR_UPDATE           "update"
 
 #define SD_PATH_CONFIG_DECK     SD_MOUNT_POINT "/" SD_DIR_CONFIG_DECK
@@ -39,7 +40,22 @@
 #define SD_PATH_ASSETS_ICONS    SD_MOUNT_POINT "/" SD_DIR_ASSETS_ICONS
 #define SD_PATH_ASSETS_BG       SD_MOUNT_POINT "/" SD_DIR_ASSETS_BG
 #define SD_PATH_ASSETS_FONTS    SD_MOUNT_POINT "/" SD_DIR_ASSETS_FONTS
+#define SD_PATH_ASSETS_BOOT     SD_MOUNT_POINT "/" SD_DIR_ASSETS_BOOT
 #define SD_PATH_UPDATE          SD_MOUNT_POINT "/" SD_DIR_UPDATE
+
+/* --------------------------------------------------------------------------
+ * Custom boot animation
+ *
+ * Frames live directly under SD_PATH_ASSETS_BOOT, named
+ * frame_0000.jpg, frame_0001.jpg, ... Each frame is stored as JPEG
+ * (decoded on the fly via esp_jpeg / TJpgDec) instead of raw RGB565 --
+ * raw frames at 800x480 are ~750KB each, which is far more than the SD
+ * card's real-world sequential read throughput (~930KB/s measured) can
+ * feed at any usable frame rate. JPEG shrinks each frame down to the
+ * tens-of-KB range so the SD read is no longer the bottleneck.
+ * -------------------------------------------------------------------------- */
+
+#define BOOT_ANIM_CUSTOM_FPS    12
 
 /* --------------------------------------------------------------------------
  * OTA update file naming

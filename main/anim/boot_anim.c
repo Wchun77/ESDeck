@@ -5,10 +5,25 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "app_config.h"
+#include "fs_manager/fs_sd.h"
+#include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "esp_jpeg_dec.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+#define TAG  "[BOOT_ANIM]"
+
 #define SCREEN_W  800
 #define SCREEN_H  480
 #define CENTER_X  (SCREEN_W / 2)
 #define CENTER_Y  (SCREEN_H / 2)
+
+/* 每幀JPEG檔案大小上限,超過就跳過該幀(留很多餘裕,壓縮後的幀通常只有幾十KB) */
+#define BOOT_ANIM_MAX_JPEG_SIZE  (256 * 1024)
 
 static lv_obj_t *s_ring1    = NULL;
 static lv_obj_t *s_ring2    = NULL;
@@ -214,10 +229,224 @@ static void start_animations(void)
 }
 
 /* -----------------------------------------------------------------------
+ * Custom boot animation (JPEG frame sequence from SD card)
+ *
+ * Frames: SD_PATH_ASSETS_BOOT/frame_0000.jpg, frame_0001.jpg, ...
+ *
+ * Decoded with Espressif's esp_new_jpeg (SIMD-accelerated on S3), which
+ * is meaningfully faster than the classic TJpgDec-family decoders --
+ * LVGL's own SJPG decoder (used for the .jpg backgrounds elsewhere in
+ * this app, see ui_img_pool.c) is TJpgDec-based and measured ~400ms for
+ * a single 800x480 frame here, far too slow for a smooth animation.
+ *
+ * This is a completely separate decoder/component from LVGL's SJPG and
+ * from the (unrelated, older) esp_jpeg/TJpgDec package that hung
+ * indefinitely on this hardware in an earlier attempt -- it does not
+ * touch or replace the SJPG decoder LVGL uses for backgrounds/icons,
+ * so those keep working exactly as before.
+ *
+ * This also replaces the original raw-RGB565 .bin approach, which was
+ * bottlenecked by SD read throughput (~930KB/s measured vs. ~9MB/s
+ * needed for 750KB raw frames at 12fps). JPEG shrinks each frame down
+ * to tens of KB so the SD read is no longer the limiting factor.
+ * ----------------------------------------------------------------------- */
+
+static jpeg_dec_handle_t s_jpeg_dec     = NULL;
+static uint8_t          *s_jpeg_in_buf  = NULL;   /* reused compressed-frame read buffer */
+
+static void jpeg_dec_teardown(void)
+{
+    if (s_jpeg_dec) {
+        jpeg_dec_close(s_jpeg_dec);
+        s_jpeg_dec = NULL;
+    }
+    if (s_jpeg_in_buf) {
+        heap_caps_free(s_jpeg_in_buf);
+        s_jpeg_in_buf = NULL;
+    }
+}
+
+static bool jpeg_dec_setup(void)
+{
+    if (s_jpeg_dec && s_jpeg_in_buf) return true;
+
+    s_jpeg_in_buf = heap_caps_malloc(BOOT_ANIM_MAX_JPEG_SIZE, MALLOC_CAP_SPIRAM);
+    if (!s_jpeg_in_buf) {
+        ESP_LOGW(TAG, "PSRAM alloc failed for jpeg input buffer");
+        return false;
+    }
+
+    jpeg_dec_config_t cfg = DEFAULT_JPEG_DEC_CONFIG();
+    cfg.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
+    /* 顏色若上機後不對(偏色/像反相片),把上面改成 JPEG_PIXEL_FORMAT_RGB565_BE 再試 */
+
+    if (jpeg_dec_open(&cfg, &s_jpeg_dec) != JPEG_ERR_OK) {
+        ESP_LOGW(TAG, "jpeg_dec_open failed");
+        jpeg_dec_teardown();
+        return false;
+    }
+    return true;
+}
+
+/* Decode one JPEG file straight into rgb_buf (must be 16-byte aligned and
+ * SCREEN_W*SCREEN_H*2 bytes). Returns false (and logs a warning) on any
+ * I/O, size-mismatch or decode error -- caller decides whether that's
+ * fatal (frame 0) or just a dropped frame (mid-sequence). */
+static bool decode_jpeg_frame(const char *sd_path, uint8_t *rgb_buf)
+{
+    if (!jpeg_dec_setup()) return false;
+
+    FILE *f = fopen(sd_path, "rb");
+    if (!f) {
+        ESP_LOGW(TAG, "cannot open: %s", sd_path);
+        return false;
+    }
+    size_t n = fread(s_jpeg_in_buf, 1, BOOT_ANIM_MAX_JPEG_SIZE, f);
+    bool truncated = (n == BOOT_ANIM_MAX_JPEG_SIZE) && !feof(f);
+    fclose(f);
+
+    if (truncated) {
+        ESP_LOGW(TAG, "frame exceeds %u byte cap, skipped: %s",
+                 (unsigned)BOOT_ANIM_MAX_JPEG_SIZE, sd_path);
+        return false;
+    }
+
+    jpeg_dec_io_t io = { 0 };
+    io.inbuf     = s_jpeg_in_buf;
+    io.inbuf_len = (int)n;
+    io.outbuf    = rgb_buf;
+
+    jpeg_dec_header_info_t info = { 0 };
+    if (jpeg_dec_parse_header(s_jpeg_dec, &io, &info) != JPEG_ERR_OK) {
+        ESP_LOGW(TAG, "header parse failed: %s", sd_path);
+        return false;
+    }
+    if (info.width != SCREEN_W || info.height != SCREEN_H) {
+        ESP_LOGW(TAG, "size mismatch %ux%u (expect %dx%d): %s",
+                 info.width, info.height, SCREEN_W, SCREEN_H, sd_path);
+        return false;
+    }
+    if (jpeg_dec_process(s_jpeg_dec, &io) != JPEG_ERR_OK) {
+        ESP_LOGW(TAG, "decode failed: %s", sd_path);
+        return false;
+    }
+    return true;
+}
+
+/* Returns true if a custom animation was found and played (screen is left
+ * cleared and backlight already on). Returns false if there's no custom
+ * animation on the SD card (or PSRAM/decoding failed on frame 0), in which
+ * case the caller should fall back to the built-in procedural animation. */
+static bool play_custom_boot_anim(void)
+{
+    if (!fs_sd_status()) return false;
+
+    char path[320];
+    snprintf(path, sizeof(path), "%s/frame_0000.jpg", SD_PATH_ASSETS_BOOT);
+
+    FILE *probe = fopen(path, "rb");
+    if (!probe) return false;   /* 沒放自訂動畫,交給原本的程序動畫 */
+    fclose(probe);
+
+    /* esp_new_jpeg 建議輸出buffer要16 byte對齊 */
+    uint8_t *rgb_buf = heap_caps_aligned_alloc(16, SCREEN_W * SCREEN_H * 2, MALLOC_CAP_SPIRAM);
+    if (!rgb_buf) {
+        ESP_LOGW(TAG, "PSRAM alloc failed, falling back to built-in animation");
+        return false;
+    }
+
+    /* 診斷用:量測第一幀實際解碼耗時 */
+    TickType_t decode0_start = xTaskGetTickCount();
+    bool frame0_ok = decode_jpeg_frame(path, rgb_buf);
+    uint32_t decode0_ms = (xTaskGetTickCount() - decode0_start) * portTICK_PERIOD_MS;
+    ESP_LOGI(TAG, "frame 0 decode: %s, %u ms",
+             frame0_ok ? "OK" : "FAILED", (unsigned)decode0_ms);
+
+    if (!frame0_ok) {
+        heap_caps_free(rgb_buf);
+        jpeg_dec_teardown();
+        return false;
+    }
+
+    static lv_img_dsc_t dsc;   /* static: lv_img_set_src keeps a pointer to this */
+    dsc.header.cf          = LV_IMG_CF_TRUE_COLOR;
+    dsc.header.always_zero = 0;
+    dsc.header.w           = SCREEN_W;
+    dsc.header.h           = SCREEN_H;
+    dsc.data_size          = SCREEN_W * SCREEN_H * 2;
+    dsc.data               = rgb_buf;
+
+    lv_obj_t *img = NULL;
+    if (!lvgl_port_lock(-1)) {
+        heap_caps_free(rgb_buf);
+        jpeg_dec_teardown();
+        return false;
+    }
+    lv_obj_t *scr = lv_scr_act();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    img = lv_img_create(scr);
+    lv_img_set_src(img, &dsc);
+    lv_obj_center(img);
+    lvgl_port_unlock();
+
+    wavesahre_rgb_lcd_bl_on();   /* 第一幀已經畫出來了,這時才開背光 */
+
+    const TickType_t frame_ticks = pdMS_TO_TICKS(1000 / BOOT_ANIM_CUSTOM_FPS);
+    const TickType_t anim_start  = xTaskGetTickCount();
+    int frame_idx = 1;
+
+    for (;; frame_idx++) {
+        snprintf(path, sizeof(path), "%s/frame_%04d.jpg", SD_PATH_ASSETS_BOOT, frame_idx);
+        FILE *probe_next = fopen(path, "rb");
+        if (!probe_next) break;   /* 讀不到下一幀,動畫播完 */
+        fclose(probe_next);
+
+        TickType_t frame_start = xTaskGetTickCount();
+
+        if (decode_jpeg_frame(path, rgb_buf)) {
+            if (lvgl_port_lock(-1)) {
+                lv_img_cache_invalidate_src(&dsc);
+                lv_img_set_src(img, &dsc);
+                lvgl_port_unlock();
+            }
+        }
+        /* 解碼失敗就跳過這一幀,不中斷整段動畫 */
+
+        TickType_t elapsed = xTaskGetTickCount() - frame_start;
+        if (elapsed < frame_ticks) {
+            vTaskDelay(frame_ticks - elapsed);
+        }
+    }
+
+    uint32_t total_ms = (xTaskGetTickCount() - anim_start) * portTICK_PERIOD_MS;
+    if (total_ms > 0) {
+        ESP_LOGI(TAG, "%d frames in %u ms (~%.1f fps actual, target %d fps)",
+                 frame_idx, (unsigned)total_ms,
+                 frame_idx * 1000.0f / total_ms, BOOT_ANIM_CUSTOM_FPS);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    if (lvgl_port_lock(-1)) {
+        lv_obj_clean(lv_scr_act());
+        lvgl_port_unlock();
+    }
+
+    heap_caps_free(rgb_buf);
+    jpeg_dec_teardown();
+    return true;
+}
+
+/* -----------------------------------------------------------------------
  * Public entry point
  * ----------------------------------------------------------------------- */
 void boot_anim_play(void)
 {
+    if (play_custom_boot_anim()) return;
+
+    /* 沒有自訂動畫(或PSRAM/解碼失敗) -> 用原本內建的程序動畫 */
     if (!lvgl_port_lock(-1)) return;
     build_boot_screen();
     start_animations();
