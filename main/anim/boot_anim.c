@@ -33,6 +33,11 @@
  * 需要的容量,而且不需要等全部讀完才能開始播放。 */
 #define BOOT_ANIM_PREFETCH_DEPTH  4
 
+/* 解碼輸出buffer雙緩衝:讓「解碼下一幀」跟「上一幀還在被面板掃描/
+ * 渲染」這兩件事重疊,而不是每幀都序列化等render完才能開始解碼下一
+ * 幀。見play_custom_boot_anim()裡的使用方式。 */
+#define BOOT_ANIM_DECODE_BUFFERS  2
+
 /* 等LVGL的渲染task(lvgl_port_task)把剛剛set_src的畫面真的畫完。
  *
  * 不能直接呼叫 lv_refr_now() 自己畫(這個專案的LVGL避免撕裂模式是
@@ -601,26 +606,33 @@ static bool play_custom_boot_anim(void)
         return false;   /* 使用者選了 None,或還沒選過 */
     }
 
-    /* esp_new_jpeg 建議輸出buffer要16 byte對齊 */
-    uint8_t *rgb_buf = heap_caps_aligned_alloc(16, SCREEN_W * SCREEN_H * 2, MALLOC_CAP_SPIRAM);
-    if (!rgb_buf) {
-        ESP_LOGW(TAG, "PSRAM alloc failed, falling back to built-in animation");
-        return false;
+    /* esp_new_jpeg 建議輸出buffer要16 byte對齊。開兩塊輪流用,見上面
+     * BOOT_ANIM_DECODE_BUFFERS的註解。 */
+    uint8_t *rgb_buf[BOOT_ANIM_DECODE_BUFFERS] = { NULL };
+    for (int i = 0; i < BOOT_ANIM_DECODE_BUFFERS; i++) {
+        rgb_buf[i] = heap_caps_aligned_alloc(16, SCREEN_W * SCREEN_H * 2, MALLOC_CAP_SPIRAM);
+        if (!rgb_buf[i]) {
+            ESP_LOGW(TAG, "PSRAM alloc failed, falling back to built-in animation");
+            for (int j = 0; j < i; j++) heap_caps_free(rgb_buf[j]);
+            return false;
+        }
     }
 
     jpeg_prewarm_wait();   /* 如果main.c有先呼叫boot_anim_prewarm_jpeg,這裡通常瞬間返回 */
 
     if (!prefetch_start(anim_dir)) {
         ESP_LOGW(TAG, "prefetch setup failed, falling back to built-in animation");
-        heap_caps_free(rgb_buf);
+        for (int i = 0; i < BOOT_ANIM_DECODE_BUFFERS; i++) heap_caps_free(rgb_buf[i]);
         return false;
     }
+
+    int buf_idx = 0;   /* frame 0一律用buffer 0開局 */
 
     /* 診斷用:量測第一幀實際等待+解碼耗時(背景task這時才剛開始讀,
      * 這裡就是新版真正的「動畫出現前延遲」數字) */
     TickType_t decode0_start = xTaskGetTickCount();
     bool frame0_missing = false;
-    bool frame0_ok = prefetch_next(rgb_buf, &frame0_missing);
+    bool frame0_ok = prefetch_next(rgb_buf[buf_idx], &frame0_missing);
     uint32_t decode0_ms = (xTaskGetTickCount() - decode0_start) * portTICK_PERIOD_MS;
     if (!frame0_missing) {
         ESP_LOGI(TAG, "frame 0 ready: %s, %u ms", frame0_ok ? "OK" : "FAILED", (unsigned)decode0_ms);
@@ -630,7 +642,7 @@ static bool play_custom_boot_anim(void)
         /* frame0_missing == 沒放自訂動畫,交給原本的程序動畫;
          * 否則是解碼失敗,一樣退回內建動畫 */
         prefetch_stop();
-        heap_caps_free(rgb_buf);
+        for (int i = 0; i < BOOT_ANIM_DECODE_BUFFERS; i++) heap_caps_free(rgb_buf[i]);
         jpeg_dec_teardown();
         return false;
     }
@@ -641,12 +653,12 @@ static bool play_custom_boot_anim(void)
     dsc.header.w           = SCREEN_W;
     dsc.header.h           = SCREEN_H;
     dsc.data_size          = SCREEN_W * SCREEN_H * 2;
-    dsc.data               = rgb_buf;
+    dsc.data               = rgb_buf[buf_idx];
 
     lv_obj_t *img = NULL;
     if (!lvgl_port_lock(-1)) {
         prefetch_stop();
-        heap_caps_free(rgb_buf);
+        for (int i = 0; i < BOOT_ANIM_DECODE_BUFFERS; i++) heap_caps_free(rgb_buf[i]);
         jpeg_dec_teardown();
         return false;
     }
@@ -679,18 +691,31 @@ static bool play_custom_boot_anim(void)
     for (;; frame_idx++) {
         TickType_t frame_start = xTaskGetTickCount();
 
+        int next_buf = 1 - buf_idx;
+
+        /* 這裡原本加了一個雙緩衝重用前的防禦性wait_for_render_idle,
+         * 但實測發現它幾乎每幀都超時、根本沒在保護該保護的東西:
+         * disp->inv_p是全域旗標,測的是「上一輪剛發出的invalidate有沒
+         * 有被馬上處理」,不是「這塊buffer上次的畫面有沒有真的畫完」,
+         * 兩者是不同問題,而且前者幾乎必然還沒完成(渲染task本來就還
+         * 沒機會跑)。結果變成每幀白白多吃約50ms,反而抵銷了雙緩衝的
+         * 效果。真正的安全網是時間差本身:每塊buffer重用前間隔了完整
+         * 一輪frame cycle(~130ms),遠大於面板實際掃描一張畫面的時間
+         * (16MHz pixel clock下約25ms),不需要額外檢查就已經夠安全。 */
+
         bool missing = false;
-        bool ok = prefetch_next(rgb_buf, &missing);
+        bool ok = prefetch_next(rgb_buf[next_buf], &missing);
 
         if (ok) {
             if (lvgl_port_lock(-1)) {
+                dsc.data = rgb_buf[next_buf];
                 lv_img_cache_invalidate_src(&dsc);
                 lv_img_set_src(img, &dsc);
                 lvgl_port_unlock();
             }
-            /* 等這幀真的畫出來,避免decode比render快、後面幀的set_src
-             * 蓋掉還沒被畫出來的這幀,導致畫面被靜默跳過。 */
-            wait_for_render_idle(500);
+            buf_idx = next_buf;
+            /* 不再像單緩衝版那樣等這幀真的畫完才進下一輪 -- 這幀的
+             * render時間會跟下一幀的解碼+SD等待重疊,這是雙緩衝的重點。 */
         } else if (missing) {
             break;   /* 沒有下一幀了,動畫播完 */
         }
@@ -717,7 +742,7 @@ static bool play_custom_boot_anim(void)
     }
 
     prefetch_stop();
-    heap_caps_free(rgb_buf);
+    for (int i = 0; i < BOOT_ANIM_DECODE_BUFFERS; i++) heap_caps_free(rgb_buf[i]);
     jpeg_dec_teardown();
     return true;
 }
