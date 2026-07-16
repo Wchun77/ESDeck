@@ -13,10 +13,12 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_jpeg_dec.h"
+#include "esp_partition.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <sys/stat.h>
 
 #define TAG  "[BOOT_ANIM]"
 
@@ -37,6 +39,14 @@
  * 渲染」這兩件事重疊,而不是每幀都序列化等render完才能開始解碼下一
  * 幀。見play_custom_boot_anim()裡的使用方式。 */
 #define BOOT_ANIM_DECODE_BUFFERS  2
+
+/* flash常駐快取:見下方"Flash cache"區塊註解。分區表(partitions.csv)
+ * 裡對應的分區label/subtype。 */
+#define BOOT_ANIM_FLASH_LABEL           "boot_anim"
+#define BOOT_ANIM_FLASH_SUBTYPE         0x40
+#define BOOT_ANIM_FLASH_MAGIC           0x544F4F42u   /* 'BOOT' */
+#define BOOT_ANIM_FLASH_MAX_FRAMES      200
+#define BOOT_ANIM_FLASH_HEADER_RESERVED 4096          /* 一個flash sector,存header+索引 */
 
 /* 等LVGL的渲染task(lvgl_port_task)把剛剛set_src的畫面真的畫完。
  *
@@ -449,6 +459,11 @@ static void prefetch_task(void *arg)
         if (s_pf_stop) break;
 
         snprintf(path, sizeof(path), "%s/frame_%04d.jpg", s_pf_anim_dir, frame_idx);
+
+        /* 診斷用:量測「開檔+讀取+關檔」實際花多久,用來確認SD I/O
+         * 是不是目前fps的主要瓶頸(而不是憑感覺猜)。 */
+        TickType_t io_start = xTaskGetTickCount();
+
         FILE *f = fopen(path, "rb");
         if (!f || s_pf_stop) {
             if (f) fclose(f);
@@ -459,6 +474,9 @@ static void prefetch_task(void *arg)
         size_t n = fread(s_pf_slots[slot].data, 1, BOOT_ANIM_MAX_JPEG_SIZE, f);
         bool truncated = (n == BOOT_ANIM_MAX_JPEG_SIZE) && !feof(f);
         fclose(f);
+
+        uint32_t io_ms = (xTaskGetTickCount() - io_start) * portTICK_PERIOD_MS;
+        ESP_LOGI(TAG, "pf read frame %d: %u ms, %u bytes", frame_idx, (unsigned)io_ms, (unsigned)n);
 
         if (truncated) {
             /* len==0是"動畫已結束"的專用訊號(見prefetch_next),不能拿
@@ -530,11 +548,18 @@ fail:
 static bool prefetch_next(uint8_t *rgb_buf, bool *out_missing)
 {
     *out_missing = false;
+
+    /* 診斷用:量測消費端在這裡真的卡了多久等背景task把資料生出來。
+     * 如果這個數字接近0,代表背景task一直領先、緩衝區沒被吃空,瓶頸
+     * 在解碼/顯示端;如果這個數字偏大,代表消費端常常在等SD讀取,
+     * 瓶頸確實在I/O(可能是跟img_preload搶頻寬)。 */
+    TickType_t wait_start = xTaskGetTickCount();
     if (xSemaphoreTake(s_pf_filled_sem, pdMS_TO_TICKS(5000)) != pdTRUE) {
         ESP_LOGW(TAG, "prefetch stalled, aborting animation");
         *out_missing = true;
         return false;
     }
+    uint32_t wait_ms = (xTaskGetTickCount() - wait_start) * portTICK_PERIOD_MS;
 
     int slot = s_pf_consume_slot;
     size_t len = s_pf_slots[slot].len;
@@ -542,7 +567,11 @@ static bool prefetch_next(uint8_t *rgb_buf, bool *out_missing)
     if (len == 0) {
         *out_missing = true;
     } else {
+        TickType_t decode_start = xTaskGetTickCount();
         ok = decode_jpeg_mem(s_pf_slots[slot].data, len, rgb_buf);
+        uint32_t decode_ms = (xTaskGetTickCount() - decode_start) * portTICK_PERIOD_MS;
+        ESP_LOGI(TAG, "consume: waited %u ms for data, decode %u ms",
+                 (unsigned)wait_ms, (unsigned)decode_ms);
     }
 
     xSemaphoreGive(s_pf_free_sem);
@@ -578,34 +607,288 @@ static void prefetch_stop(void)
     }
 }
 
-/* Returns true if a custom animation was found and played (screen is left
- * cleared and backlight already on). Returns false if there's no custom
- * animation on the SD card (or PSRAM/decoding failed on frame 0), in which
- * case the caller should fall back to the built-in procedural animation. */
-/* 讀NVS裡使用者選定的開機動畫子資料夾名稱,組出完整路徑寫進out_path。
- * 沒設定過、或使用者選的是"none",回傳false(交給程序動畫)。 */
-static bool get_selected_anim_dir(char *out_path, size_t out_size)
+/* 讀NVS裡使用者選定的開機動畫子資料夾名稱,同時回傳原始名稱(給flash
+ * 快取比對用)跟組好的SD完整路徑。沒設定過、或使用者選的是"none",
+ * 回傳false(交給程序動畫)。 */
+static bool get_selected_anim(char *name_out, size_t name_out_size,
+                               char *dir_out, size_t dir_out_size)
 {
-    char name[64];
-    if (!nvs_manager_get_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_BOOT_ANIM, name, sizeof(name))) {
+    if (!nvs_manager_get_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_BOOT_ANIM, name_out, name_out_size)) {
         return false;   /* 從沒選過 */
     }
-    if (name[0] == '\0' || strcmp(name, "none") == 0) {
+    if (name_out[0] == '\0' || strcmp(name_out, "none") == 0) {
         return false;
     }
-    snprintf(out_path, out_size, "%s/%s", SD_PATH_ASSETS_BOOT, name);
+    snprintf(dir_out, dir_out_size, "%s/%s", SD_PATH_ASSETS_BOOT, name_out);
     return true;
 }
 
-static bool play_custom_boot_anim(void)
-{
-    if (!fs_sd_status()) return false;
+/* -----------------------------------------------------------------------
+ * Flash cache: 常駐版本的開機動畫,完全繞開SD卡
+ *
+ * 實測顯示目前fps的最大瓶頸是SD讀取(平均~118ms/幀,比decode本身的
+ * ~85ms還多),原因是每次fopen在FAT檔案系統上的目錄查找/SD卡指令交握
+ * 開銷,加上跟img_preload共用SD實體頻寬。這兩個問題flash都沒有:
+ * esp_partition_mmap()把flash內容映射成一段記憶體位址,讀取近乎零成本
+ * (不用fopen、不用跟任何人搶SD頻寬)。
+ *
+ * 代價是flash內容不像SD卡檔案那樣隨插即用──使用者換了一套動畫、但
+ * flash裡快取的還是舊的那套時,要先花一次時間把新的整套從SD複製進
+ * flash(這次一樣要讀SD,不會比較快),之後開機才吃得到flash的好處。
+ * 這次複製只在使用者剛換動畫、flash快取還沒跟上時的那次開機發生,而且
+ * 整個過程畫面全黑(backlight還沒開、也不建立任何LVGL物件),避免flash
+ * 抹寫時CPU短暫停頓的風險跟LVGL渲染同時發生。
+ *
+ * header寫在分區最前面的一個sector(BOOT_ANIM_FLASH_HEADER_RESERVED),
+ * 而且是整個provision流程裡最後一筆寫入──這樣萬一途中斷電,header的
+ * magic/name對不上,下次開機自然會判定快取無效、重新provision,不會
+ * 讀到寫一半的損毀資料。
+ * ----------------------------------------------------------------------- */
 
-    char anim_dir[288];
-    if (!get_selected_anim_dir(anim_dir, sizeof(anim_dir))) {
-        return false;   /* 使用者選了 None,或還沒選過 */
+typedef struct {
+    uint32_t magic;
+    char     name[64];
+    uint32_t frame_count;
+    uint32_t frame_len[BOOT_ANIM_FLASH_MAX_FRAMES];
+} boot_anim_flash_header_t;
+
+static bool flash_cache_valid(const esp_partition_t *part, const char *name,
+                               boot_anim_flash_header_t *hdr_out)
+{
+    if (esp_partition_read(part, 0, hdr_out, sizeof(*hdr_out)) != ESP_OK) return false;
+    if (hdr_out->magic != BOOT_ANIM_FLASH_MAGIC) return false;
+    if (strncmp(hdr_out->name, name, sizeof(hdr_out->name)) != 0) return false;
+    if (hdr_out->frame_count == 0 || hdr_out->frame_count > BOOT_ANIM_FLASH_MAX_FRAMES) return false;
+    return true;
+}
+
+/* 複製前先用stat()(只讀檔案metadata,不搬資料本體)快速估算整套動畫
+ * 需要多少bytes、多少幀,判斷放不放得下這個flash分區。放不下就直接
+ * 回傳false,呼叫端會整個跳過provision、原封不動退回SD播放完整版
+ * 動畫──不會發生「複製到一半才發現放不下,結果flash裡快取了一份被
+ * 截斷的動畫」這種情況。 */
+static bool flash_cache_will_fit(const char *anim_dir, size_t budget)
+{
+    /* static: 這個函式在main task那條本來就很緊的呼叫堆疊上執行(見
+     * play_custom_boot_anim()裡的stack overflow說明),避免再疊一份
+     * 大buffer上去。 */
+    static char path[320];
+    struct stat st;
+    size_t total = 0;
+    int count = 0;
+
+    for (; count < BOOT_ANIM_FLASH_MAX_FRAMES; count++) {
+        snprintf(path, sizeof(path), "%s/frame_%04d.jpg", anim_dir, count);
+        if (stat(path, &st) != 0) break;   /* 沒有更多幀了 */
+        total += (size_t)st.st_size;
+        if (total > budget) return false;
     }
 
+    /* 迴圈是因為stat()失敗才停(真的沒幀了)還是撞到幀數上限才停?
+     * 撞上限的話,代表還有更多幀會被悄悄丟掉,一樣算放不下。 */
+    if (count == BOOT_ANIM_FLASH_MAX_FRAMES) {
+        snprintf(path, sizeof(path), "%s/frame_%04d.jpg", anim_dir, count);
+        if (stat(path, &st) == 0) return false;
+    }
+    return true;
+}
+
+/* 把anim_dir底下整套frame_%04d.jpg複製進flash分區。純粹搬資料,不解碼
+ * 也不碰LVGL/畫面。失敗只代表這次沒快取成功,不影響呼叫端接下來要走
+ * 的SD播放路徑,下次開機會再試一次。 */
+static bool flash_cache_provision(const esp_partition_t *part, const char *anim_dir, const char *name)
+{
+    size_t budget = part->size - BOOT_ANIM_FLASH_HEADER_RESERVED;
+    if (!flash_cache_will_fit(anim_dir, budget)) {
+        ESP_LOGW(TAG, "animation too large for flash cache (budget %u bytes), staying on SD",
+                 (unsigned)budget);
+        return false;
+    }
+
+    ESP_LOGI(TAG, "provisioning flash cache for '%s' ...", name);
+
+    if (esp_partition_erase_range(part, 0, part->size) != ESP_OK) {
+        ESP_LOGW(TAG, "flash erase failed");
+        return false;
+    }
+
+    uint8_t *io_buf = heap_caps_malloc(BOOT_ANIM_MAX_JPEG_SIZE, MALLOC_CAP_SPIRAM);
+    if (!io_buf) {
+        ESP_LOGW(TAG, "PSRAM alloc failed for flash cache staging buffer");
+        return false;
+    }
+
+    /* static: 見play_custom_boot_anim()裡的stack overflow說明,這兩個
+     * buffer合計超過1KB,不該放在main task本來就很緊的呼叫堆疊上。 */
+    static boot_anim_flash_header_t hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    static char path[320];
+    size_t write_off = BOOT_ANIM_FLASH_HEADER_RESERVED;
+    int frame_idx = 0;
+    TickType_t t0 = xTaskGetTickCount();
+
+    for (; frame_idx < BOOT_ANIM_FLASH_MAX_FRAMES; frame_idx++) {
+        snprintf(path, sizeof(path), "%s/frame_%04d.jpg", anim_dir, frame_idx);
+        FILE *f = fopen(path, "rb");
+        if (!f) break;   /* 沒有更多幀了,正常結束掃描 */
+
+        size_t n = fread(io_buf, 1, BOOT_ANIM_MAX_JPEG_SIZE, f);
+        fclose(f);
+
+        if (write_off + n > part->size) {
+            ESP_LOGW(TAG, "flash cache full at frame %d, animation truncated here", frame_idx);
+            break;
+        }
+        if (esp_partition_write(part, write_off, io_buf, n) != ESP_OK) {
+            ESP_LOGW(TAG, "flash write failed at frame %d", frame_idx);
+            heap_caps_free(io_buf);
+            return false;
+        }
+        hdr.frame_len[frame_idx] = (uint32_t)n;
+        write_off += n;
+    }
+    heap_caps_free(io_buf);
+
+    if (frame_idx == 0) {
+        ESP_LOGW(TAG, "no frames found under %s, nothing to cache", anim_dir);
+        return false;
+    }
+
+    hdr.magic = BOOT_ANIM_FLASH_MAGIC;
+    snprintf(hdr.name, sizeof(hdr.name), "%s", name);
+    hdr.frame_count = (uint32_t)frame_idx;
+
+    /* header最後才寫,見上面大註解的斷電安全性說明 */
+    if (esp_partition_write(part, 0, &hdr, sizeof(hdr)) != ESP_OK) {
+        ESP_LOGW(TAG, "flash header write failed");
+        return false;
+    }
+
+    uint32_t ms = (xTaskGetTickCount() - t0) * portTICK_PERIOD_MS;
+    ESP_LOGI(TAG, "flash cache provisioned: %d frames, %u bytes, %u ms",
+             frame_idx, (unsigned)(write_off - BOOT_ANIM_FLASH_HEADER_RESERVED), (unsigned)ms);
+    return true;
+}
+
+/* 從flash快取直接播放,完全不碰SD卡。mmap給零成本的讀取,decode仍然
+ * 用雙緩衝(見BOOT_ANIM_DECODE_BUFFERS),因為decode/render重疊這件事
+ * 跟資料來源是SD還是flash無關,一樣值得做。 */
+static bool play_from_flash(const esp_partition_t *part, const boot_anim_flash_header_t *hdr)
+{
+    const void *mapped = NULL;
+    esp_partition_mmap_handle_t mmap_handle;
+    if (esp_partition_mmap(part, 0, part->size, ESP_PARTITION_MMAP_DATA, &mapped, &mmap_handle) != ESP_OK) {
+        ESP_LOGW(TAG, "flash mmap failed, falling back to SD");
+        return false;
+    }
+    const uint8_t *blob = (const uint8_t *)mapped + BOOT_ANIM_FLASH_HEADER_RESERVED;
+
+    uint8_t *rgb_buf[BOOT_ANIM_DECODE_BUFFERS] = { NULL };
+    for (int i = 0; i < BOOT_ANIM_DECODE_BUFFERS; i++) {
+        rgb_buf[i] = heap_caps_aligned_alloc(16, SCREEN_W * SCREEN_H * 2, MALLOC_CAP_SPIRAM);
+        if (!rgb_buf[i]) {
+            ESP_LOGW(TAG, "PSRAM alloc failed, falling back to SD");
+            for (int j = 0; j < i; j++) heap_caps_free(rgb_buf[j]);
+            esp_partition_munmap(mmap_handle);
+            return false;
+        }
+    }
+
+    int buf_idx = 0;
+    size_t offset = 0;
+
+    TickType_t decode0_start = xTaskGetTickCount();
+    bool frame0_ok = decode_jpeg_mem(blob + offset, hdr->frame_len[0], rgb_buf[buf_idx]);
+    uint32_t decode0_ms = (xTaskGetTickCount() - decode0_start) * portTICK_PERIOD_MS;
+    ESP_LOGI(TAG, "frame 0 ready (flash): %s, %u ms", frame0_ok ? "OK" : "FAILED", (unsigned)decode0_ms);
+
+    if (!frame0_ok) {
+        for (int i = 0; i < BOOT_ANIM_DECODE_BUFFERS; i++) heap_caps_free(rgb_buf[i]);
+        esp_partition_munmap(mmap_handle);
+        jpeg_dec_teardown();
+        return false;
+    }
+    offset += hdr->frame_len[0];
+
+    static lv_img_dsc_t dsc;
+    dsc.header.cf          = LV_IMG_CF_TRUE_COLOR;
+    dsc.header.always_zero = 0;
+    dsc.header.w           = SCREEN_W;
+    dsc.header.h           = SCREEN_H;
+    dsc.data_size          = SCREEN_W * SCREEN_H * 2;
+    dsc.data               = rgb_buf[buf_idx];
+
+    lv_obj_t *img = NULL;
+    if (!lvgl_port_lock(-1)) {
+        for (int i = 0; i < BOOT_ANIM_DECODE_BUFFERS; i++) heap_caps_free(rgb_buf[i]);
+        esp_partition_munmap(mmap_handle);
+        jpeg_dec_teardown();
+        return false;
+    }
+    lv_obj_t *scr = lv_scr_act();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    img = lv_img_create(scr);
+    lv_img_set_src(img, &dsc);
+    lv_obj_center(img);
+    lvgl_port_unlock();
+
+    wait_for_render_idle(1000);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    wavesahre_rgb_lcd_bl_on();
+
+    const TickType_t frame_ticks = pdMS_TO_TICKS(1000 / BOOT_ANIM_CUSTOM_FPS);
+    const TickType_t anim_start  = xTaskGetTickCount();
+    uint32_t frame_idx;
+
+    for (frame_idx = 1; frame_idx < hdr->frame_count; frame_idx++) {
+        TickType_t frame_start = xTaskGetTickCount();
+        int next_buf = 1 - buf_idx;
+
+        bool ok = decode_jpeg_mem(blob + offset, hdr->frame_len[frame_idx], rgb_buf[next_buf]);
+        if (ok) {
+            if (lvgl_port_lock(-1)) {
+                dsc.data = rgb_buf[next_buf];
+                lv_img_cache_invalidate_src(&dsc);
+                lv_img_set_src(img, &dsc);
+                lvgl_port_unlock();
+            }
+            buf_idx = next_buf;
+        }
+        offset += hdr->frame_len[frame_idx];
+
+        TickType_t elapsed = xTaskGetTickCount() - frame_start;
+        if (elapsed < frame_ticks) {
+            vTaskDelay(frame_ticks - elapsed);
+        }
+    }
+
+    uint32_t total_ms = (xTaskGetTickCount() - anim_start) * portTICK_PERIOD_MS;
+    if (total_ms > 0) {
+        ESP_LOGI(TAG, "%u frames in %u ms (~%.1f fps actual, target %d fps) [flash]",
+                 (unsigned)frame_idx, (unsigned)total_ms,
+                 frame_idx * 1000.0f / total_ms, BOOT_ANIM_CUSTOM_FPS);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(200));
+    if (lvgl_port_lock(-1)) {
+        lv_obj_clean(lv_scr_act());
+        lvgl_port_unlock();
+    }
+
+    for (int i = 0; i < BOOT_ANIM_DECODE_BUFFERS; i++) heap_caps_free(rgb_buf[i]);
+    esp_partition_munmap(mmap_handle);
+    jpeg_dec_teardown();
+    return true;
+}
+
+/* Returns true if a custom animation was found and played (screen is left
+ * cleared and backlight already on). Returns false if there's no custom
+ * animation configured, in which case the caller should fall back to the
+ * built-in procedural animation. */
+static bool play_from_sd(const char *anim_dir)
+{
     /* esp_new_jpeg 建議輸出buffer要16 byte對齊。開兩塊輪流用,見上面
      * BOOT_ANIM_DECODE_BUFFERS的註解。 */
     uint8_t *rgb_buf[BOOT_ANIM_DECODE_BUFFERS] = { NULL };
@@ -745,6 +1028,58 @@ static bool play_custom_boot_anim(void)
     for (int i = 0; i < BOOT_ANIM_DECODE_BUFFERS; i++) heap_caps_free(rgb_buf[i]);
     jpeg_dec_teardown();
     return true;
+}
+
+/* Returns true if a custom animation was found and played (screen is left
+ * cleared and backlight already on). Returns false if there's no custom
+ * animation configured, in which case the caller should fall back to the
+ * built-in procedural animation.
+ *
+ * 判斷順序:flash快取命中 -> 直接從flash播(全程不碰SD);沒命中(第一次
+ * 選這套動畫,或使用者剛換了一套) -> 需要SD,先嘗試把這套動畫複製進
+ * flash(複製期間畫面全黑,失敗也不影響這次播放,只是下次開機還是走
+ * 這條路),再照舊從SD播放。 */
+static bool play_custom_boot_anim(void)
+{
+    /* main task(app_main)的stack只有3584 bytes(CONFIG_ESP_MAIN_TASK_
+     * STACK_SIZE),boot_anim_flash_header_t光是frame_len陣列就佔872
+     * bytes,這裡跟flash_cache_provision()裡同一個struct疊在一起放
+     * stack上,再加上esp_partition_erase_range/write本身呼叫深度,
+     * 曾經直接把main task的stack炸掉(stack overflow panic)。這幾個
+     * 大型buffer全部改成static,移到.bss,不占用呼叫堆疊 -- boot_anim
+     * 全程單執行緒、沒有重入疑慮,static在這裡是安全的。 */
+    static char name[64];
+    static char anim_dir[288];
+    if (!get_selected_anim(name, sizeof(name), anim_dir, sizeof(anim_dir))) {
+        return false;   /* 使用者選了 None,或還沒選過 */
+    }
+
+    jpeg_prewarm_wait();   /* 如果main.c有先呼叫boot_anim_prewarm_jpeg,這裡通常瞬間返回 */
+
+    const esp_partition_t *part = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)BOOT_ANIM_FLASH_SUBTYPE,
+        BOOT_ANIM_FLASH_LABEL);
+    if (!part) {
+        ESP_LOGW(TAG, "flash cache partition '%s' not found, SD-only this boot",
+                 BOOT_ANIM_FLASH_LABEL);
+    }
+
+    static boot_anim_flash_header_t hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    if (part && flash_cache_valid(part, name, &hdr)) {
+        if (play_from_flash(part, &hdr)) return true;
+        ESP_LOGW(TAG, "flash playback failed, falling back to SD");
+    }
+
+    if (!fs_sd_status()) return false;
+
+    if (part) {
+        if (!flash_cache_provision(part, anim_dir, name)) {
+            ESP_LOGW(TAG, "flash cache provisioning failed, will retry next boot");
+        }
+    }
+
+    return play_from_sd(anim_dir);
 }
 
 /* -----------------------------------------------------------------------

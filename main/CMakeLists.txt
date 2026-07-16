@@ -53,6 +53,7 @@ idf_component_register(
         sdmmc
         driver
         spi_flash
+        esp_partition
         wear_levelling
         espressif__esp_tinyusb
         espressif__esp_new_jpeg
