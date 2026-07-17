@@ -12,6 +12,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #define TAG  "MON"
 
@@ -32,6 +33,7 @@
  * ----------------------------------------------------------------------- */
 static lv_obj_t  *s_sidebar_pages  = NULL;
 static lv_obj_t  *s_sidebar_btns[MON_TOTAL_PAGE_MAX];
+static bool       s_sidebar_has_icon[MON_TOTAL_PAGE_MAX];  /* true = button shows an image, selection uses outline instead of bg_color */
 static lv_obj_t  *s_pages[MON_TOTAL_PAGE_MAX];
 static int        s_total_pages    = 1;   /* clock always present */
 static int        s_cur_page       = MON_PAGE_IDX_CLOCK;
@@ -94,12 +96,20 @@ static void sidebar_btn_cb(lv_event_t *e)
 
     lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page],
                               lv_color_hex(0x2a2a2a), 0);
+    lv_obj_set_style_outline_width(s_sidebar_btns[s_cur_page], 0, 0);
     lv_obj_add_flag(s_pages[s_cur_page], LV_OBJ_FLAG_HIDDEN);
 
     s_cur_page = idx;
 
-    lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page],
-                              lv_color_hex(0x0055cc), 0);
+    /* Icon buttons are covered edge-to-edge by the image, so a bg_color
+     * swap would be invisible -- use an outline ring instead. Text buttons
+     * keep the original full bg_color swap. */
+    if (s_sidebar_has_icon[s_cur_page]) {
+        lv_obj_set_style_outline_width(s_sidebar_btns[s_cur_page], 3, 0);
+    } else {
+        lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page],
+                                  lv_color_hex(0x0055cc), 0);
+    }
     lv_obj_clear_flag(s_pages[s_cur_page], LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -540,29 +550,65 @@ void ui_monitor_enter(lv_obj_t *sidebar)
         const char *name = (i == MON_PAGE_IDX_CLOCK)
                            ? "Clock"
                            : s_mon_cfg.pages[i - 1].name;
+        const char *side_icon = (i == MON_PAGE_IDX_CLOCK)
+                                ? s_mon_cfg.clock.side_icon
+                                : s_mon_cfg.pages[i - 1].side_icon;
 
         lv_obj_t *btn = lv_btn_create(s_sidebar_pages);
         lv_obj_set_size(btn, 64, 56);
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x2a2a2a), 0);
         lv_obj_set_style_radius(btn, 8, 0);
+        lv_obj_set_style_clip_corner(btn, true, 0);
+        lv_obj_set_style_outline_color(btn, lv_color_hex(0x0055cc), 0);
+        lv_obj_set_style_outline_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, sidebar_btn_cb, LV_EVENT_CLICKED,
                             (void *)(uintptr_t)i);
         lv_obj_clear_flag(btn, LV_OBJ_FLAG_PRESS_LOCK);
         s_sidebar_btns[i] = btn;
 
-        lv_obj_t *lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, name);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xcccccc), 0);
-        lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
-        lv_obj_set_width(lbl, 60);
-        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_center(lbl);
+        /* Custom icon replaces the text label entirely when present and the
+         * file actually exists on SD -- see side_icon field comment in
+         * ui_monitor_config.h. Falls back to the page name text otherwise. */
+        bool has_icon = false;
+        if (side_icon[0] != '\0') {
+            char icon_path[MON_CFG_ICON_LEN + 24];
+            ui_monitor_config_icon_path(side_icon, icon_path, sizeof(icon_path));
+
+            FILE *f = fopen(icon_path + 2, "r");
+            if (f) {
+                fclose(f);
+                lv_obj_t *img = lv_img_create(btn);
+                lv_img_set_src(img, icon_path);
+                lv_obj_center(img);
+                has_icon = true;
+                ESP_LOGI(TAG, "sidebar page %d '%s' icon: %s", i, name, icon_path);
+            } else {
+                ESP_LOGW(TAG, "sidebar page %d '%s' side_icon set but not found: %s (falling back to text)",
+                         i, name, icon_path);
+            }
+        }
+
+        if (!has_icon) {
+            lv_obj_t *lbl = lv_label_create(btn);
+            lv_label_set_text(lbl, name);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(lbl, lv_color_hex(0xcccccc), 0);
+            lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+            lv_obj_set_width(lbl, 60);
+            lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_center(lbl);
+        }
+
+        s_sidebar_has_icon[i] = has_icon;
     }
 
     /* Highlight clock button */
-    lv_obj_set_style_bg_color(s_sidebar_btns[MON_PAGE_IDX_CLOCK],
-                              lv_color_hex(0x0055cc), 0);
+    if (s_sidebar_has_icon[MON_PAGE_IDX_CLOCK]) {
+        lv_obj_set_style_outline_width(s_sidebar_btns[MON_PAGE_IDX_CLOCK], 3, 0);
+    } else {
+        lv_obj_set_style_bg_color(s_sidebar_btns[MON_PAGE_IDX_CLOCK],
+                                  lv_color_hex(0x0055cc), 0);
+    }
 
     /* Load background images */
     char bg_path[MON_CFG_BG_LEN + 16];

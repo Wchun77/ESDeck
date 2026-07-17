@@ -169,6 +169,10 @@ bool ui_config_load(deck_cfg_t *cfg)
         if (cJSON_IsString(bg) && bg->valuestring)
             snprintf(page->bg_image, UI_CONFIG_BG_LEN, "%s", bg->valuestring);
 
+        cJSON *side_icon = cJSON_GetObjectItem(page_obj, "side_icon");
+        if (cJSON_IsString(side_icon) && side_icon->valuestring)
+            snprintf(page->side_icon, UI_CONFIG_SIDE_ICON_LEN, "%s", side_icon->valuestring);
+
         cJSON *btns_arr = cJSON_GetObjectItem(page_obj, "buttons");
         if (!cJSON_IsArray(btns_arr)) {
             ESP_LOGW(TAG, "Page %d has no buttons array", pi);

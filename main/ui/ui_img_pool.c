@@ -192,13 +192,15 @@ void ui_img_pool_free(void)
 
 void ui_img_pool_load(const deck_cfg_t *cfg)
 {
-    /* Pool capacity: icons (decoded eagerly) + bg slots (lazy, LRU managed).
-     * Reserve one slot per page that has a bg image so LRU eviction has room
-     * to operate without permanently losing a slot to a freed entry. */
+    /* Pool capacity: icons + sidebar icons (both decoded eagerly) + bg slots
+     * (lazy, LRU managed). Reserve one slot per page that has a bg image so
+     * LRU eviction has room to operate without permanently losing a slot to
+     * a freed entry. */
     int icon_count = 0;
     int bg_count   = 0;
     for (int p = 0; p < cfg->page_count; p++) {
         if (cfg->pages[p].bg_image[0]) bg_count++;
+        if (cfg->pages[p].side_icon[0]) icon_count++;
         icon_count += cfg->pages[p].button_count;
     }
 
@@ -219,6 +221,17 @@ void ui_img_pool_load(const deck_cfg_t *cfg)
             if (!f) continue;
             fclose(f);
             ui_img_pool_decode(path);
+        }
+
+        if (cfg->pages[p].side_icon[0]) {
+            char path[sizeof("S:") + sizeof(UI_CONFIG_SIDE_ICON_PATH) + 1 + UI_CONFIG_SIDE_ICON_LEN];
+            snprintf(path, sizeof(path), "S:%s/%s",
+                     UI_CONFIG_SIDE_ICON_PATH, cfg->pages[p].side_icon);
+            FILE *f = fopen(path + 2, "r");
+            if (f) {
+                fclose(f);
+                ui_img_pool_decode(path);
+            }
         }
     }
 

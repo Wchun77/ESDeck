@@ -33,6 +33,7 @@
 #define SD_DIR_ASSETS_BG        "assets/backgrounds"
 #define SD_DIR_ASSETS_FONTS     "assets/fonts"
 #define SD_DIR_ASSETS_BOOT      "assets/boot"
+#define SD_DIR_ASSETS_SIDE_ICON "assets/side_icons"
 #define SD_DIR_UPDATE           "update"
 
 #define SD_PATH_CONFIG_DECK     SD_MOUNT_POINT "/" SD_DIR_CONFIG_DECK
@@ -41,6 +42,7 @@
 #define SD_PATH_ASSETS_BG       SD_MOUNT_POINT "/" SD_DIR_ASSETS_BG
 #define SD_PATH_ASSETS_FONTS    SD_MOUNT_POINT "/" SD_DIR_ASSETS_FONTS
 #define SD_PATH_ASSETS_BOOT     SD_MOUNT_POINT "/" SD_DIR_ASSETS_BOOT
+#define SD_PATH_ASSETS_SIDE_ICON SD_MOUNT_POINT "/" SD_DIR_ASSETS_SIDE_ICON
 #define SD_PATH_UPDATE          SD_MOUNT_POINT "/" SD_DIR_UPDATE
 
 /* --------------------------------------------------------------------------

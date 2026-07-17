@@ -145,6 +145,7 @@ void ui_monitor_config_load(monitor_cfg_t *cfg)
     cJSON *clk = cJSON_GetObjectItem(root, "clock");
     if (cJSON_IsObject(clk)) {
         str_field(clk, "bg_image",  cfg->clock.bg_image,  MON_CFG_BG_LEN);
+        str_field(clk, "side_icon", cfg->clock.side_icon, MON_CFG_ICON_LEN);
         str_field(clk, "font_time", cfg->clock.font_time, MON_CFG_FONT_LEN);
         str_field(clk, "font_sec",  cfg->clock.font_sec,  MON_CFG_FONT_LEN);
         str_field(clk, "font_date", cfg->clock.font_date, MON_CFG_FONT_LEN);
@@ -176,8 +177,9 @@ void ui_monitor_config_load(monitor_cfg_t *cfg)
             if (!cJSON_IsObject(pg)) continue;
 
             mon_page_cfg_t *p = &cfg->pages[i];
-            str_field(pg, "name",     p->name,     MON_PAGE_NAME_LEN);
-            str_field(pg, "bg_image", p->bg_image,  MON_CFG_BG_LEN);
+            str_field(pg, "name",      p->name,      MON_PAGE_NAME_LEN);
+            str_field(pg, "bg_image",  p->bg_image,  MON_CFG_BG_LEN);
+            str_field(pg, "side_icon", p->side_icon, MON_CFG_ICON_LEN);
 
             /* Default page name if absent */
             if (p->name[0] == '\0')
@@ -295,4 +297,13 @@ void ui_monitor_config_font_path(const char *filename, char *out, size_t out_siz
         return;
     }
     snprintf(out, out_size, "S:%s/%s", UI_MONITOR_FONT_PATH, filename);
+}
+
+void ui_monitor_config_icon_path(const char *filename, char *out, size_t out_size)
+{
+    if (!filename || filename[0] == '\0') {
+        out[0] = '\0';
+        return;
+    }
+    snprintf(out, out_size, "S:%s/%s", UI_MONITOR_ICON_PATH, filename);
 }

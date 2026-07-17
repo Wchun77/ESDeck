@@ -8,10 +8,12 @@
 #define UI_MONITOR_PATH        SD_PATH_CONFIG_MONITOR
 #define UI_MONITOR_BG_PATH     SD_PATH_ASSETS_BG
 #define UI_MONITOR_FONT_PATH   SD_PATH_ASSETS_FONTS
+#define UI_MONITOR_ICON_PATH   SD_PATH_ASSETS_SIDE_ICON
 
 #define MON_CFG_FNAME_LEN   64
 #define MON_CFG_BG_LEN      64
 #define MON_CFG_FONT_LEN    64
+#define MON_CFG_ICON_LEN    32
 
 /* Default values -- used when JSON key is absent or file not found */
 #define MON_CFG_DEF_COL_TIME    0xf0f2ff
@@ -24,6 +26,7 @@
 
 typedef struct {
     char     bg_image[MON_CFG_BG_LEN];    /* filename only, e.g. "IMG_3238.jpg" */
+    char     side_icon[MON_CFG_ICON_LEN]; /* filename only, under UI_MONITOR_ICON_PATH; empty = show "Clock" text on sidebar button */
     char     font_time[MON_CFG_FONT_LEN]; /* filename only, e.g. "oxanium_270.bin" */
     char     font_sec[MON_CFG_FONT_LEN];
     char     font_date[MON_CFG_FONT_LEN];
@@ -77,6 +80,7 @@ typedef enum {
 typedef struct {
     char         name[MON_PAGE_NAME_LEN];
     char         bg_image[MON_CFG_BG_LEN];
+    char         side_icon[MON_CFG_ICON_LEN];  /* filename only, under UI_MONITOR_ICON_PATH; empty = show name text on sidebar button */
     mon_cell_id_t cells[MON_PAGE_CELLS];  /* MON_CELL_NONE = empty slot */
 } mon_page_cfg_t;
 
@@ -129,3 +133,9 @@ void ui_monitor_config_bg_path(const char *filename, char *out, size_t out_size)
  * out must be at least MON_CFG_FONT_LEN + 24 bytes.
  */
 void ui_monitor_config_font_path(const char *filename, char *out, size_t out_size);
+
+/*
+ * Build full LVGL FS path for a monitor sidebar page icon.
+ * out must be at least MON_CFG_ICON_LEN + 24 bytes.
+ */
+void ui_monitor_config_icon_path(const char *filename, char *out, size_t out_size);

@@ -12,12 +12,14 @@
 #define UI_CONFIG_ICON_LEN     32
 #define UI_CONFIG_NAME_LEN     32
 
-#define UI_CONFIG_ICON_PATH    SD_PATH_ASSETS_ICONS
-#define UI_CONFIG_BG_PATH      SD_PATH_ASSETS_BG
-#define UI_CONFIG_DECK_PATH    SD_PATH_CONFIG_DECK
-#define UI_CONFIG_JSON_PREFIX  "esp_"
+#define UI_CONFIG_ICON_PATH      SD_PATH_ASSETS_ICONS
+#define UI_CONFIG_BG_PATH        SD_PATH_ASSETS_BG
+#define UI_CONFIG_SIDE_ICON_PATH SD_PATH_ASSETS_SIDE_ICON
+#define UI_CONFIG_DECK_PATH      SD_PATH_CONFIG_DECK
+#define UI_CONFIG_JSON_PREFIX    "esp_"
 
 #define UI_CONFIG_BG_LEN       64
+#define UI_CONFIG_SIDE_ICON_LEN 32
 
 typedef struct {
     char label[UI_CONFIG_LABEL_LEN];
@@ -27,6 +29,7 @@ typedef struct {
 typedef struct {
     char       name[UI_CONFIG_NAME_LEN];
     char       bg_image[UI_CONFIG_BG_LEN];
+    char       side_icon[UI_CONFIG_SIDE_ICON_LEN];  /* filename only, under UI_CONFIG_SIDE_ICON_PATH; empty = show name text on sidebar button */
     btn_cfg_t *buttons;
     uint8_t    button_count;
 } page_cfg_t;

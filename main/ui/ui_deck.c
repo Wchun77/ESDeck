@@ -19,6 +19,7 @@ static deck_cfg_t   s_cfg         = {0};
 static lv_obj_t    *s_deck_root   = NULL;
 static lv_obj_t   **s_pages       = NULL;
 static lv_obj_t   **s_sidebar_btns = NULL;
+static bool         *s_sidebar_has_icon = NULL;  /* true = button shows an image, selection uses outline instead of bg_color */
 static lv_obj_t    *s_sidebar_pages = NULL;
 static int          s_page_count  = 0;
 static int          s_cur_page    = 0;
@@ -140,9 +141,17 @@ static void sidebar_btn_cb(lv_event_t *e)
 {
     int idx = (int)(uintptr_t)lv_event_get_user_data(e);
     lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page], lv_color_hex(0x2a2a2a), 0);
+    lv_obj_set_style_outline_width(s_sidebar_btns[s_cur_page], 0, 0);
     lv_obj_add_flag(s_pages[s_cur_page], LV_OBJ_FLAG_HIDDEN);
     s_cur_page = idx;
-    lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page], lv_color_hex(0x0055cc), 0);
+    /* Icon buttons are covered edge-to-edge by the image, so a bg_color
+     * swap would be invisible -- use an outline ring instead. Text buttons
+     * keep the original full bg_color swap. */
+    if (s_sidebar_has_icon[s_cur_page]) {
+        lv_obj_set_style_outline_width(s_sidebar_btns[s_cur_page], 3, 0);
+    } else {
+        lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page], lv_color_hex(0x0055cc), 0);
+    }
     ui_deck_lazy_bg_set(s_cur_page);
     lv_obj_clear_flag(s_pages[s_cur_page], LV_OBJ_FLAG_HIDDEN);
 }
@@ -278,6 +287,7 @@ void ui_deck_build(lv_obj_t *sidebar, deck_cfg_t *cfg)
 
     s_pages        = calloc((size_t)s_page_count, sizeof(lv_obj_t *));
     s_sidebar_btns = calloc((size_t)s_page_count, sizeof(lv_obj_t *));
+    s_sidebar_has_icon = calloc((size_t)s_page_count, sizeof(bool));
 
     s_sidebar_pages = lv_obj_create(sidebar);
     lv_obj_set_size(s_sidebar_pages, SIDEBAR_W, SCREEN_H - 80);
@@ -295,19 +305,61 @@ void ui_deck_build(lv_obj_t *sidebar, deck_cfg_t *cfg)
         lv_obj_set_size(btn, 64, 56);
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x2a2a2a), 0);
         lv_obj_set_style_radius(btn, 8, 0);
+        lv_obj_set_style_clip_corner(btn, true, 0);
+        lv_obj_set_style_outline_color(btn, lv_color_hex(0x0055cc), 0);
+        lv_obj_set_style_outline_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, sidebar_btn_cb, LV_EVENT_CLICKED,
                             (void *)(uintptr_t)i);
         lv_obj_clear_flag(btn, LV_OBJ_FLAG_PRESS_LOCK);
         s_sidebar_btns[i] = btn;
 
-        lv_obj_t *lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, s_cfg.pages[i].name);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xcccccc), 0);
-        lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
-        lv_obj_set_width(lbl, 60);
-        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_center(lbl);
+        /* Custom icon replaces the text label entirely when present and the
+         * file actually exists on SD -- see side_icon field comment in
+         * ui_config.h. Falls back to the page name text otherwise.
+         *
+         * Same pool as button icons (ui_img_pool_load eagerly decodes these
+         * too), so this is normally a cache hit here — falls back to a raw
+         * streaming decode (no PSRAM residency, no "cached" log) only if the
+         * pool missed it (e.g. pool was full at preload time). */
+        bool has_icon = false;
+        const char *side_icon = s_cfg.pages[i].side_icon;
+        if (side_icon[0] != '\0') {
+            char icon_path[sizeof("S:") + sizeof(UI_CONFIG_SIDE_ICON_PATH) + 1 + UI_CONFIG_SIDE_ICON_LEN];
+            snprintf(icon_path, sizeof(icon_path), "S:%s/%s",
+                     UI_CONFIG_SIDE_ICON_PATH, side_icon);
+
+            lv_img_dsc_t *cached = ui_img_pool_find(icon_path);
+            bool usable = (cached != NULL);
+            if (!usable) {
+                FILE *f = fopen(icon_path + 2, "r");
+                if (f) { fclose(f); usable = true; }
+            }
+
+            if (usable) {
+                const void *src = cached ? (const void *)cached
+                                         : (const void *)icon_path;
+                lv_obj_t *img = lv_img_create(btn);
+                lv_img_set_src(img, src);
+                lv_obj_center(img);
+                has_icon = true;
+            } else {
+                ESP_LOGW("DECK", "sidebar page %d '%s' side_icon set but not found: %s (falling back to text)",
+                         i, s_cfg.pages[i].name, icon_path);
+            }
+        }
+
+        if (!has_icon) {
+            lv_obj_t *lbl = lv_label_create(btn);
+            lv_label_set_text(lbl, s_cfg.pages[i].name);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(lbl, lv_color_hex(0xcccccc), 0);
+            lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+            lv_obj_set_width(lbl, 60);
+            lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_center(lbl);
+        }
+
+        s_sidebar_has_icon[i] = has_icon;
     }
 
     for (int i = 0; i < s_page_count; i++) {
@@ -317,7 +369,11 @@ void ui_deck_build(lv_obj_t *sidebar, deck_cfg_t *cfg)
         if (i != 0) lv_obj_add_flag(s_pages[i], LV_OBJ_FLAG_HIDDEN);
     }
 
-    lv_obj_set_style_bg_color(s_sidebar_btns[0], lv_color_hex(0x0055cc), 0);
+    if (s_sidebar_has_icon[0]) {
+        lv_obj_set_style_outline_width(s_sidebar_btns[0], 3, 0);
+    } else {
+        lv_obj_set_style_bg_color(s_sidebar_btns[0], lv_color_hex(0x0055cc), 0);
+    }
 
     /* s_deck_root was just added on top — bring sidebar and context panel
      * back to the foreground so they render above the deck. */
@@ -335,6 +391,7 @@ void ui_deck_destroy(void)
 {
     s_pages        = NULL;
     s_sidebar_btns = NULL;
+    s_sidebar_has_icon = NULL;
     s_cur_page     = 0;
     s_page_count   = 0;
 
