@@ -24,6 +24,11 @@ void ui_deck_build(lv_obj_t *sidebar, deck_cfg_t *cfg);
 /* Tear down all deck widgets, free image pool, free config. */
 void ui_deck_destroy(void);
 
+/* Hide the currently shown page and clear its sidebar highlight without
+ * selecting a new one. Called by ui_settings_select() when the gear
+ * button takes over the content area. */
+void ui_deck_deselect_current(void);
+
 /* Apply the lazy background image for the given page index.
  * No-op if the bg widget already exists or no bg_image is set. */
 void ui_deck_lazy_bg_set(int page_idx);

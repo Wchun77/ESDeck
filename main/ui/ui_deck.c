@@ -1,5 +1,6 @@
 #include "ui_deck.h"
 #include "ui_img_pool.h"
+#include "ui_settings.h"
 #include "ui.h"
 #include "usb/usb_hid.h"
 #include "esp_log.h"
@@ -139,6 +140,12 @@ static void btn_event_cb(lv_event_t *e)
 
 static void sidebar_btn_cb(lv_event_t *e)
 {
+    /* Picking any page is how the user leaves the Settings page (no close
+     * button there) -- clear it first, even if idx == s_cur_page, since
+     * s_cur_page still points at whatever page was active *before*
+     * Settings was opened. */
+    ui_settings_deselect();
+
     int idx = (int)(uintptr_t)lv_event_get_user_data(e);
     lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page], lv_color_hex(0x2a2a2a), 0);
     lv_obj_set_style_outline_width(s_sidebar_btns[s_cur_page], 0, 0);
@@ -154,6 +161,19 @@ static void sidebar_btn_cb(lv_event_t *e)
     }
     ui_deck_lazy_bg_set(s_cur_page);
     lv_obj_clear_flag(s_pages[s_cur_page], LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Hide the current page and clear its sidebar highlight without selecting
+ * a new one -- called by ui_settings_select() when the gear button takes
+ * over the content area. s_cur_page is left untouched so sidebar_btn_cb()
+ * can restore it correctly if the same page is picked again afterward. */
+void ui_deck_deselect_current(void)
+{
+    if (s_page_count <= 0 || !s_pages || !s_pages[s_cur_page]) return;
+
+    lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page], lv_color_hex(0x2a2a2a), 0);
+    lv_obj_set_style_outline_width(s_sidebar_btns[s_cur_page], 0, 0);
+    lv_obj_add_flag(s_pages[s_cur_page], LV_OBJ_FLAG_HIDDEN);
 }
 
 /* -----------------------------------------------------------------------

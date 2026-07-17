@@ -13,23 +13,87 @@
 #include "freertos/task.h"
 #include "esp_ota_ops.h"
 #include "esp_app_format.h"
+#include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "app_config.h"
 #include "nvs_manager/nvs_manager.h"
+#include "cJSON.h"
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define SCREEN_W  800
-#define SCREEN_H  480
+#define SCREEN_W   800
+#define SCREEN_H   480
+#define SIDEBAR_W   80
+
+/* -----------------------------------------------------------------------
+ * Settings menu tree
+ *
+ * The settings page is a small nested-menu tree instead of one flat list,
+ * so it can keep growing (System > Select Config / MSC / Info, and so on)
+ * without the top level ever getting taller than a handful of rows. Each
+ * node is either an action (does something, page stays put underneath) or
+ * a submenu (pushes a child array onto the nav stack). Both Deck and
+ * Monitor mode share the exact same tree; mode_mask decides which nodes
+ * are visible in which mode, filtered at render time.
+ * ----------------------------------------------------------------------- */
+typedef enum {
+    SETMASK_DECK    = 1 << 0,
+    SETMASK_MONITOR = 1 << 1,
+    SETMASK_BOTH    = SETMASK_DECK | SETMASK_MONITOR,
+} setting_mask_t;
+
+typedef enum {
+    SETTING_ACTION,
+    SETTING_SUBMENU,
+} setting_node_type_t;
+
+typedef struct setting_node_s {
+    const char                  *label;
+    setting_node_type_t          type;
+    uint8_t                       mode_mask;
+    lv_event_cb_t                 action_cb;   /* used when type == SETTING_ACTION */
+    const struct setting_node_s  *children;    /* used when type == SETTING_SUBMENU */
+    int                            child_count;
+} setting_node_t;
+
+#define SETTINGS_STACK_MAX 4
 
 /* Current UI mode */
-static ui_mode_t  s_mode    = UI_MODE_DECK;
-static lv_obj_t  *s_panel   = NULL;
-static lv_obj_t  *s_overlay = NULL;
+static ui_mode_t  s_mode = UI_MODE_DECK;
 
-/* Item for mode switch — label changes depending on current mode */
-static lv_obj_t  *s_mode_item_lbl = NULL;
+/* Settings page widgets */
+static lv_obj_t *s_panel          = NULL;  /* the Settings "page" shell (right of sidebar, zero padding -- bg/mask attach directly to this, like ui_deck.c's page/btn_cont split) */
+static lv_obj_t *s_content        = NULL;  /* padded flex column inside s_panel, holds header + s_list */
+static lv_obj_t *s_list           = NULL;  /* scrollable item list inside the page */
+static lv_obj_t *s_back_btn       = NULL;
+static lv_obj_t *s_breadcrumb_lbl = NULL;
+static lv_obj_t *s_gear_btn       = NULL;  /* sidebar gear button -- highlighted like a page button */
+static bool       s_gear_has_icon = false; /* true = gear shows side_icon image, selection uses outline instead of bg_color */
+
+/* Settings page background/icon config -- loaded once from
+ * SD_PATH_CONFIG_SETTINGS. Both fields are optional; missing file or
+ * fields just means "off" (gear shows its glyph, page has a plain bg),
+ * exactly like before this existed. */
+static char s_side_icon[UI_CONFIG_SIDE_ICON_LEN];
+static char s_bg_image[UI_CONFIG_BG_LEN];
+
+/* Settings page bg image -- decoded once into a private PSRAM buffer the
+ * first time the page is selected (see settings_lazy_bg_set()). Not
+ * routed through ui_img_pool: that pool's capacity is sized for the
+ * current Deck config's own assets, and Settings exists outside both
+ * Deck and Monitor, so it gets its own one-shot buffer that lives for
+ * the rest of the session -- same idea as ui_monitor_img.c's decode. */
+static lv_img_dsc_t s_bg_dsc;
+static bool         s_bg_loaded  = false;  /* true once s_bg_dsc holds real pixel data */
+static bool         s_bg_applied = false;  /* true once the bg+mask widgets exist on s_panel */
+
+/* Navigation stack -- index 0 is always the root menu. */
+static const setting_node_t *s_menu_stack[SETTINGS_STACK_MAX];
+static int                   s_menu_stack_count[SETTINGS_STACK_MAX];
+static const char           *s_menu_stack_label[SETTINGS_STACK_MAX];
+static int                   s_stack_depth = 0;
 
 /* Config used during Monitor -> Deck background preload task */
 static deck_cfg_t s_back_cfg;
@@ -40,26 +104,6 @@ static deck_cfg_t s_back_cfg;
 ui_mode_t ui_settings_get_mode(void)
 {
     return s_mode;
-}
-
-/* -----------------------------------------------------------------------
- * Internal helpers
- * ----------------------------------------------------------------------- */
-static void hide_menu(void)
-{
-    lv_obj_add_flag(s_panel, LV_OBJ_FLAG_HIDDEN);
-    if (s_overlay) {
-        lv_obj_del(s_overlay);
-        s_overlay = NULL;
-    }
-}
-
-static void update_mode_label(void)
-{
-    if (!s_mode_item_lbl) return;
-    lv_label_set_text(s_mode_item_lbl,
-                      s_mode == UI_MODE_DECK ? "Switch to Monitor"
-                                             : "Switch to Deck");
 }
 
 /* -----------------------------------------------------------------------
@@ -110,16 +154,19 @@ void ui_settings_monitor_reload(void)
 
 /* -----------------------------------------------------------------------
  * Item callbacks
+ *
+ * None of these hide the Settings page anymore -- they only open a popup
+ * dialog on top of it (or, for item_mode_cb, actually leave the page).
+ * When a dialog is dismissed, the still-selected/highlighted Settings
+ * page underneath is exactly as the user left it.
  * ----------------------------------------------------------------------- */
 static void item_msc_cb(lv_event_t *e)
 {
-    hide_menu();
     ui_msc_show_confirm_dialog();
 }
 
 static void item_config_cb(lv_event_t *e)
 {
-    hide_menu();
     if (s_mode == UI_MODE_MONITOR)
         ui_monitor_config_dialog_show();
     else
@@ -128,19 +175,19 @@ static void item_config_cb(lv_event_t *e)
 
 static void item_keyboard_cb(lv_event_t *e)
 {
-    hide_menu();
     ui_keyboard_show();
 }
 
 static void item_mode_cb(lv_event_t *e)
 {
-    hide_menu();
+    /* This one really does leave the Settings page (mode switch replaces
+     * the whole page set), unlike the other items above. */
+    ui_settings_deselect();
 
     if (s_mode == UI_MODE_DECK) {
         /* Deck -> Monitor */
         ui_deck_destroy();
         s_mode = UI_MODE_MONITOR;
-        update_mode_label();
         ui_show_switching_screen("Entering Monitor Mode...");
         xTaskCreate(enter_monitor_task, "enter_mon", 4096, NULL, 3, NULL);
     } else {
@@ -149,7 +196,6 @@ static void item_mode_cb(lv_event_t *e)
          * before ui_monitor_exit() frees the background image buffer.
          * Without this, the last Monitor frame may render with a freed buffer. */
         s_mode = UI_MODE_DECK;
-        update_mode_label();
 
         bool cfg_ok = ui_config_load(&s_back_cfg);
         if (!cfg_ok || s_back_cfg.page_count == 0) {
@@ -167,11 +213,6 @@ static void item_mode_cb(lv_event_t *e)
     }
 }
 
-static void overlay_cb(lv_event_t *e)
-{
-    hide_menu();
-}
-
 static void info_dismiss_cb(lv_event_t *e)
 {
     lv_obj_del(lv_event_get_target(e));
@@ -179,8 +220,6 @@ static void info_dismiss_cb(lv_event_t *e)
 
 static void item_info_cb(lv_event_t *e)
 {
-    hide_menu();
-
     esp_app_desc_t desc;
     bool ok = (esp_ota_get_partition_description(esp_ota_get_running_partition(), &desc) == ESP_OK);
 
@@ -301,7 +340,6 @@ static void add_pick_item(lv_obj_t *box, const char *label,
 
 static void item_boot_anim_cb(lv_event_t *e)
 {
-    hide_menu();
     scan_boot_anim_dirs();
 
     char selected[BOOT_ANIM_NAME_LEN];
@@ -346,87 +384,408 @@ static void item_boot_anim_cb(lv_event_t *e)
 }
 
 /* -----------------------------------------------------------------------
- * Helper: create a single menu item button
+ * Settings menu tree definition
+ *
+ * Shared verbatim between Deck and Monitor mode. mode_mask decides
+ * whether a node is shown while in that mode; nothing else about the
+ * tree changes between modes. "Switch to Monitor" / "Switch to Deck"
+ * are two separate nodes (rather than one node with a dynamically
+ * updated label) purely for simplicity -- if a genuinely dynamic label
+ * is ever needed elsewhere, add an optional label_fn to setting_node_t
+ * instead of growing this pattern.
  * ----------------------------------------------------------------------- */
-static lv_obj_t *add_item(lv_obj_t *panel, const char *text, lv_event_cb_t cb)
-{
-    lv_obj_t *item = lv_btn_create(panel);
-    lv_obj_set_width(item, LV_PCT(100));
-    lv_obj_set_style_bg_color(item, lv_color_hex(0x2a2a2a), 0);
-    lv_obj_set_style_bg_color(item, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
-    lv_obj_set_style_radius(item, 4, 0);
-    lv_obj_add_event_cb(item, cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_clear_flag(item, LV_OBJ_FLAG_PRESS_LOCK);
+static const setting_node_t s_system_menu[] = {
+    { "Select Config",      SETTING_ACTION, SETMASK_BOTH, item_config_cb, NULL, 0 },
+    { "Switch to MSC mode", SETTING_ACTION, SETMASK_BOTH, item_msc_cb,    NULL, 0 },
+    { "Info",                SETTING_ACTION, SETMASK_BOTH, item_info_cb,  NULL, 0 },
+};
 
-    lv_obj_t *lbl = lv_label_create(item);
-    lv_label_set_text(lbl, text);
-    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
-    return lbl;
+static const setting_node_t s_root_menu[] = {
+    { "Keyboard Mode",     SETTING_ACTION, SETMASK_DECK,    item_keyboard_cb,  NULL,           0 },
+    { "Boot Animation",     SETTING_ACTION, SETMASK_BOTH,    item_boot_anim_cb, NULL,           0 },
+    { "System",              SETTING_SUBMENU, SETMASK_BOTH,   NULL,              s_system_menu,  3 },
+    { "Switch to Monitor",  SETTING_ACTION, SETMASK_DECK,    item_mode_cb,      NULL,           0 },
+    { "Switch to Deck",      SETTING_ACTION, SETMASK_MONITOR, item_mode_cb,      NULL,           0 },
+};
+
+/* -----------------------------------------------------------------------
+ * Menu navigation / rendering
+ * ----------------------------------------------------------------------- */
+static void render_current_level(void);
+
+static void generic_item_cb(lv_event_t *e)
+{
+    const setting_node_t *node = (const setting_node_t *)lv_event_get_user_data(e);
+
+    if (node->type == SETTING_SUBMENU) {
+        if (s_stack_depth + 1 >= SETTINGS_STACK_MAX) return;
+        s_stack_depth++;
+        s_menu_stack[s_stack_depth]       = node->children;
+        s_menu_stack_count[s_stack_depth] = node->child_count;
+        s_menu_stack_label[s_stack_depth] = node->label;
+        render_current_level();
+    } else {
+        if (node->action_cb) node->action_cb(e);
+    }
+}
+
+static void back_btn_cb(lv_event_t *e)
+{
+    if (s_stack_depth == 0) return;
+    s_stack_depth--;
+    render_current_level();
+}
+
+static void render_current_level(void)
+{
+    lv_obj_clean(s_list);
+
+    uint8_t mode_bit = (uint8_t)(1u << s_mode);
+
+    const setting_node_t *arr   = s_menu_stack[s_stack_depth];
+    int                   count = s_menu_stack_count[s_stack_depth];
+
+    for (int i = 0; i < count; i++) {
+        const setting_node_t *node = &arr[i];
+        if (!(node->mode_mask & mode_bit)) continue;
+
+        lv_obj_t *item = lv_btn_create(s_list);
+        lv_obj_set_width(item, LV_PCT(100));
+        lv_obj_set_height(item, 48);
+        lv_obj_set_style_bg_color(item, lv_color_hex(0x2a2a2a), 0);
+        lv_obj_set_style_bg_color(item, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_grad_dir(item, LV_GRAD_DIR_NONE, 0);
+        lv_obj_set_style_shadow_width(item, 0, 0);
+        lv_obj_set_style_outline_width(item, 0, 0);
+        lv_obj_set_style_radius(item, 6, 0);
+        lv_obj_clear_flag(item, LV_OBJ_FLAG_PRESS_LOCK);
+        lv_obj_add_event_cb(item, generic_item_cb, LV_EVENT_CLICKED, (void *)node);
+
+        lv_obj_t *lbl = lv_label_create(item);
+        lv_label_set_text(lbl, node->label);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
+
+        if (node->type == SETTING_SUBMENU) {
+            lv_obj_t *chevron = lv_label_create(item);
+            lv_label_set_text(chevron, LV_SYMBOL_RIGHT);
+            lv_obj_set_style_text_color(chevron, lv_color_hex(0x888888), 0);
+            lv_obj_align(chevron, LV_ALIGN_RIGHT_MID, -12, 0);
+        }
+    }
+
+    if (s_stack_depth == 0) {
+        lv_label_set_text(s_breadcrumb_lbl, "Settings");
+        lv_obj_add_flag(s_back_btn, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_label_set_text(s_breadcrumb_lbl, s_menu_stack_label[s_stack_depth]);
+        lv_obj_clear_flag(s_back_btn, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* -----------------------------------------------------------------------
+ * Settings page config (SD_PATH_CONFIG_SETTINGS)
+ *
+ *   { "side_icon": "gear.png", "bg_image": "space.jpg" }
+ *
+ * Both fields optional -- same filename-only convention as page side_icon
+ * / bg_image (ui_config.h): side_icon looked up under UI_CONFIG_SIDE_ICON_PATH,
+ * bg_image under UI_CONFIG_BG_PATH. Loaded once at ui_settings_build().
+ * ----------------------------------------------------------------------- */
+static char *read_settings_json(void)
+{
+    FILE *f = fopen(SD_PATH_CONFIG_SETTINGS, "r");
+    if (!f) return NULL;
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    rewind(f);
+    if (sz <= 0) { fclose(f); return NULL; }
+
+    char *buf = heap_caps_malloc((size_t)sz + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+
+    fread(buf, 1, (size_t)sz, f);
+    buf[sz] = '\0';
+    fclose(f);
+    return buf;
+}
+
+static void settings_json_str_field(cJSON *obj, const char *key, char *out, size_t out_size)
+{
+    cJSON *item = cJSON_GetObjectItem(obj, key);
+    if (cJSON_IsString(item) && item->valuestring)
+        snprintf(out, out_size, "%s", item->valuestring);
+}
+
+static void load_settings_page_config(void)
+{
+    s_side_icon[0] = '\0';
+    s_bg_image[0]  = '\0';
+
+    char *raw = read_settings_json();
+    if (!raw) return;
+
+    cJSON *root = cJSON_Parse(raw);
+    free(raw);
+    if (!root) return;
+
+    settings_json_str_field(root, "side_icon", s_side_icon, sizeof(s_side_icon));
+    settings_json_str_field(root, "bg_image",  s_bg_image,  sizeof(s_bg_image));
+
+    cJSON_Delete(root);
+}
+
+/* Lazily decode + apply the Settings page background the first time the
+ * page is selected -- same "decode on first use, skip after" shape as
+ * ui_deck_lazy_bg_set(), but decodes into a private PSRAM buffer instead
+ * of going through ui_img_pool (see s_bg_dsc comment above). Inserted at
+ * child index 0/1 of s_panel, same trick ui_deck.c uses to slide bg+mask
+ * behind already-existing content (s_content here, btn_cont there). */
+static void settings_lazy_bg_set(void)
+{
+    if (s_bg_applied || s_bg_image[0] == '\0') return;
+
+    char bg_path[sizeof("S:") + sizeof(UI_CONFIG_BG_PATH) + 1 + UI_CONFIG_BG_LEN];
+    snprintf(bg_path, sizeof(bg_path), "S:%s/%s", UI_CONFIG_BG_PATH, s_bg_image);
+
+    if (!s_bg_loaded) {
+        lv_img_decoder_dsc_t dec;
+        memset(&dec, 0, sizeof(dec));
+        if (lv_img_decoder_open(&dec, bg_path, lv_color_white(), 0) != LV_RES_OK) {
+            ESP_LOGW("SETTINGS", "bg decode open failed: %s", bg_path);
+            s_bg_applied = true;   /* don't retry every select */
+            return;
+        }
+
+        uint32_t    w  = dec.header.w;
+        uint32_t    h  = dec.header.h;
+        lv_img_cf_t cf = dec.header.cf;
+        uint8_t     px = lv_img_cf_get_px_size(cf) / 8;
+        if (px == 0) { cf = LV_IMG_CF_TRUE_COLOR; px = sizeof(lv_color_t); }   /* JPEG reports 0 */
+
+        size_t   sz  = (size_t)w * h * px;
+        uint8_t *buf = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        bool ok = (buf != NULL);
+        if (ok) {
+            if (dec.img_data) {
+                memcpy(buf, dec.img_data, sz);
+            } else {
+                size_t stride = (size_t)w * px;
+                for (lv_coord_t y = 0; y < (lv_coord_t)h && ok; y++) {
+                    if (lv_img_decoder_read_line(&dec, 0, y, (lv_coord_t)w,
+                                                  buf + (size_t)y * stride) != LV_RES_OK) {
+                        ok = false;
+                    }
+                }
+            }
+        }
+        lv_img_decoder_close(&dec);
+
+        if (!ok) {
+            ESP_LOGE("SETTINGS", "bg decode failed: %s", bg_path);
+            if (buf) heap_caps_free(buf);
+            s_bg_applied = true;
+            return;
+        }
+
+        s_bg_dsc.header.cf          = cf;
+        s_bg_dsc.header.always_zero = 0;
+        s_bg_dsc.header.reserved    = 0;
+        s_bg_dsc.header.w           = w;
+        s_bg_dsc.header.h           = h;
+        s_bg_dsc.data_size          = sz;
+        s_bg_dsc.data               = buf;
+        s_bg_loaded                 = true;
+
+        ESP_LOGI("SETTINGS", "cached %s [%lux%lu %lu KB]", bg_path,
+                 (unsigned long)w, (unsigned long)h, (unsigned long)(sz / 1024));
+    }
+
+    int page_w = SCREEN_W - SIDEBAR_W;
+    int page_h = SCREEN_H;
+
+    uint32_t zoom_x   = (uint32_t)page_w * 256 / s_bg_dsc.header.w;
+    uint32_t zoom_y   = (uint32_t)page_h * 256 / s_bg_dsc.header.h;
+    uint32_t zoom     = (zoom_x > zoom_y) ? zoom_x : zoom_y;
+    int32_t  scaled_w = (int32_t)s_bg_dsc.header.w * (int32_t)zoom / 256;
+    int32_t  scaled_h = (int32_t)s_bg_dsc.header.h * (int32_t)zoom / 256;
+    int32_t  off_x    = ((int32_t)page_w - scaled_w) / 2;
+    int32_t  off_y    = ((int32_t)page_h - scaled_h) / 2;
+
+    lv_obj_t *bg = lv_img_create(s_panel);
+    lv_obj_move_to_index(bg, 0);
+    lv_img_set_src(bg, &s_bg_dsc);
+    lv_img_set_pivot(bg, 0, 0);
+    lv_obj_set_pos(bg, off_x, off_y);
+    lv_obj_set_size(bg, page_w, page_h);
+    lv_img_set_zoom(bg, (uint16_t)zoom);
+    lv_obj_add_flag(bg, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *mask = lv_obj_create(s_panel);
+    lv_obj_move_to_index(mask, 1);
+    lv_obj_set_size(mask, page_w, page_h);
+    lv_obj_set_pos(mask, 0, 0);
+    lv_obj_set_style_bg_color(mask, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(mask, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(mask, 0, 0);
+    lv_obj_set_style_radius(mask, 0, 0);
+    lv_obj_add_flag(mask, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_clear_flag(mask, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    s_bg_applied = true;
 }
 
 /* -----------------------------------------------------------------------
  * Public
  * ----------------------------------------------------------------------- */
-lv_obj_t *ui_settings_build(lv_obj_t *scr)
+lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
 {
+    s_gear_btn = gear_btn;
+    load_settings_page_config();
+
+    /* Page shell: same size/position/base color as create_page() in
+     * ui_deck.c, zero padding so a lazily-added bg image + mask (see
+     * settings_lazy_bg_set()) can sit flush with the edges exactly like
+     * a normal Deck/Monitor page. Content (header + list) lives in a
+     * separate padded flex child below instead of being padded directly
+     * on the shell -- same page/btn_cont split ui_deck.c uses. */
     s_panel = lv_obj_create(scr);
-    lv_obj_set_size(s_panel, 220, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_color(s_panel, lv_color_hex(0x2a2a2a), 0);
-    lv_obj_set_style_border_width(s_panel, 1, 0);
-    lv_obj_set_style_border_color(s_panel, lv_color_hex(0x444444), 0);
-    lv_obj_set_style_radius(s_panel, 8, 0);
-    lv_obj_set_style_pad_all(s_panel, 8, 0);
-    lv_obj_set_layout(s_panel, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(s_panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_size(s_panel, SCREEN_W - SIDEBAR_W, SCREEN_H);
+    lv_obj_set_pos(s_panel, SIDEBAR_W, 0);
+    lv_obj_set_style_bg_color(s_panel, lv_color_hex(0x222222), 0);
+    lv_obj_set_style_border_width(s_panel, 0, 0);
+    lv_obj_set_style_radius(s_panel, 0, 0);
+    lv_obj_set_style_pad_all(s_panel, 0, 0);
+    lv_obj_clear_flag(s_panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_panel, LV_OBJ_FLAG_HIDDEN);
 
-    /* Deck-only items */
-    add_item(s_panel, "Keyboard Mode", item_keyboard_cb);
+    s_content = lv_obj_create(s_panel);
+    lv_obj_set_size(s_content, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_pos(s_content, 0, 0);
+    lv_obj_set_style_bg_opa(s_content, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_content, 0, 0);
+    lv_obj_set_style_radius(s_content, 0, 0);
+    lv_obj_set_style_pad_all(s_content, 16, 0);
+    lv_obj_set_layout(s_content, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(s_content, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_content, 12, 0);
+    lv_obj_clear_flag(s_content, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_content, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    /* Shared items */
-    add_item(s_panel, "Select Config",      item_config_cb);
-    add_item(s_panel, "Switch to MSC mode", item_msc_cb);
+    /* Header: back button (hidden at root) + centered breadcrumb. No
+     * close button -- this is a page, not a popup; picking a different
+     * page is how you leave it. */
+    lv_obj_t *header = lv_obj_create(s_content);
+    lv_obj_set_size(header, LV_PCT(100), 40);
+    lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(header, 0, 0);
+    lv_obj_set_style_pad_all(header, 0, 0);
+    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Mode switch item — label updates dynamically */
-    s_mode_item_lbl = add_item(s_panel, "", item_mode_cb);
-    update_mode_label();
+    s_back_btn = lv_btn_create(header);
+    lv_obj_set_size(s_back_btn, 36, 36);
+    lv_obj_align(s_back_btn, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_bg_color(s_back_btn, lv_color_hex(0x2a2a2a), 0);
+    lv_obj_set_style_bg_color(s_back_btn, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_grad_dir(s_back_btn, LV_GRAD_DIR_NONE, 0);
+    lv_obj_set_style_shadow_width(s_back_btn, 0, 0);
+    lv_obj_set_style_outline_width(s_back_btn, 0, 0);
+    lv_obj_set_style_radius(s_back_btn, 6, 0);
+    lv_obj_clear_flag(s_back_btn, LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_add_event_cb(s_back_btn, back_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(s_back_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *back_lbl = lv_label_create(s_back_btn);
+    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
+    lv_obj_center(back_lbl);
 
-    add_item(s_panel, "Boot Animation", item_boot_anim_cb);
-    add_item(s_panel, "Info", item_info_cb);
+    /* Centered on the page rather than balanced against the back button's
+     * width -- simpler, and reads fine whether or not the back button is
+     * showing. */
+    s_breadcrumb_lbl = lv_label_create(header);
+    lv_label_set_text(s_breadcrumb_lbl, "Settings");
+    lv_obj_set_style_text_color(s_breadcrumb_lbl, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_font(s_breadcrumb_lbl, &lv_font_montserrat_20, 0);
+    lv_obj_align(s_breadcrumb_lbl, LV_ALIGN_CENTER, 0, 0);
 
-    lv_obj_update_layout(s_panel);
-    lv_obj_set_pos(s_panel,
-                   80 + 8,
-                   SCREEN_H - lv_obj_get_height(s_panel) - 8);
+    /* Scrollable item list -- grows to fill remaining page height */
+    s_list = lv_obj_create(s_content);
+    lv_obj_set_width(s_list, LV_PCT(100));
+    lv_obj_set_flex_grow(s_list, 1);
+    lv_obj_set_style_bg_opa(s_list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_list, 0, 0);
+    lv_obj_set_style_pad_all(s_list, 0, 0);
+    lv_obj_set_layout(s_list, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(s_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_list, 8, 0);
+    lv_obj_set_scrollbar_mode(s_list, LV_SCROLLBAR_MODE_AUTO);
+
+    s_menu_stack[0]       = s_root_menu;
+    s_menu_stack_count[0] = (int)(sizeof(s_root_menu) / sizeof(s_root_menu[0]));
+    s_stack_depth         = 0;
+
+    /* Custom gear icon, same convention as page side_icon: centered,
+     * native size, replaces the LV_SYMBOL_SETTINGS glyph ui.c created as
+     * gear_btn's first (and so far only) child. Streaming decode (not
+     * pooled), same reasoning as the bg image above -- it's a small
+     * button glyph, doesn't need the zoom/PSRAM treatment. */
+    if (s_side_icon[0] != '\0') {
+        char icon_path[sizeof("S:") + sizeof(UI_CONFIG_SIDE_ICON_PATH) + 1 + UI_CONFIG_SIDE_ICON_LEN];
+        snprintf(icon_path, sizeof(icon_path), "S:%s/%s", UI_CONFIG_SIDE_ICON_PATH, s_side_icon);
+
+        FILE *f = fopen(icon_path + 2, "r");
+        if (f) {
+            fclose(f);
+            lv_obj_t *glyph = lv_obj_get_child(s_gear_btn, 0);
+            if (glyph) lv_obj_add_flag(glyph, LV_OBJ_FLAG_HIDDEN);
+
+            lv_obj_t *img = lv_img_create(s_gear_btn);
+            lv_img_set_src(img, icon_path);
+            lv_obj_center(img);
+            lv_obj_set_style_clip_corner(s_gear_btn, true, 0);
+            s_gear_has_icon = true;
+        } else {
+            ESP_LOGW("SETTINGS", "side_icon set but not found: %s (falling back to glyph)", icon_path);
+        }
+    }
+    lv_obj_set_style_outline_color(s_gear_btn, lv_color_hex(0x0055cc), 0);
+    lv_obj_set_style_outline_width(s_gear_btn, 0, 0);
+
     return s_panel;
 }
 
-void ui_settings_toggle(void)
+void ui_settings_select(void)
 {
-    if (lv_obj_has_flag(s_panel, LV_OBJ_FLAG_HIDDEN)) {
-        /* Hide keyboard item when in Monitor mode */
-        lv_obj_t *keyboard_item = lv_obj_get_child(s_panel, 0);
-        if (s_mode == UI_MODE_MONITOR)
-            lv_obj_add_flag(keyboard_item, LV_OBJ_FLAG_HIDDEN);
-        else
-            lv_obj_clear_flag(keyboard_item, LV_OBJ_FLAG_HIDDEN);
+    if (s_mode == UI_MODE_DECK)
+        ui_deck_deselect_current();
+    else
+        ui_monitor_deselect_current();
 
-        /* Recalculate y position after show/hide of items */
-        lv_obj_update_layout(s_panel);
-        lv_obj_set_pos(s_panel,
-                       80 + 8,
-                       SCREEN_H - lv_obj_get_height(s_panel) - 8);
+    s_stack_depth = 0;
+    render_current_level();
+    settings_lazy_bg_set();
 
-        lv_obj_t *scr = lv_scr_act();
-        s_overlay = lv_obj_create(scr);
-        lv_obj_set_size(s_overlay, SCREEN_W, SCREEN_H);
-        lv_obj_set_pos(s_overlay, 0, 0);
-        lv_obj_set_style_bg_opa(s_overlay, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(s_overlay, 0, 0);
-        lv_obj_add_event_cb(s_overlay, overlay_cb, LV_EVENT_CLICKED, NULL);
-        lv_obj_move_foreground(s_panel);
-        lv_obj_clear_flag(s_panel, LV_OBJ_FLAG_HIDDEN);
+    /* Icon buttons are covered edge-to-edge by the image, so a bg_color
+     * swap would be invisible -- use an outline ring instead, same as
+     * Deck/Monitor's own side_icon page buttons. */
+    if (s_gear_has_icon) {
+        lv_obj_set_style_outline_width(s_gear_btn, 3, 0);
     } else {
-        hide_menu();
+        lv_obj_set_style_bg_color(s_gear_btn, lv_color_hex(0x0055cc), 0);
     }
+
+    lv_obj_move_foreground(s_panel);
+    lv_obj_clear_flag(s_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_settings_deselect(void)
+{
+    if (lv_obj_has_flag(s_panel, LV_OBJ_FLAG_HIDDEN)) return;
+
+    lv_obj_add_flag(s_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_bg_color(s_gear_btn, lv_color_hex(0x2a2a2a), 0);
+    lv_obj_set_style_outline_width(s_gear_btn, 0, 0);
+    s_stack_depth = 0;
 }

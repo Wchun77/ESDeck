@@ -38,6 +38,13 @@
 
 #define SD_PATH_CONFIG_DECK     SD_MOUNT_POINT "/" SD_DIR_CONFIG_DECK
 #define SD_PATH_CONFIG_MONITOR  SD_MOUNT_POINT "/" SD_DIR_CONFIG_MONITOR
+
+/* Single fixed file (not a directory) -- the Settings page/gear button
+ * isn't part of any deck or monitor config since it's shared by both
+ * modes, so it gets its own tiny always-loaded file instead of living
+ * under config/deck or config/monitor. Parent dir already exists thanks
+ * to SD_DIR_CONFIG_DECK/MONITOR's mkdir -p. */
+#define SD_PATH_CONFIG_SETTINGS SD_MOUNT_POINT "/config/settings.json"
 #define SD_PATH_ASSETS_ICONS    SD_MOUNT_POINT "/" SD_DIR_ASSETS_ICONS
 #define SD_PATH_ASSETS_BG       SD_MOUNT_POINT "/" SD_DIR_ASSETS_BG
 #define SD_PATH_ASSETS_FONTS    SD_MOUNT_POINT "/" SD_DIR_ASSETS_FONTS

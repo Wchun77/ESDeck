@@ -42,6 +42,11 @@ void ui_monitor_enter(lv_obj_t *sidebar);
 /* Tear down all monitor widgets and stop the update timer. */
 void ui_monitor_exit(void);
 
+/* Hide the currently shown page and clear its sidebar highlight without
+ * selecting a new one. Called by ui_settings_select() when the gear
+ * button takes over the content area. */
+void ui_monitor_deselect_current(void);
+
 /* Called by ui_monitor data receiver to push fresh system data.
  * Safe to call from any task — posts via lv_async_call internally. */
 typedef struct {

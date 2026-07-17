@@ -56,7 +56,7 @@ void ui_show_switching_screen(const char *msg)
  * ----------------------------------------------------------------------- */
 static void settings_btn_cb(lv_event_t *e)
 {
-    ui_settings_toggle();
+    ui_settings_select();
 }
 
 /* -----------------------------------------------------------------------
@@ -97,8 +97,8 @@ static void ui_build_static(void)
     lv_obj_set_style_text_font(settings_label, &lv_font_montserrat_24, 0);
     lv_obj_center(settings_label);
 
-    /* Context panel (gear menu) */
-    s_context_panel = ui_settings_build(scr);
+    /* Settings page (gear button takes you here, like selecting any other page) */
+    s_context_panel = ui_settings_build(scr, settings_btn);
 }
 
 /* -----------------------------------------------------------------------
