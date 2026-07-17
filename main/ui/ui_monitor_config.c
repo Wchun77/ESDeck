@@ -165,6 +165,14 @@ void ui_monitor_config_load(monitor_cfg_t *cfg)
         cfg->clock.colon_gap = int_field(clk, "colon_gap", 30);
     }
 
+    /* Settings section -- Settings page's own bg_image/side_icon, sibling
+     * to "clock", so it follows whichever Monitor config is active. */
+    cJSON *settings_obj = cJSON_GetObjectItem(root, "settings");
+    if (cJSON_IsObject(settings_obj)) {
+        str_field(settings_obj, "bg_image",  cfg->settings.bg_image,  sizeof(cfg->settings.bg_image));
+        str_field(settings_obj, "side_icon", cfg->settings.side_icon, sizeof(cfg->settings.side_icon));
+    }
+
     /* Pages array */
     cJSON *pages = cJSON_GetObjectItem(root, "pages");
     if (cJSON_IsArray(pages)) {

@@ -294,6 +294,10 @@ void ui_deck_build(lv_obj_t *sidebar, deck_cfg_t *cfg)
     s_page_count = s_cfg.page_count;
     s_cur_page   = 0;
 
+    /* Settings' own bg/icon follows whichever Deck config is active --
+     * same "settings" object convention as Monitor's fixed Clock page. */
+    ui_settings_apply_appearance(&s_cfg.settings);
+
     s_deck_root = lv_obj_create(lv_scr_act());
     lv_obj_set_size(s_deck_root, SCREEN_W, SCREEN_H);
     lv_obj_set_pos(s_deck_root, 0, 0);

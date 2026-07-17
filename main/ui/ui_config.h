@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "app_config.h"
+#include "ui_settings.h"
 
 #define UI_CONFIG_MAX_PAGES    255
 #define UI_CONFIG_MAX_BUTTONS  255
@@ -35,8 +36,9 @@ typedef struct {
 } page_cfg_t;
 
 typedef struct {
-    page_cfg_t *pages;
-    uint8_t     page_count;
+    page_cfg_t               *pages;
+    uint8_t                    page_count;
+    ui_settings_appearance_t   settings;  /* "settings" object in the JSON, sibling to "pages" */
 } deck_cfg_t;
 
 /*

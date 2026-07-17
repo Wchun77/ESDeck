@@ -133,6 +133,17 @@ bool ui_config_load(deck_cfg_t *cfg)
         return false;
     }
 
+    cJSON *settings_obj = cJSON_GetObjectItem(root, "settings");
+    if (cJSON_IsObject(settings_obj)) {
+        cJSON *bg = cJSON_GetObjectItem(settings_obj, "bg_image");
+        if (cJSON_IsString(bg) && bg->valuestring)
+            snprintf(cfg->settings.bg_image, sizeof(cfg->settings.bg_image), "%s", bg->valuestring);
+
+        cJSON *side_icon = cJSON_GetObjectItem(settings_obj, "side_icon");
+        if (cJSON_IsString(side_icon) && side_icon->valuestring)
+            snprintf(cfg->settings.side_icon, sizeof(cfg->settings.side_icon), "%s", side_icon->valuestring);
+    }
+
     cJSON *pages_arr = cJSON_GetObjectItem(root, "pages");
     if (!cJSON_IsArray(pages_arr)) {
         ESP_LOGE(TAG, "Missing or invalid 'pages' array");

@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "app_config.h"
+#include "ui_settings.h"
 
 #define UI_MONITOR_PATH        SD_PATH_CONFIG_MONITOR
 #define UI_MONITOR_BG_PATH     SD_PATH_ASSETS_BG
@@ -85,9 +86,10 @@ typedef struct {
 } mon_page_cfg_t;
 
 typedef struct {
-    mon_clock_cfg_t clock;
-    mon_page_cfg_t  pages[MON_PAGE_MAX];
-    int             page_count;           /* 0 = no data pages */
+    mon_clock_cfg_t           clock;
+    mon_page_cfg_t            pages[MON_PAGE_MAX];
+    int                       page_count;   /* 0 = no data pages */
+    ui_settings_appearance_t  settings;     /* "settings" object in the JSON, sibling to "clock" / "pages" */
 } monitor_cfg_t;
 
 /*

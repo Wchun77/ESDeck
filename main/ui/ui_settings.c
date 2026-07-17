@@ -17,7 +17,6 @@
 #include "esp_heap_caps.h"
 #include "app_config.h"
 #include "nvs_manager/nvs_manager.h"
-#include "cJSON.h"
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,24 +69,31 @@ static lv_obj_t *s_list           = NULL;  /* scrollable item list inside the pa
 static lv_obj_t *s_back_btn       = NULL;
 static lv_obj_t *s_breadcrumb_lbl = NULL;
 static lv_obj_t *s_gear_btn       = NULL;  /* sidebar gear button -- highlighted like a page button */
+static lv_obj_t *s_gear_glyph     = NULL;  /* LV_SYMBOL_SETTINGS label, gear_btn's child 0 -- hidden/shown as side_icon comes and goes */
 static bool       s_gear_has_icon = false; /* true = gear shows side_icon image, selection uses outline instead of bg_color */
 
-/* Settings page background/icon config -- loaded once from
- * SD_PATH_CONFIG_SETTINGS. Both fields are optional; missing file or
- * fields just means "off" (gear shows its glyph, page has a plain bg),
- * exactly like before this existed. */
-static char s_side_icon[UI_CONFIG_SIDE_ICON_LEN];
-static char s_bg_image[UI_CONFIG_BG_LEN];
+/* Settings page appearance -- set via ui_settings_apply_appearance(), called
+ * by ui_deck_build()/ui_monitor_enter() with the active Deck/Monitor
+ * config's own "settings" object, so this always reflects whichever config
+ * is currently active rather than being loaded once from a standalone file.
+ * Both fields optional; empty just means "off" (gear shows its glyph, page
+ * has a plain bg). */
+static char s_side_icon[UI_SETTINGS_SIDE_ICON_LEN];
+static char s_bg_image[UI_SETTINGS_BG_LEN];
 
-/* Settings page bg image -- decoded once into a private PSRAM buffer the
- * first time the page is selected (see settings_lazy_bg_set()). Not
- * routed through ui_img_pool: that pool's capacity is sized for the
- * current Deck config's own assets, and Settings exists outside both
- * Deck and Monitor, so it gets its own one-shot buffer that lives for
- * the rest of the session -- same idea as ui_monitor_img.c's decode. */
+/* Settings page bg image -- decoded lazily into a private PSRAM buffer the
+ * first time the page is selected after a (re)load (see
+ * settings_lazy_bg_set()). Not routed through ui_img_pool: that pool's
+ * capacity is sized for the current Deck config's own assets, and Settings
+ * exists outside both Deck and Monitor, so it gets its own buffer -- same
+ * idea as ui_monitor_img.c's decode. s_bg_dsc is a fixed static address
+ * reused across config switches (only its contents change), so
+ * ui_settings_apply_appearance() must invalidate LVGL's image cache when
+ * swapping it out, same as ui_monitor_img_free_all() does for Monitor's
+ * per-config bg images. */
 static lv_img_dsc_t s_bg_dsc;
-static bool         s_bg_loaded  = false;  /* true once s_bg_dsc holds real pixel data */
-static bool         s_bg_applied = false;  /* true once the bg+mask widgets exist on s_panel */
+static bool         s_bg_loaded  = false;  /* true once s_bg_dsc holds real pixel data AND the bg+mask widgets exist on s_panel */
+static bool         s_bg_applied = false;  /* true once settings_lazy_bg_set() has run for the current s_bg_image (even if it failed) -- guards against re-running every select */
 
 /* Navigation stack -- index 0 is always the root menu. */
 static const setting_node_t *s_menu_stack[SETTINGS_STACK_MAX];
@@ -459,6 +465,7 @@ static void render_current_level(void)
         lv_obj_set_width(item, LV_PCT(100));
         lv_obj_set_height(item, 48);
         lv_obj_set_style_bg_color(item, lv_color_hex(0x2a2a2a), 0);
+        lv_obj_set_style_bg_opa(item, LV_OPA_50, 0);
         lv_obj_set_style_bg_color(item, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
         lv_obj_set_style_bg_grad_dir(item, LV_GRAD_DIR_NONE, 0);
         lv_obj_set_style_shadow_width(item, 0, 0);
@@ -489,60 +496,6 @@ static void render_current_level(void)
     }
 }
 
-/* -----------------------------------------------------------------------
- * Settings page config (SD_PATH_CONFIG_SETTINGS)
- *
- *   { "side_icon": "gear.png", "bg_image": "space.jpg" }
- *
- * Both fields optional -- same filename-only convention as page side_icon
- * / bg_image (ui_config.h): side_icon looked up under UI_CONFIG_SIDE_ICON_PATH,
- * bg_image under UI_CONFIG_BG_PATH. Loaded once at ui_settings_build().
- * ----------------------------------------------------------------------- */
-static char *read_settings_json(void)
-{
-    FILE *f = fopen(SD_PATH_CONFIG_SETTINGS, "r");
-    if (!f) return NULL;
-
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    rewind(f);
-    if (sz <= 0) { fclose(f); return NULL; }
-
-    char *buf = heap_caps_malloc((size_t)sz + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!buf) buf = malloc((size_t)sz + 1);
-    if (!buf) { fclose(f); return NULL; }
-
-    fread(buf, 1, (size_t)sz, f);
-    buf[sz] = '\0';
-    fclose(f);
-    return buf;
-}
-
-static void settings_json_str_field(cJSON *obj, const char *key, char *out, size_t out_size)
-{
-    cJSON *item = cJSON_GetObjectItem(obj, key);
-    if (cJSON_IsString(item) && item->valuestring)
-        snprintf(out, out_size, "%s", item->valuestring);
-}
-
-static void load_settings_page_config(void)
-{
-    s_side_icon[0] = '\0';
-    s_bg_image[0]  = '\0';
-
-    char *raw = read_settings_json();
-    if (!raw) return;
-
-    cJSON *root = cJSON_Parse(raw);
-    free(raw);
-    if (!root) return;
-
-    settings_json_str_field(root, "side_icon", s_side_icon, sizeof(s_side_icon));
-    settings_json_str_field(root, "bg_image",  s_bg_image,  sizeof(s_bg_image));
-
-    cJSON_Delete(root);
-}
-
 /* Lazily decode + apply the Settings page background the first time the
  * page is selected -- same "decode on first use, skip after" shape as
  * ui_deck_lazy_bg_set(), but decodes into a private PSRAM buffer instead
@@ -553,7 +506,7 @@ static void settings_lazy_bg_set(void)
 {
     if (s_bg_applied || s_bg_image[0] == '\0') return;
 
-    char bg_path[sizeof("S:") + sizeof(UI_CONFIG_BG_PATH) + 1 + UI_CONFIG_BG_LEN];
+    char bg_path[sizeof("S:") + sizeof(UI_CONFIG_BG_PATH) + 1 + UI_SETTINGS_BG_LEN];
     snprintf(bg_path, sizeof(bg_path), "S:%s/%s", UI_CONFIG_BG_PATH, s_bg_image);
 
     if (!s_bg_loaded) {
@@ -644,13 +597,100 @@ static void settings_lazy_bg_set(void)
     s_bg_applied = true;
 }
 
+/* Drop the currently-attached bg + mask (if any) and free the decoded
+ * buffer, so the next settings_lazy_bg_set() call starts clean for a
+ * different image. Only ever called while s_panel is hidden (Settings is
+ * always deselected before a Deck/Monitor rebuild -- see
+ * ui_settings_apply_appearance() callers), so there's no visible flicker
+ * from deleting live content. */
+static void settings_bg_release(void)
+{
+    if (s_bg_loaded) {
+        lv_obj_t *bg = lv_obj_get_child(s_panel, 0);
+        if (bg) lv_obj_del(bg);
+        lv_obj_t *mask = lv_obj_get_child(s_panel, 0);   /* shifted into index 0 */
+        if (mask) lv_obj_del(mask);
+    }
+    if (s_bg_dsc.data) {
+        heap_caps_free((void *)s_bg_dsc.data);
+        s_bg_dsc.data = NULL;
+    }
+    s_bg_loaded  = false;
+    s_bg_applied = false;
+
+    /* s_bg_dsc lives at a fixed static address reused across config
+     * switches -- LVGL's image cache keys decoded entries by that pointer,
+     * not its contents, so a stale cache hit here would render the new
+     * image's buffer against the old cached header/pixels (same tearing
+     * bug fixed for Monitor's per-config bg in ui_monitor_img_free_all()). */
+    lv_img_cache_invalidate_src(NULL);
+}
+
+/* Update Settings' background image and gear sidebar icon to match the
+ * currently active Deck/Monitor config. See ui_settings.h. */
+void ui_settings_apply_appearance(const ui_settings_appearance_t *appearance)
+{
+    static const ui_settings_appearance_t empty = { 0 };
+    if (!appearance) appearance = &empty;
+
+    /* ---- gear sidebar icon ---- */
+    if (strcmp(appearance->side_icon, s_side_icon) != 0) {
+        if (s_gear_has_icon) {
+            /* Custom icon is gear_btn's child 1 (child 0 is the glyph
+             * label created once in ui_settings_build()). */
+            lv_obj_t *old_img = lv_obj_get_child(s_gear_btn, 1);
+            if (old_img) lv_obj_del(old_img);
+            s_gear_has_icon = false;
+        }
+
+        snprintf(s_side_icon, sizeof(s_side_icon), "%s", appearance->side_icon);
+
+        if (s_side_icon[0] != '\0') {
+            char icon_path[sizeof("S:") + sizeof(UI_CONFIG_SIDE_ICON_PATH) + 1 + UI_SETTINGS_SIDE_ICON_LEN];
+            snprintf(icon_path, sizeof(icon_path), "S:%s/%s", UI_CONFIG_SIDE_ICON_PATH, s_side_icon);
+
+            FILE *f = fopen(icon_path + 2, "r");
+            if (f) {
+                fclose(f);
+                if (s_gear_glyph) lv_obj_add_flag(s_gear_glyph, LV_OBJ_FLAG_HIDDEN);
+
+                lv_obj_t *img = lv_img_create(s_gear_btn);
+                lv_img_set_src(img, icon_path);
+                lv_obj_center(img);
+                lv_obj_set_style_clip_corner(s_gear_btn, true, 0);
+                s_gear_has_icon = true;
+            } else {
+                ESP_LOGW("SETTINGS", "side_icon set but not found: %s (falling back to glyph)", icon_path);
+            }
+        }
+
+        if (!s_gear_has_icon && s_gear_glyph)
+            lv_obj_clear_flag(s_gear_glyph, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    /* ---- background image ---- */
+    if (strcmp(appearance->bg_image, s_bg_image) != 0) {
+        settings_bg_release();
+        snprintf(s_bg_image, sizeof(s_bg_image), "%s", appearance->bg_image);
+        /* Actual decode stays lazy -- happens on next ui_settings_select()
+         * via settings_lazy_bg_set(), same as before. */
+    }
+}
+
 /* -----------------------------------------------------------------------
  * Public
  * ----------------------------------------------------------------------- */
 lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
 {
-    s_gear_btn = gear_btn;
-    load_settings_page_config();
+    s_gear_btn   = gear_btn;
+    s_gear_glyph = lv_obj_get_child(s_gear_btn, 0);   /* LV_SYMBOL_SETTINGS label, created by ui.c before this call */
+
+    /* No appearance yet -- ui_deck_build()/ui_monitor_enter() apply the
+     * active config's own "settings" object via ui_settings_apply_appearance()
+     * right after this returns (see my_ui_init()), so this just starts
+     * from the plain-glyph/no-bg default. */
+    s_side_icon[0] = '\0';
+    s_bg_image[0]  = '\0';
 
     /* Page shell: same size/position/base color as create_page() in
      * ui_deck.c, zero padding so a lazily-added bg image + mask (see
@@ -695,6 +735,7 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
     lv_obj_set_size(s_back_btn, 36, 36);
     lv_obj_align(s_back_btn, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_set_style_bg_color(s_back_btn, lv_color_hex(0x2a2a2a), 0);
+    lv_obj_set_style_bg_opa(s_back_btn, LV_OPA_50, 0);
     lv_obj_set_style_bg_color(s_back_btn, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
     lv_obj_set_style_bg_grad_dir(s_back_btn, LV_GRAD_DIR_NONE, 0);
     lv_obj_set_style_shadow_width(s_back_btn, 0, 0);
@@ -732,30 +773,6 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
     s_menu_stack_count[0] = (int)(sizeof(s_root_menu) / sizeof(s_root_menu[0]));
     s_stack_depth         = 0;
 
-    /* Custom gear icon, same convention as page side_icon: centered,
-     * native size, replaces the LV_SYMBOL_SETTINGS glyph ui.c created as
-     * gear_btn's first (and so far only) child. Streaming decode (not
-     * pooled), same reasoning as the bg image above -- it's a small
-     * button glyph, doesn't need the zoom/PSRAM treatment. */
-    if (s_side_icon[0] != '\0') {
-        char icon_path[sizeof("S:") + sizeof(UI_CONFIG_SIDE_ICON_PATH) + 1 + UI_CONFIG_SIDE_ICON_LEN];
-        snprintf(icon_path, sizeof(icon_path), "S:%s/%s", UI_CONFIG_SIDE_ICON_PATH, s_side_icon);
-
-        FILE *f = fopen(icon_path + 2, "r");
-        if (f) {
-            fclose(f);
-            lv_obj_t *glyph = lv_obj_get_child(s_gear_btn, 0);
-            if (glyph) lv_obj_add_flag(glyph, LV_OBJ_FLAG_HIDDEN);
-
-            lv_obj_t *img = lv_img_create(s_gear_btn);
-            lv_img_set_src(img, icon_path);
-            lv_obj_center(img);
-            lv_obj_set_style_clip_corner(s_gear_btn, true, 0);
-            s_gear_has_icon = true;
-        } else {
-            ESP_LOGW("SETTINGS", "side_icon set but not found: %s (falling back to glyph)", icon_path);
-        }
-    }
     lv_obj_set_style_outline_color(s_gear_btn, lv_color_hex(0x0055cc), 0);
     lv_obj_set_style_outline_width(s_gear_btn, 0, 0);
 

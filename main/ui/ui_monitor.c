@@ -564,6 +564,10 @@ void ui_monitor_enter(lv_obj_t *sidebar)
     ui_monitor_config_load(&s_mon_cfg);
     s_total_pages = 1 + s_mon_cfg.page_count;   /* clock + data pages */
 
+    /* Settings' own bg/icon follows whichever Monitor config is active --
+     * same "settings" object convention as this config's own "clock". */
+    ui_settings_apply_appearance(&s_mon_cfg.settings);
+
     /* Clamp to array bounds just in case */
     if (s_total_pages > MON_TOTAL_PAGE_MAX)
         s_total_pages = MON_TOTAL_PAGE_MAX;
