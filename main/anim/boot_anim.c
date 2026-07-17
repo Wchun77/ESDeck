@@ -662,6 +662,45 @@ static bool flash_cache_valid(const esp_partition_t *part, const char *name,
     return true;
 }
 
+/* flash_cache_valid()只比對magic/名稱/幀數上限,只要SD上還是同一個資料
+ * 夾名稱,就算裡面的圖片內容整套換掉(例如使用者透過USB重新編輯、減少
+ * 或增加了張數),快取還是會被判定為"有效",繼續播放舊內容 -- 使用者
+ * 曾經遇到這個狀況,得先切去別的動畫、重開機、再切回來,才能強迫flash
+ * 重新provision。
+ *
+ * 這裡加一層"新鮮度"檢查。呼叫端(play_custom_boot_anim())已經先確保
+ * SD卡有插著才會走到這裡 -- 開機動畫內容一律要能對應到SD卡上實際存在
+ * 的檔案,SD卡不在時直接不播flash快取,不允許播放"記憶"下來的舊內容。
+ *
+ * 只用stat()讀取檔案metadata(不讀檔案內容本體),對幾十幀的動畫來說
+ * 成本是幾十次stat syscall,跟每次開機都重新provision整套動畫比起來
+ * 便宜很多。比對「實際幀數」+「實際總bytes數」這兩個訊號當作一個輕量
+ * signature:使用者實際遇到的「改變張數」這種情況一定抓得到,連同張數
+ * 不變但檔案大小有變(重新壓縮、換圖)也抓得到;唯一抓不到的是「幀數、
+ * 每幀檔案大小都剛好沒變,但內容本身被替換」這種極罕見情況,這裡不做
+ * 逐byte或雜湊比對,划算許多。 */
+static bool flash_cache_fresh(const char *anim_dir, const boot_anim_flash_header_t *hdr)
+{
+    static char path[320];
+    struct stat st;
+    size_t total = 0;
+    uint32_t count = 0;
+
+    for (; count < BOOT_ANIM_FLASH_MAX_FRAMES; count++) {
+        snprintf(path, sizeof(path), "%s/frame_%04u.jpg", anim_dir, (unsigned)count);
+        if (stat(path, &st) != 0) break;   /* 沒有更多幀了 */
+        total += (size_t)st.st_size;
+    }
+
+    if (count != hdr->frame_count) return false;
+
+    size_t cached_total = 0;
+    for (uint32_t i = 0; i < hdr->frame_count; i++) {
+        cached_total += hdr->frame_len[i];
+    }
+    return total == cached_total;
+}
+
 /* 複製前先用stat()(只讀檔案metadata,不搬資料本體)快速估算整套動畫
  * 需要多少bytes、多少幀,判斷放不放得下這個flash分區。放不下就直接
  * 回傳false,呼叫端會整個跳過provision、原封不動退回SD播放完整版
@@ -1064,14 +1103,25 @@ static bool play_custom_boot_anim(void)
                  BOOT_ANIM_FLASH_LABEL);
     }
 
+    /* SD卡沒插著就不播flash快取,也不重新provision,直接交給呼叫端的
+     * 程序動畫 -- 開機動畫的內容一律要能對應到SD卡上實際存在的檔案,
+     * 不允許SD卡不在時還播放"記憶"下來的舊內容。 */
+    if (!fs_sd_status()) return false;
+
     static boot_anim_flash_header_t hdr;
     memset(&hdr, 0, sizeof(hdr));
     if (part && flash_cache_valid(part, name, &hdr)) {
-        if (play_from_flash(part, &hdr)) return true;
-        ESP_LOGW(TAG, "flash playback failed, falling back to SD");
+        /* 順手比對一下SD上的實際內容有沒有變(見flash_cache_fresh()
+         * 註解),不一致就視為過期、往下走重新provision。 */
+        bool fresh = flash_cache_fresh(anim_dir, &hdr);
+        if (!fresh) {
+            ESP_LOGI(TAG, "SD content for '%s' changed since flash cache was made, re-provisioning", name);
+        } else if (play_from_flash(part, &hdr)) {
+            return true;
+        } else {
+            ESP_LOGW(TAG, "flash playback failed, falling back to SD");
+        }
     }
-
-    if (!fs_sd_status()) return false;
 
     if (part) {
         if (!flash_cache_provision(part, anim_dir, name)) {
