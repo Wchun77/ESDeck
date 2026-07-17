@@ -115,6 +115,7 @@ ui_mode_t ui_settings_get_mode(void)
 static void on_enter_monitor_done(void *arg)
 {
     ui_monitor_enter(ui_get_sidebar());
+    ui_hide_switching_screen();
 }
 
 static void enter_monitor_task(void *arg)
@@ -130,6 +131,7 @@ static void enter_monitor_task(void *arg)
 static void on_back_to_deck_done(void *arg)
 {
     ui_deck_build(ui_get_sidebar(), &s_back_cfg);
+    ui_hide_switching_screen();
 }
 
 static void back_to_deck_task(void *arg)
@@ -146,6 +148,10 @@ static void back_to_deck_task(void *arg)
 
 void ui_settings_monitor_reload(void)
 {
+    /* Same reasoning as item_mode_cb(): rebuilding pages (here, Monitor's
+     * sidebar) unconditionally re-highlights its own page 0, so leave
+     * Settings first or the gear stays selected alongside it. */
+    ui_settings_deselect();
     ui_monitor_exit();
     ui_show_switching_screen("Applying config...");
     lv_refr_now(NULL);

@@ -10,8 +10,14 @@
 /* Entry point — called once after ui_preload_wait(). */
 void my_ui_init(void);
 
-/* Show a full-screen "Switching config..." cover while image decode runs. */
+/* Show a full-screen "Switching config..." cover while image decode runs.
+ * Deletes any previous cover first, so at most one ever exists. */
 void ui_show_switching_screen(const char *msg);
+
+/* Delete the switching-screen cover, if one is currently up. Call once the
+ * destination UI (deck/monitor) has finished building on top of it, so it
+ * doesn't linger as a leaked full-screen object. */
+void ui_hide_switching_screen(void);
 
 /* Accessors for shared static widgets.
  * Modules that need to parent into the sidebar or bring the context panel

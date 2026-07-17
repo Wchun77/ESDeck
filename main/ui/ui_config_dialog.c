@@ -111,6 +111,7 @@ static void render_page(void)
 static void on_switch_preload_done(void *arg)
 {
     ui_deck_build(ui_get_sidebar(), &s_new_cfg);
+    ui_hide_switching_screen();
     ESP_LOGI("CFG_DLG", "switch complete - PSRAM free: %d B",
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }
@@ -154,6 +155,10 @@ static void confirm_cb(lv_event_t *e)
     }
 
     dialog_close();
+    /* Leaving Settings the same way sidebar_btn_cb()/item_mode_cb() do --
+     * otherwise the rebuilt deck highlights Page0 while the gear button
+     * (and s_panel) are still left selected from before the switch. */
+    ui_settings_deselect();
     ui_deck_destroy();
 
     bool cfg_ok = ui_config_load(&s_new_cfg);

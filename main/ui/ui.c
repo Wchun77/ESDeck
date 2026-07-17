@@ -9,6 +9,7 @@
 
 static lv_obj_t *s_sidebar       = NULL;
 static lv_obj_t *s_context_panel = NULL;
+static lv_obj_t *s_switching_cover = NULL;
 
 /* -----------------------------------------------------------------------
  * Mode query callback — called from TinyUSB task via usb_hid
@@ -36,6 +37,13 @@ lv_obj_t *ui_get_context_panel(void)
  * ----------------------------------------------------------------------- */
 void ui_show_switching_screen(const char *msg)
 {
+    /* Only one cover should ever exist -- a leftover from a previous
+     * transition would otherwise sit buried in the object tree forever,
+     * ready to show through as a stuck screen if a later page-visibility
+     * bug ever leaves a gap above it (see sidebar_btn_cb early-return
+     * fix). */
+    ui_hide_switching_screen();
+
     lv_obj_t *cover = lv_obj_create(lv_scr_act());
     lv_obj_set_size(cover, SCREEN_W, SCREEN_H);
     lv_obj_set_pos(cover, 0, 0);
@@ -49,6 +57,15 @@ void ui_show_switching_screen(const char *msg)
     lv_obj_set_style_text_color(lbl, lv_color_hex(0x888888), 0);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
     lv_obj_center(lbl);
+
+    s_switching_cover = cover;
+}
+
+void ui_hide_switching_screen(void)
+{
+    if (!s_switching_cover) return;
+    lv_obj_del(s_switching_cover);
+    s_switching_cover = NULL;
 }
 
 /* -----------------------------------------------------------------------

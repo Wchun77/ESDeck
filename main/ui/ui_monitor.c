@@ -99,7 +99,12 @@ static void sidebar_btn_cb(lv_event_t *e)
 
     int idx = (int)(uintptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx >= s_total_pages) return;
-    if (idx == s_cur_page) return;
+    /* No "idx == s_cur_page" shortcut here (unlike a plain page-to-page
+     * tap) -- ui_settings_select() hides s_pages[s_cur_page] via
+     * ui_monitor_deselect_current() without changing s_cur_page, so
+     * re-picking the same page after Settings must still fall through
+     * and re-show it, or it stays hidden with the stale switching-screen
+     * cover showing through underneath. */
 
     lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page],
                               lv_color_hex(0x2a2a2a), 0);

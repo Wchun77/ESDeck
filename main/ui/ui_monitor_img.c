@@ -125,4 +125,15 @@ void ui_monitor_img_free_all(void)
         }
         memset(&s_imgs[i], 0, sizeof(s_imgs[i]));
     }
+
+    /* s_imgs[] is a static array -- &s_imgs[i].dsc is the SAME lv_img_dsc_t*
+     * every time Monitor is (re)entered, only its contents change (new
+     * decode, possibly different w/h/format for a different config). LVGL's
+     * image cache keys decoded entries by that source pointer, not its
+     * contents, so without this it can keep serving a stale cached bitmap
+     * against the new header/buffer -- exactly the "freed buffer address"
+     * problem ui_settings.c's back_to_deck_task() already invalidates for
+     * on the Deck side; Monitor re-entry/config-reload needed the same
+     * treatment. */
+    lv_img_cache_invalidate_src(NULL);
 }
