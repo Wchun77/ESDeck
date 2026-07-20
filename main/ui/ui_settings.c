@@ -244,7 +244,7 @@ static void item_mode_cb(lv_event_t *e)
             s_back_cfg.pages[0].buttons      = NULL;
         }
 
-        ui_show_switching_screen("Returning to Deck...");
+        ui_show_switching_screen("Entering Deck Mode...");
         lv_refr_now(NULL);   /* flush switching screen before freeing monitor buffers */
         ui_monitor_exit();
         xTaskCreate(back_to_deck_task, "back_deck", 8192, NULL, 3, NULL);
@@ -288,7 +288,7 @@ static void item_mode_from_media_cb(lv_event_t *e)
         s_back_cfg.pages[0].buttons      = NULL;
     }
 
-    ui_show_switching_screen("Returning to Deck...");
+    ui_show_switching_screen("Entering Deck Mode...");
     lv_refr_now(NULL);
     xTaskCreate(back_to_deck_task, "back_deck", 8192, NULL, 3, NULL);
 }
@@ -481,27 +481,27 @@ static void item_boot_anim_cb(lv_event_t *e)
  *
  * Shared verbatim between Deck and Monitor mode. mode_mask decides
  * whether a node is shown while in that mode; nothing else about the
- * tree changes between modes. "Switch to Monitor" / "Switch to Deck"
- * are two separate nodes (rather than one node with a dynamically
- * updated label) purely for simplicity -- if a genuinely dynamic label
- * is ever needed elsewhere, add an optional label_fn to setting_node_t
- * instead of growing this pattern.
+ * tree changes between modes. "Monitor Mode" / "Deck Mode" are two
+ * separate nodes (rather than one node with a dynamically updated label)
+ * purely for simplicity -- if a genuinely dynamic label is ever needed
+ * elsewhere, add an optional label_fn to setting_node_t instead of
+ * growing this pattern.
  * ----------------------------------------------------------------------- */
 static const setting_node_t s_system_menu[] = {
-    { "Select Config",      SETTING_ACTION, SETMASK_BOTH, item_config_cb, NULL, 0 },
-    { "Switch to MSC mode", SETTING_ACTION, SETMASK_ALL,  item_msc_cb,    NULL, 0 },
-    { "Info",                SETTING_ACTION, SETMASK_ALL,  item_info_cb,  NULL, 0 },
+    { "Select Config", SETTING_ACTION, SETMASK_BOTH, item_config_cb, NULL, 0 },
+    { "MSC Mode",       SETTING_ACTION, SETMASK_ALL,  item_msc_cb,    NULL, 0 },
+    { "Info",            SETTING_ACTION, SETMASK_ALL,  item_info_cb,  NULL, 0 },
 };
 
 static const setting_node_t s_root_menu[] = {
-    { "Keyboard Mode",     SETTING_ACTION, SETMASK_DECK,    item_keyboard_cb,  NULL,           0 },
-    { "Boot Animation",     SETTING_ACTION, SETMASK_ALL,     item_boot_anim_cb, NULL,           0 },
-    { "System",              SETTING_SUBMENU, SETMASK_ALL,    NULL,              s_system_menu,  3 },
-    { "Switch to Monitor",  SETTING_ACTION, SETMASK_DECK,    item_mode_cb,      NULL,           0 },
-    { "Switch to Deck",      SETTING_ACTION, SETMASK_MONITOR, item_mode_cb,      NULL,           0 },
-    { "Switch to Media",     SETTING_ACTION, SETMASK_BOTH,    item_mode_to_media_cb,   NULL,     0 },
-    { "Switch to Monitor",   SETTING_ACTION, SETMASK_MEDIA,   item_mode_from_media_to_monitor_cb, NULL, 0 },
-    { "Switch to Deck",      SETTING_ACTION, SETMASK_MEDIA,   item_mode_from_media_cb, NULL,     0 },
+    { "Keyboard Mode", SETTING_ACTION, SETMASK_DECK,    item_keyboard_cb,  NULL,           0 },
+    { "Boot Animation", SETTING_ACTION, SETMASK_ALL,     item_boot_anim_cb, NULL,           0 },
+    { "System",          SETTING_SUBMENU, SETMASK_ALL,    NULL,              s_system_menu,  3 },
+    { "Monitor Mode",  SETTING_ACTION, SETMASK_DECK,    item_mode_cb,      NULL,           0 },
+    { "Deck Mode",      SETTING_ACTION, SETMASK_MONITOR, item_mode_cb,      NULL,           0 },
+    { "Media Mode",     SETTING_ACTION, SETMASK_BOTH,    item_mode_to_media_cb,   NULL,     0 },
+    { "Monitor Mode",   SETTING_ACTION, SETMASK_MEDIA,   item_mode_from_media_to_monitor_cb, NULL, 0 },
+    { "Deck Mode",      SETTING_ACTION, SETMASK_MEDIA,   item_mode_from_media_cb, NULL,     0 },
 };
 
 /* -----------------------------------------------------------------------
