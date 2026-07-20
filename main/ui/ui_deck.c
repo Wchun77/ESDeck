@@ -176,6 +176,18 @@ void ui_deck_deselect_current(void)
     lv_obj_add_flag(s_pages[s_cur_page], LV_OBJ_FLAG_HIDDEN);
 }
 
+void ui_deck_reselect_current(void)
+{
+    if (s_page_count <= 0 || !s_pages || !s_pages[s_cur_page]) return;
+
+    if (s_sidebar_has_icon[s_cur_page]) {
+        lv_obj_set_style_outline_width(s_sidebar_btns[s_cur_page], 3, 0);
+    } else {
+        lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page], lv_color_hex(0x0055cc), 0);
+    }
+    lv_obj_clear_flag(s_pages[s_cur_page], LV_OBJ_FLAG_HIDDEN);
+}
+
 /* -----------------------------------------------------------------------
  * Page and button creation
  * ----------------------------------------------------------------------- */

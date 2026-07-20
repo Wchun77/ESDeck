@@ -29,6 +29,12 @@ void ui_deck_destroy(void);
  * button takes over the content area. */
 void ui_deck_deselect_current(void);
 
+/* Counterpart to ui_deck_deselect_current(): re-show the current page and
+ * restore its sidebar highlight, without changing s_cur_page. Called when
+ * the Settings page's root-level back button (shown as an X) is used to
+ * close Settings and return to whatever page was active before. */
+void ui_deck_reselect_current(void);
+
 /* Apply the lazy background image for the given page index.
  * No-op if the bg widget already exists or no bg_image is set. */
 void ui_deck_lazy_bg_set(int page_idx);

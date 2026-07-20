@@ -5,6 +5,7 @@
 #include "ui_keyboard.h"
 #include "ui_monitor.h"
 #include "ui_deck.h"
+#include "ui_media.h"
 #include "ui_img_pool.h"
 #include "ui_config.h"
 #include "ui.h"
@@ -40,7 +41,9 @@
 typedef enum {
     SETMASK_DECK    = 1 << 0,
     SETMASK_MONITOR = 1 << 1,
+    SETMASK_MEDIA   = 1 << 2,
     SETMASK_BOTH    = SETMASK_DECK | SETMASK_MONITOR,
+    SETMASK_ALL     = SETMASK_DECK | SETMASK_MONITOR | SETMASK_MEDIA,
 } setting_mask_t;
 
 typedef enum {
@@ -67,6 +70,7 @@ static lv_obj_t *s_panel          = NULL;  /* the Settings "page" shell (right o
 static lv_obj_t *s_content        = NULL;  /* padded flex column inside s_panel, holds header + s_list */
 static lv_obj_t *s_list           = NULL;  /* scrollable item list inside the page */
 static lv_obj_t *s_back_btn       = NULL;
+static lv_obj_t *s_back_lbl       = NULL;  /* back_btn's glyph -- swaps LV_SYMBOL_LEFT/CLOSE with menu depth */
 static lv_obj_t *s_breadcrumb_lbl = NULL;
 static lv_obj_t *s_gear_btn       = NULL;  /* sidebar gear button -- highlighted like a page button */
 static lv_obj_t *s_gear_glyph     = NULL;  /* LV_SYMBOL_SETTINGS label, gear_btn's child 0 -- hidden/shown as side_icon comes and goes */
@@ -128,6 +132,28 @@ static void enter_monitor_task(void *arg)
 {
     vTaskDelay(pdMS_TO_TICKS(1000));
     lv_async_call(on_enter_monitor_done, NULL);
+    vTaskDelete(NULL);
+}
+
+/* -----------------------------------------------------------------------
+ * Deck/Monitor -> Media background task
+ * Media is UI-mock-only right now (no bg image / icon loading yet), but
+ * goes through the same async pattern as Deck<->Monitor for
+ * future-proofing -- once it grows real SD-loaded assets, this is already
+ * the right shape, and the switching screen is visible for the same
+ * reason it is for Monitor: a beat of "something is loading" feedback
+ * instead of an instant, jarring cut.
+ * ----------------------------------------------------------------------- */
+static void on_enter_media_done(void *arg)
+{
+    ui_media_enter(ui_get_sidebar());
+    ui_hide_switching_screen();
+}
+
+static void enter_media_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    lv_async_call(on_enter_media_done, NULL);
     vTaskDelete(NULL);
 }
 
@@ -223,6 +249,61 @@ static void item_mode_cb(lv_event_t *e)
         ui_monitor_exit();
         xTaskCreate(back_to_deck_task, "back_deck", 8192, NULL, 3, NULL);
     }
+}
+
+/* -----------------------------------------------------------------------
+ * Media mode transitions -- UI PROTOTYPE ONLY (see ui_media.h).
+ *
+ * Uses the same show-switching-screen + xTaskCreate pattern as
+ * item_mode_cb() above (see enter_media_task()) so entering Media already
+ * has room for background image / icon loading once that's real, instead
+ * of needing this rewired later.
+ * ----------------------------------------------------------------------- */
+static void item_mode_to_media_cb(lv_event_t *e)
+{
+    ui_settings_deselect();
+
+    if (s_mode == UI_MODE_DECK)
+        ui_deck_destroy();
+    else if (s_mode == UI_MODE_MONITOR)
+        ui_monitor_exit();
+
+    s_mode = UI_MODE_MEDIA;
+    ui_show_switching_screen("Entering Media Mode...");
+    xTaskCreate(enter_media_task, "enter_media", 4096, NULL, 3, NULL);
+}
+
+static void item_mode_from_media_cb(lv_event_t *e)
+{
+    ui_settings_deselect();
+    ui_media_exit();
+    s_mode = UI_MODE_DECK;
+
+    bool cfg_ok = ui_config_load(&s_back_cfg);
+    if (!cfg_ok || s_back_cfg.page_count == 0) {
+        s_back_cfg.page_count = 1;
+        s_back_cfg.pages      = calloc(1, sizeof(page_cfg_t));
+        snprintf(s_back_cfg.pages[0].name, UI_CONFIG_NAME_LEN, "Main");
+        s_back_cfg.pages[0].button_count = 0;
+        s_back_cfg.pages[0].buttons      = NULL;
+    }
+
+    ui_show_switching_screen("Returning to Deck...");
+    lv_refr_now(NULL);
+    xTaskCreate(back_to_deck_task, "back_deck", 8192, NULL, 3, NULL);
+}
+
+/* Media -> Monitor. Was left out originally (only Deck was wired as the
+ * one way back out of Media, to keep the first pass small) -- added now
+ * that it's clearly wanted. Reuses enter_monitor_task(), same as the
+ * existing Deck -> Monitor path. */
+static void item_mode_from_media_to_monitor_cb(lv_event_t *e)
+{
+    ui_settings_deselect();
+    ui_media_exit();
+    s_mode = UI_MODE_MONITOR;
+    ui_show_switching_screen("Entering Monitor Mode...");
+    xTaskCreate(enter_monitor_task, "enter_mon", 4096, NULL, 3, NULL);
 }
 
 static void info_dismiss_cb(lv_event_t *e)
@@ -408,16 +489,19 @@ static void item_boot_anim_cb(lv_event_t *e)
  * ----------------------------------------------------------------------- */
 static const setting_node_t s_system_menu[] = {
     { "Select Config",      SETTING_ACTION, SETMASK_BOTH, item_config_cb, NULL, 0 },
-    { "Switch to MSC mode", SETTING_ACTION, SETMASK_BOTH, item_msc_cb,    NULL, 0 },
-    { "Info",                SETTING_ACTION, SETMASK_BOTH, item_info_cb,  NULL, 0 },
+    { "Switch to MSC mode", SETTING_ACTION, SETMASK_ALL,  item_msc_cb,    NULL, 0 },
+    { "Info",                SETTING_ACTION, SETMASK_ALL,  item_info_cb,  NULL, 0 },
 };
 
 static const setting_node_t s_root_menu[] = {
     { "Keyboard Mode",     SETTING_ACTION, SETMASK_DECK,    item_keyboard_cb,  NULL,           0 },
-    { "Boot Animation",     SETTING_ACTION, SETMASK_BOTH,    item_boot_anim_cb, NULL,           0 },
-    { "System",              SETTING_SUBMENU, SETMASK_BOTH,   NULL,              s_system_menu,  3 },
+    { "Boot Animation",     SETTING_ACTION, SETMASK_ALL,     item_boot_anim_cb, NULL,           0 },
+    { "System",              SETTING_SUBMENU, SETMASK_ALL,    NULL,              s_system_menu,  3 },
     { "Switch to Monitor",  SETTING_ACTION, SETMASK_DECK,    item_mode_cb,      NULL,           0 },
     { "Switch to Deck",      SETTING_ACTION, SETMASK_MONITOR, item_mode_cb,      NULL,           0 },
+    { "Switch to Media",     SETTING_ACTION, SETMASK_BOTH,    item_mode_to_media_cb,   NULL,     0 },
+    { "Switch to Monitor",   SETTING_ACTION, SETMASK_MEDIA,   item_mode_from_media_to_monitor_cb, NULL, 0 },
+    { "Switch to Deck",      SETTING_ACTION, SETMASK_MEDIA,   item_mode_from_media_cb, NULL,     0 },
 };
 
 /* -----------------------------------------------------------------------
@@ -441,9 +525,29 @@ static void generic_item_cb(lv_event_t *e)
     }
 }
 
+/* Close Settings entirely and resume whatever mode is active -- the
+ * counterpart to the deselect_current() call in ui_settings_select().
+ * Called from the root-level back button (shown as an X, see
+ * render_current_level()) so there is always a way out of Settings, even
+ * for modes like Media that have no page list to tap instead. */
+static void close_settings(void)
+{
+    ui_settings_deselect();
+
+    if (s_mode == UI_MODE_DECK)
+        ui_deck_reselect_current();
+    else if (s_mode == UI_MODE_MONITOR)
+        ui_monitor_reselect_current();
+    else
+        ui_media_reselect_current();
+}
+
 static void back_btn_cb(lv_event_t *e)
 {
-    if (s_stack_depth == 0) return;
+    if (s_stack_depth == 0) {
+        close_settings();
+        return;
+    }
     s_stack_depth--;
     render_current_level();
 }
@@ -487,13 +591,17 @@ static void render_current_level(void)
         }
     }
 
+    /* Root level: back_btn doubles as a close button (X) instead of being
+     * hidden -- Media has no page list to pick from to leave Settings the
+     * old way, so there needs to be an explicit close everywhere. */
     if (s_stack_depth == 0) {
         lv_label_set_text(s_breadcrumb_lbl, "Settings");
-        lv_obj_add_flag(s_back_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_back_lbl, LV_SYMBOL_CLOSE);
     } else {
         lv_label_set_text(s_breadcrumb_lbl, s_menu_stack_label[s_stack_depth]);
-        lv_obj_clear_flag(s_back_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_back_lbl, LV_SYMBOL_LEFT);
     }
+    lv_obj_clear_flag(s_back_btn, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* Lazily decode + apply the Settings page background the first time the
@@ -721,9 +829,10 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
     lv_obj_clear_flag(s_content, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_content, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    /* Header: back button (hidden at root) + centered breadcrumb. No
-     * close button -- this is a page, not a popup; picking a different
-     * page is how you leave it. */
+    /* Header: back button + centered breadcrumb. The back button is always
+     * visible once a level has been rendered -- it shows LV_SYMBOL_LEFT to
+     * go up one menu level, or LV_SYMBOL_CLOSE at the root to close
+     * Settings entirely (see render_current_level() / close_settings()). */
     lv_obj_t *header = lv_obj_create(s_content);
     lv_obj_set_size(header, LV_PCT(100), 40);
     lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
@@ -744,9 +853,9 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
     lv_obj_clear_flag(s_back_btn, LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_add_event_cb(s_back_btn, back_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_flag(s_back_btn, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_t *back_lbl = lv_label_create(s_back_btn);
-    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
-    lv_obj_center(back_lbl);
+    s_back_lbl = lv_label_create(s_back_btn);
+    lv_label_set_text(s_back_lbl, LV_SYMBOL_LEFT);
+    lv_obj_center(s_back_lbl);
 
     /* Centered on the page rather than balanced against the back button's
      * width -- simpler, and reads fine whether or not the back button is
@@ -783,8 +892,10 @@ void ui_settings_select(void)
 {
     if (s_mode == UI_MODE_DECK)
         ui_deck_deselect_current();
-    else
+    else if (s_mode == UI_MODE_MONITOR)
         ui_monitor_deselect_current();
+    else
+        ui_media_deselect_current();
 
     s_stack_depth = 0;
     render_current_level();

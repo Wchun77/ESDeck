@@ -47,6 +47,12 @@ void ui_monitor_exit(void);
  * button takes over the content area. */
 void ui_monitor_deselect_current(void);
 
+/* Counterpart to ui_monitor_deselect_current(): re-show the current page
+ * and restore its sidebar highlight, without changing s_cur_page. Called
+ * when the Settings page's root-level back button (shown as an X) is used
+ * to close Settings and return to whatever page was active before. */
+void ui_monitor_reselect_current(void);
+
 /* Called by ui_monitor data receiver to push fresh system data.
  * Safe to call from any task — posts via lv_async_call internally. */
 typedef struct {
