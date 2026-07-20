@@ -2,6 +2,7 @@
 #include "usb/usb_manager.h"
 #include "ui_settings.h"
 #include "ui_monitor.h"
+#include "ui_media.h"
 #include "lvgl.h"
 
 #define SCREEN_W  800
@@ -70,9 +71,18 @@ static void dialog_confirm_cb(lv_event_t *e)
         s_overlay = NULL;
     }
 
-    /* If currently in monitor mode, exit cleanly before MSC takes over */
-    if (ui_settings_get_mode() == UI_MODE_MONITOR) {
+    /* Exit whichever mode is currently active cleanly before MSC's
+     * show_msc_screen() wipes the screen with lv_obj_clean() -- without
+     * this, a mode's own periodic timer (e.g. Media's s_media_timer)
+     * keeps running against widget pointers that just got freed out from
+     * under it, and the next tick crashes touching freed LVGL objects.
+     * Deck has no such timer today so it's harmless to skip, but Monitor
+     * and Media both do. */
+    ui_mode_t mode = ui_settings_get_mode();
+    if (mode == UI_MODE_MONITOR) {
         ui_monitor_exit();
+    } else if (mode == UI_MODE_MEDIA) {
+        ui_media_exit();
     }
 
     lv_obj_t *black = lv_obj_create(lv_scr_act());
