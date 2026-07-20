@@ -7,6 +7,10 @@
 #include "freertos/task.h"
 #include <time.h>
 #include <sys/time.h>
+#include "esp_heap_caps.h"
+#include "esp_jpeg_dec.h"
+#include "lvgl.h"
+#include "lvgl_port.h"
 
 static const char *TAG = "USB_HID";
 
@@ -93,7 +97,305 @@ static void (*s_time_cb)(uint8_t hour, uint8_t min, uint8_t sec,
                          uint8_t month, uint8_t day, uint8_t wday) = NULL;
 
 /* Called when PC sends CMD_QUERY; returns true if currently in monitor mode */
-static bool (*s_mode_query_cb)(void) = NULL;
+static uint8_t (*s_mode_query_cb)(void) = NULL;
+
+/* Called when PC sends CMD_NOWPLAYING_PROGRESS */
+static void (*s_nowplaying_cb)(uint32_t position_ms, uint32_t duration_ms,
+                               bool playing) = NULL;
+
+/* Called when PC sends CMD_AUDIO_LEVEL */
+static void (*s_audio_level_cb)(uint8_t level) = NULL;
+
+/* Called when a cover/info image finishes reassembly + decode */
+static void (*s_nowplaying_img_cb)(uint8_t kind, uint8_t *rgb565_data,
+                                   uint16_t w, uint16_t h) = NULL;
+
+/* -----------------------------------------------------------------------
+ * Cover / info image reassembly (CMD_NOWPLAYING_IMG_START/CHUNK/END)
+ *
+ * PC sends raw JPEG bytes chunked across many Feature reports on a single
+ * control pipe (blocking SetFeature calls, one at a time from PC's own
+ * worker thread), so ordering is guaranteed -- chunks are just appended
+ * sequentially, no chunk index needed. generation_id guards against a
+ * stray leftover chunk/END from a superseded transfer landing on a new
+ * one (PC bumps it whenever it restarts a transfer for that kind, e.g. on
+ * track change).
+ *
+ * One staging slot per kind (HID_MEDIA_IMG_KIND_COUNT) so a cover update
+ * and an info-strip update can be in flight independently. Raw JPEG bytes
+ * live in a PSRAM staging buffer sized for the worst case either kind
+ * needs; on END, decoded via esp_new_jpeg straight into a fresh PSRAM
+ * RGB565 buffer sized exactly for that kind and handed off to
+ * s_nowplaying_img_cb (ownership transfers -- the callback frees it).
+ * ----------------------------------------------------------------------- */
+#define HID_IMG_MAX_JPEG_SIZE (60 * 1024)
+
+typedef struct {
+    bool     active;        /* true from START until END/reset */
+    uint8_t  generation;
+    uint8_t *buf;            /* PSRAM staging buffer, lazily allocated */
+    uint32_t total_size;     /* announced in START */
+    uint32_t received;
+} img_recv_state_t;
+
+static img_recv_state_t  s_img_recv[HID_MEDIA_IMG_KIND_COUNT];
+static jpeg_dec_handle_t s_img_jpeg_dec = NULL;
+
+static bool img_kind_dims(uint8_t kind, uint16_t *w, uint16_t *h)
+{
+    switch (kind) {
+        case HID_MEDIA_IMG_KIND_COVER: *w = HID_MEDIA_IMG_COVER_W; *h = HID_MEDIA_IMG_COVER_H; return true;
+        case HID_MEDIA_IMG_KIND_INFO:  *w = HID_MEDIA_IMG_INFO_W;  *h = HID_MEDIA_IMG_INFO_H;  return true;
+        default: return false;
+    }
+}
+
+static bool img_jpeg_dec_setup(void)
+{
+    if (s_img_jpeg_dec) return true;
+
+    jpeg_dec_config_t cfg = DEFAULT_JPEG_DEC_CONFIG();
+    cfg.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
+
+    if (jpeg_dec_open(&cfg, &s_img_jpeg_dec) != JPEG_ERR_OK) {
+        ESP_LOGW(TAG, "img jpeg_dec_open failed");
+        s_img_jpeg_dec = NULL;
+        return false;
+    }
+    return true;
+}
+
+static void img_recv_reset(uint8_t kind)
+{
+    s_img_recv[kind].active   = false;
+    s_img_recv[kind].received = 0;
+}
+
+static void img_recv_start(uint8_t generation, uint8_t kind, uint32_t total_size)
+{
+    if (kind >= HID_MEDIA_IMG_KIND_COUNT) return;
+
+    if (total_size == 0) {
+        /* Sentinel, not an error: PC has no image for this kind right now
+         * (e.g. NowPlayingWatcher lost focus/session) -- cancel whatever
+         * transfer might be in flight and tell the callback to clear
+         * whatever's currently displayed, rather than starting a
+         * transfer that will never get chunks. */
+        img_recv_reset(kind);
+        if (s_nowplaying_img_cb) s_nowplaying_img_cb(kind, NULL, 0, 0);
+        return;
+    }
+    if (total_size > HID_IMG_MAX_JPEG_SIZE) {
+        ESP_LOGW(TAG, "img start: bad total_size %lu for kind %u", (unsigned long)total_size, kind);
+        return;
+    }
+
+    img_recv_state_t *st = &s_img_recv[kind];
+    if (!st->buf) {
+        st->buf = heap_caps_malloc(HID_IMG_MAX_JPEG_SIZE, MALLOC_CAP_SPIRAM);
+        if (!st->buf) {
+            ESP_LOGW(TAG, "img start: PSRAM alloc failed for kind %u", kind);
+            return;
+        }
+    }
+
+    st->active     = true;
+    st->generation = generation;
+    st->total_size = total_size;
+    st->received   = 0;
+}
+
+static void img_recv_chunk(uint8_t generation, uint8_t kind,
+                            const uint8_t *data, uint16_t data_len)
+{
+    if (kind >= HID_MEDIA_IMG_KIND_COUNT) return;
+    img_recv_state_t *st = &s_img_recv[kind];
+    if (!st->active || !st->buf || st->generation != generation) return;   /* stale/unknown transfer */
+
+    /* The Feature report is a fixed 64-byte payload per the HID descriptor
+     * (no variable-length reports), so data_len is always
+     * HID_FEATURE_PAYLOAD_SIZE-3 here regardless of how many bytes of the
+     * *last* chunk are real JPEG data vs. the PC's zero-padding tail --
+     * bufsize on this side can't tell them apart. total_size (announced
+     * in START) is the authority on how many bytes actually belong to
+     * this transfer, so clamp to whatever's still needed instead of
+     * trusting data_len -- copying the last chunk's padding tail in
+     * would both corrupt the JPEG and spuriously overflow past
+     * total_size. */
+    if (st->received >= st->total_size) return;   /* nothing left to take, ignore trailing padding chunks */
+
+    uint32_t remaining = st->total_size - st->received;
+    uint32_t take = ((uint32_t)data_len < remaining) ? data_len : remaining;
+
+    memcpy(st->buf + st->received, data, take);
+    st->received += take;
+}
+
+/* COVER (photographic thumbnail) decodes fine as JPEG. INFO (flat-color
+ * background + sharp text edges) showed visible JPEG blocking artifacts
+ * around the glyphs -- lossy chroma subsampling doesn't handle hard edges
+ * well -- so INFO is sent as PNG instead (lossless, and this content
+ * compresses to almost nothing as PNG anyway). Two different decoders,
+ * same downstream contract: fill a fresh PSRAM RGB565 buffer sized
+ * exactly want_w*want_h*2 and return it via *out_buf. */
+static bool decode_jpeg_to_rgb565(const uint8_t *data, size_t len,
+                                   uint16_t want_w, uint16_t want_h, uint8_t **out_buf)
+{
+    if (!img_jpeg_dec_setup()) return false;
+
+    jpeg_dec_io_t io = { 0 };
+    io.inbuf     = (uint8_t *)data;
+    io.inbuf_len = (int)len;
+
+    jpeg_dec_header_info_t info = { 0 };
+    if (jpeg_dec_parse_header(s_img_jpeg_dec, &io, &info) != JPEG_ERR_OK) {
+        ESP_LOGW(TAG, "img end: JPEG header parse failed");
+        return false;
+    }
+    if (info.width != want_w || info.height != want_h) {
+        ESP_LOGW(TAG, "img end: JPEG size mismatch %ux%u (expect %ux%u)",
+                 info.width, info.height, want_w, want_h);
+        return false;
+    }
+
+    uint8_t *rgb_buf = heap_caps_aligned_alloc(16, (size_t)want_w * want_h * 2, MALLOC_CAP_SPIRAM);
+    if (!rgb_buf) {
+        ESP_LOGW(TAG, "img end: PSRAM alloc failed for JPEG decode output");
+        return false;
+    }
+    io.outbuf = rgb_buf;
+
+    if (jpeg_dec_process(s_img_jpeg_dec, &io) != JPEG_ERR_OK) {
+        ESP_LOGW(TAG, "img end: JPEG decode failed");
+        heap_caps_free(rgb_buf);
+        return false;
+    }
+
+    *out_buf = rgb_buf;
+    return true;
+}
+
+/* Decodes via LVGL's own registered decoders (LV_USE_PNG=y pulls in
+ * lodepng) instead of a standalone lib like esp_new_jpeg above -- there's
+ * no equivalent bare PNG decoder component already vendored in this
+ * project, and LVGL's decoder abstraction already knows how to sniff a
+ * raw in-memory buffer via LV_IMG_SRC_VARIABLE. Unlike esp_new_jpeg (a
+ * standalone lib untouched by LVGL's own state), lv_img_decoder_* touches
+ * LVGL's internal image cache, which the rendering thread also touches --
+ * wrapped in lvgl_port_lock() since this runs on the TinyUSB task, not
+ * the LVGL thread.
+ *
+ * LVGL's bundled lodepng-based decoder (lv_png.c) always decodes to
+ * native color depth *plus an explicit per-pixel alpha byte*
+ * (LV_IMG_CF_TRUE_COLOR_ALPHA layout -- 3 bytes/px at this project's 16-bit
+ * color depth: RGB565 LE + alpha), which is exactly what we want here and
+ * is kept as-is (not flattened to opaque RGB565) -- the whole point of
+ * sending INFO as a PNG with a real alpha channel is so the text has a
+ * *transparent* background on the ESP side (composited by LVGL at
+ * display time), not a solid rectangle that would look wrong once Media
+ * gets a real background image behind it. header.cf on the way in has to
+ * be left as LV_IMG_CF_UNKNOWN (the zero-init default): lv_png.c's
+ * decoder_info only fills in TRUE_COLOR_ALPHA when the caller's cf is
+ * falsy, otherwise it just echoes back whatever cf you passed in
+ * unchanged. Caller must use LV_IMG_CF_TRUE_COLOR_ALPHA (not
+ * TRUE_COLOR) and w*h*3 bytes when building the lv_img_dsc_t for
+ * whatever this hands back -- see ui_media.c's apply_info_image(). */
+static bool decode_png_to_rgb565(const uint8_t *data, size_t len,
+                                  uint16_t want_w, uint16_t want_h, uint8_t **out_buf)
+{
+    if (!lvgl_port_lock(pdMS_TO_TICKS(1000))) {
+        ESP_LOGW(TAG, "img end: lvgl lock timeout for PNG decode");
+        return false;
+    }
+
+    lv_img_dsc_t raw = { 0 };
+    raw.data_size = (uint32_t)len;
+    raw.data      = data;
+
+    lv_img_decoder_dsc_t dec;
+    memset(&dec, 0, sizeof(dec));
+    if (lv_img_decoder_open(&dec, &raw, lv_color_white(), 0) != LV_RES_OK) {
+        ESP_LOGW(TAG, "img end: PNG decode open failed");
+        lvgl_port_unlock();
+        return false;
+    }
+
+    uint32_t w = dec.header.w;
+    uint32_t h = dec.header.h;
+
+    if (w != want_w || h != want_h || dec.header.cf != LV_IMG_CF_TRUE_COLOR_ALPHA) {
+        ESP_LOGW(TAG, "img end: PNG format mismatch %lux%lu cf=%d (expect %ux%u)",
+                 (unsigned long)w, (unsigned long)h, dec.header.cf, want_w, want_h);
+        lv_img_decoder_close(&dec);
+        lvgl_port_unlock();
+        return false;
+    }
+
+    size_t stride = (size_t)w * 3;   /* RGB565 LE + alpha byte per px, kept in full */
+    uint8_t *buf  = heap_caps_aligned_alloc(16, stride * h, MALLOC_CAP_SPIRAM);
+    if (!buf) {
+        ESP_LOGW(TAG, "img end: PSRAM alloc failed for PNG decode output");
+        lv_img_decoder_close(&dec);
+        lvgl_port_unlock();
+        return false;
+    }
+
+    bool ok = true;
+    if (dec.img_data) {
+        memcpy(buf, dec.img_data, stride * h);
+    } else {
+        for (lv_coord_t y = 0; y < (lv_coord_t)h && ok; y++) {
+            if (lv_img_decoder_read_line(&dec, 0, y, (lv_coord_t)w,
+                                          buf + (size_t)y * stride) != LV_RES_OK) {
+                ESP_LOGW(TAG, "img end: PNG read_line failed at row %d", y);
+                ok = false;
+            }
+        }
+    }
+
+    lv_img_decoder_close(&dec);
+    lvgl_port_unlock();
+
+    if (!ok) {
+        heap_caps_free(buf);
+        return false;
+    }
+
+    *out_buf = buf;
+    return true;
+}
+
+static void img_recv_end(uint8_t generation, uint8_t kind)
+{
+    if (kind >= HID_MEDIA_IMG_KIND_COUNT) return;
+    img_recv_state_t *st = &s_img_recv[kind];
+    if (!st->active || !st->buf || st->generation != generation) return;
+
+    if (st->received != st->total_size) {
+        ESP_LOGW(TAG, "img end: size mismatch for kind %u (%lu/%lu), discarding",
+                 kind, (unsigned long)st->received, (unsigned long)st->total_size);
+        img_recv_reset(kind);
+        return;
+    }
+
+    uint16_t want_w, want_h;
+    img_kind_dims(kind, &want_w, &want_h);
+
+    uint8_t *rgb_buf = NULL;
+    bool ok = (kind == HID_MEDIA_IMG_KIND_INFO)
+              ? decode_png_to_rgb565(st->buf, st->received, want_w, want_h, &rgb_buf)
+              : decode_jpeg_to_rgb565(st->buf, st->received, want_w, want_h, &rgb_buf);
+
+    img_recv_reset(kind);
+
+    if (!ok) return;
+
+    if (s_nowplaying_img_cb) {
+        s_nowplaying_img_cb(kind, rgb_buf, want_w, want_h);
+    } else {
+        heap_caps_free(rgb_buf);
+    }
+}
 
 void usb_hid_set_monitor_cb(void (*cb)(uint8_t, uint8_t, uint8_t, uint8_t,
                                        uint8_t, uint8_t, uint8_t, uint8_t,
@@ -109,9 +411,24 @@ void usb_hid_set_time_cb(void (*cb)(uint8_t, uint8_t, uint8_t,
     s_time_cb = cb;
 }
 
-void usb_hid_set_mode_query_cb(bool (*cb)(void))
+void usb_hid_set_mode_query_cb(uint8_t (*cb)(void))
 {
     s_mode_query_cb = cb;
+}
+
+void usb_hid_set_nowplaying_cb(void (*cb)(uint32_t, uint32_t, bool))
+{
+    s_nowplaying_cb = cb;
+}
+
+void usb_hid_set_audio_level_cb(void (*cb)(uint8_t))
+{
+    s_audio_level_cb = cb;
+}
+
+void usb_hid_set_nowplaying_img_cb(void (*cb)(uint8_t, uint8_t *, uint16_t, uint16_t))
+{
+    s_nowplaying_img_cb = cb;
 }
 
 /* -----------------------------------------------------------------------
@@ -196,13 +513,76 @@ void usb_hid_monitor_unsubscribe(void)
     ESP_LOGI(TAG, "monitor unsubscribe sent");
 }
 
-void usb_hid_monitor_reply_mode(bool in_monitor)
+void usb_hid_reply_mode(uint8_t mode)
 {
     if (!s_active || !tud_hid_ready()) return;
-    uint8_t btn = in_monitor ? HID_MON_BTN_MODE_MONITOR : HID_MON_BTN_MODE_DECK;
+
+    uint8_t btn;
+    const char *name;
+    switch (mode) {
+        case 1:  btn = HID_MON_BTN_MODE_MONITOR; name = "monitor"; break;
+        case 2:  btn = HID_MON_BTN_MODE_MEDIA;   name = "media";   break;
+        default: btn = HID_MON_BTN_MODE_DECK;    name = "deck";    break;
+    }
+
     uint8_t report[8] = { HID_MON_PAGE_CTRL, btn, 0, 0, 0, 0, 0, 0 };
     tud_hid_report(0, report, sizeof(report));
-    ESP_LOGI(TAG, "mode reply: %s", in_monitor ? "monitor" : "deck");
+    ESP_LOGI(TAG, "mode reply: %s", name);
+}
+
+void usb_hid_media_subscribe(void)
+{
+    if (!s_active || !tud_hid_ready()) return;
+    uint8_t report[8] = { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_SUBSCRIBE, 0, 0, 0, 0, 0, 0 };
+    tud_hid_report(0, report, sizeof(report));
+    ESP_LOGI(TAG, "media subscribe sent");
+}
+
+void usb_hid_media_unsubscribe(void)
+{
+    if (!s_active || !tud_hid_ready()) return;
+    uint8_t report[8] = { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_UNSUBSCRIBE, 0, 0, 0, 0, 0, 0 };
+    tud_hid_report(0, report, sizeof(report));
+    ESP_LOGI(TAG, "media unsubscribe sent");
+}
+
+void usb_hid_media_play_pause(void)
+{
+    if (!s_active || !tud_hid_ready()) return;
+    uint8_t report[8] = { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_PLAY_PAUSE, 0, 0, 0, 0, 0, 0 };
+    tud_hid_report(0, report, sizeof(report));
+    ESP_LOGI(TAG, "media play/pause sent");
+}
+
+void usb_hid_media_next(void)
+{
+    if (!s_active || !tud_hid_ready()) return;
+    uint8_t report[8] = { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_NEXT, 0, 0, 0, 0, 0, 0 };
+    tud_hid_report(0, report, sizeof(report));
+    ESP_LOGI(TAG, "media next sent");
+}
+
+void usb_hid_media_prev(void)
+{
+    if (!s_active || !tud_hid_ready()) return;
+    uint8_t report[8] = { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_PREV, 0, 0, 0, 0, 0, 0 };
+    tud_hid_report(0, report, sizeof(report));
+    ESP_LOGI(TAG, "media prev sent");
+}
+
+void usb_hid_media_seek(uint32_t position_ms)
+{
+    if (!s_active || !tud_hid_ready()) return;
+    uint8_t report[8] = {
+        HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_SEEK,
+        (uint8_t)(position_ms & 0xFF),
+        (uint8_t)((position_ms >> 8) & 0xFF),
+        (uint8_t)((position_ms >> 16) & 0xFF),
+        (uint8_t)((position_ms >> 24) & 0xFF),
+        0, 0
+    };
+    tud_hid_report(0, report, sizeof(report));
+    ESP_LOGI(TAG, "media seek sent: %lu ms", (unsigned long)position_ms);
 }
 
 /* -----------------------------------------------------------------------
@@ -255,8 +635,42 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
         }
     }
     else if (cmd == HID_MON_CMD_QUERY) {
-        bool in_monitor = s_mode_query_cb ? s_mode_query_cb() : false;
-        usb_hid_monitor_reply_mode(in_monitor);
+        uint8_t mode = s_mode_query_cb ? s_mode_query_cb() : 0;
+        usb_hid_reply_mode(mode);
+    }
+    else if (cmd == HID_MEDIA_CMD_NOWPLAYING_PROGRESS && bufsize >= 10) {
+        if (s_nowplaying_cb) {
+            uint32_t position_ms = (uint32_t)buffer[1]
+                                  | ((uint32_t)buffer[2] << 8)
+                                  | ((uint32_t)buffer[3] << 16)
+                                  | ((uint32_t)buffer[4] << 24);
+            uint32_t duration_ms = (uint32_t)buffer[5]
+                                  | ((uint32_t)buffer[6] << 8)
+                                  | ((uint32_t)buffer[7] << 16)
+                                  | ((uint32_t)buffer[8] << 24);
+            bool playing = buffer[9] != 0;
+            s_nowplaying_cb(position_ms, duration_ms, playing);
+        }
+    }
+    else if (cmd == HID_MEDIA_CMD_AUDIO_LEVEL && bufsize >= 2) {
+        if (s_audio_level_cb)
+            s_audio_level_cb(buffer[1]);
+    }
+    else if (cmd == HID_MEDIA_CMD_NOWPLAYING_IMG_START && bufsize >= 5) {
+        uint8_t  generation = buffer[1];
+        uint8_t  kind       = buffer[2];
+        uint32_t total_size = (uint32_t)buffer[3] | ((uint32_t)buffer[4] << 8);
+        img_recv_start(generation, kind, total_size);
+    }
+    else if (cmd == HID_MEDIA_CMD_NOWPLAYING_IMG_CHUNK && bufsize >= 3) {
+        uint8_t generation = buffer[1];
+        uint8_t kind       = buffer[2];
+        img_recv_chunk(generation, kind, buffer + 3, bufsize - 3);
+    }
+    else if (cmd == HID_MEDIA_CMD_NOWPLAYING_IMG_END && bufsize >= 3) {
+        uint8_t generation = buffer[1];
+        uint8_t kind       = buffer[2];
+        img_recv_end(generation, kind);
     }
 }
 
