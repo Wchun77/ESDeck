@@ -163,7 +163,12 @@ LVGL 原生跑馬灯(`LV_LABEL_LONG_SCROLL_CIRCULAR`)本質是「固定寬度 cl
   - **連線狀態鎖定**:`ui_media.c` 沒收到真資料(未訂閱成功、或 ~3s 逾時)時,歌名/演出者顯示「None」,時間顯示「-:--」,進度條與 prev/play/next 三顆按鈕整組 disable(不可拖曳/不可按),不再用假資料撐著看起來像在動。
   - **圖示延遲修正**:`NowPlayingSender` 原本固定 1 秒送一次,狀態改變後最多要等下一輪。改成 `AutoResetEvent` 可中斷等待 + `Nudge()`,`NowPlayingWatcher` 新增 `OnStateChanged` 事件(播放狀態切換/時間軸更新時觸發),接上後任何真正的狀態變化都會立即觸發送出,不用等滿週期。
   - **拖曳進度條 seek 已實作**:新增 `HID_MEDIA_BTN_SEEK=0x06`(`page=0xFE` 通道,payload 為 position_ms 4B LE),ESP 端 `progress_seek_cb()` 放開手時送出目標位置,PC 端 `NowPlayingWatcher.SeekTo()` 呼叫 `TryChangePlaybackPositionAsync()` 真的控制播放位置。等待 PC 確認期間(`s_seek_pending`,~2s 逾時或收到位置相符的真資料即視為確認)ESP 端畫面凍結在目標位置,避免放手後先跳回舊進度、確認封包到才又跳一次的閃爍。
-  - **尚未實作**:歌名/演出者/封面圖(cmd 已改配 0x08-0x0A,PC 端 GDI+ 畫文字條 + JPEG 縮圖 pipeline)
+  - **封面圖 / 歌名演出者文字條已實作**:`HID_MEDIA_CMD_NOWPLAYING_IMG_START/CHUNK/END`(0x08-0x0A,`page=0xFE` 通道)。PC 端 `NowPlayingWatcher` 新增 `OnMediaPropertiesChanged` 事件(換歌時觸發,帶 `GlobalSystemMediaTransportControlsSessionMediaProperties`)驅動新的 `NowPlayingImageSender`:
+    - **封面**:直接讀 Media Session API 給的 `props.Thumbnail`(`IRandomAccessStreamReference`,透過 `DataReader` 讀 bytes,不用 `AsStreamForRead()` 是因為專案沒手動 ref `System.Runtime.WindowsRuntime.dll`),不用另外爬各家 App/網頁 —— 這是作業系統統一介面,YouTube 分頁、Spotify 等只要有跟 SMTC 註冊縮圖都拿得到。GDI+ 縮放+置中裁切成 220x220。
+    - **歌名/演出者**:GDI+ 畫成一張 480x70 的文字條圖(`Microsoft JhengHei UI` 字型,涵蓋 CJK),背景色跟 `ui_media.c` 的頁面背景(`0x111111`)一致,貼上去無縫接軌。
+    - 兩張都編碼成 JPEG(quality 80),用同一套 START(generation+kind+total_size)/ CHUNK(每包 61 bytes payload)/ END 分塊送。`generation` byte 每次換歌遞增,ESP 端用來擋掉屬於上一次傳輸、卻晚到的殘留封包。
+    - ESP 端(`usb_hid.c`)收完 END 後用既有的 `esp_new_jpeg`(跟開機動畫共用同一顆解碼器元件,各自獨立 handle)解成 RGB565,尺寸不符（不是 220x220 / 480x70)直接拒收。解碼完的 buffer 透過 `usb_hid_set_nowplaying_img_cb` 回呼(帶走 ownership)交給 `ui_media.c`,`ui_media.c` 用 `lv_img_create` 疊在封面佔位圖 / 歌名演出者 label 上面,收到圖才切換顯示、沒收到時维持 None/音符佔位。
+    - **已知限制**:封面/文字圖沒有自己的逾時機制,只跟著 `s_real_data_received`(progress 斷線)一起清掉——如果只是「focus 移到沒有 Media Session 的視窗」但 HID 還連著,圖片會維持顯示上一首的內容,不會主動清空(進度數字本身仍然正常歸零),之後有需要可以再補。
 - [x] 第 5 節音頻視覺化「簡單版」-- **已實作**,同樣拔掉了原本的 sine wave 假資料:
   - `CMD_AUDIO_LEVEL=0x07`,PC 端 `AudioLevelWatcher`(WASAPI loopback)+ `AudioLevelSender`(10Hz,跟 Now Playing 共用 0xFE 訂閱通道)。
   - **平滑處理**:PC 端加了 attack/release 包絡(攻擊 30ms、釋放 250ms 的指數平滑),不是每個 buffer 的瞬間 peak 直接送,避免數值跳得生硬;ESP 端 `ui_media.c` 的 level bar 改用 `LV_ANIM_ON` + `lv_bar_set_anim_time(120)`,收到新值時用補間動畫過渡,不是瞬間跳格。

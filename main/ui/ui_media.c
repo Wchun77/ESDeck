@@ -3,6 +3,7 @@
 #include "ui_settings.h"
 #include "usb/usb_hid.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include <stdio.h>
@@ -16,15 +17,23 @@
 
 /* -----------------------------------------------------------------------
  * Media mode is entirely HID-driven now -- no more local fake/mock data.
- * Two independent HID channels feed this page while subscribed
- * (page=0xFE, see usb_hid.h):
+ * Independent HID channels feed this page while subscribed (page=0xFE,
+ * see usb_hid.h):
  *   - CMD_NOWPLAYING_PROGRESS(0x06): position/duration/playing, drives the
  *     progress bar, time labels and play/pause icon.
  *   - CMD_AUDIO_LEVEL(0x07): sidebar VU-meter bar value.
- * Both use a queue-plus-~3s-timeout convention, same as ui_monitor.c's
- * s_data_queue: while nothing has arrived yet (or the PC stops sending),
- * the UI shows a disabled/"None" state rather than making anything up.
- * See ui_media_on_hid_progress() / ui_media_on_hid_level() near the bottom.
+ *   - CMD_NOWPLAYING_IMG_START/CHUNK/END(0x08-0x0A): cover art + a
+ *     PC-rendered title/artist strip (no CJK font on-device), chunked JPEG
+ *     reassembled and decoded on the ESP side (usb_hid.c), delivered here
+ *     as a ready RGB565 buffer via ui_media_on_hid_img(). See
+ *     apply_cover_image()/apply_info_image() and their clear_* pairs.
+ * Progress/level use a queue-plus-~3s-timeout convention, same as
+ * ui_monitor.c's s_data_queue: while nothing has arrived yet (or the PC
+ * stops sending), the UI shows a disabled/"None" state rather than making
+ * anything up. Images follow s_real_data_received's same disconnect signal
+ * (cleared alongside progress/level, see apply_connected_state()) but
+ * don't have their own staleness timeout -- a cover/title doesn't need to
+ * refresh anywhere near as often as position does.
  *
  * Transport buttons (prev/play-pause/next) are one-way remote control --
  * pressing one sends a command to the PC (usb_hid_media_play_pause() etc,
@@ -33,10 +42,6 @@
  * any other change, same as pressing the button in the PC's own player.
  * They're only clickable while s_real_data_received is true (see
  * apply_connected_state()).
- *
- * Title/artist always show "None" -- there is no title/artist HID protocol
- * yet, that needs a PC-rendered image pipeline (no CJK font on-device, see
- * project notes §4.1) and is a separate, not-yet-designed piece of work.
  * ----------------------------------------------------------------------- */
 
 /* -----------------------------------------------------------------------
@@ -103,6 +108,36 @@ static int           s_real_level_timeout  = 0;
 static void ui_media_on_hid_level(uint8_t level);
 
 /* -----------------------------------------------------------------------
+ * Cover art / title-artist image -- pushed from usb_hid's TinyUSB task via
+ * ui_media_on_hid_img() once a JPEG chunk transfer finishes reassembly +
+ * decode (see usb_hid.c's img_recv_end()). Ownership of the decoded
+ * RGB565 buffer transfers through the queue; s_cover_data/s_info_data
+ * track whichever buffer is currently live so it can be freed once
+ * replaced or on ui_media_exit(). Unlike progress/level, these arrive
+ * rarely (on track change) so a plain (non-overwrite) queue is fine --
+ * depth 4 gives slack for both kinds arriving close together without
+ * blocking the TinyUSB task.
+ * ----------------------------------------------------------------------- */
+typedef struct {
+    uint8_t  kind;
+    uint8_t *rgb565_data;   /* MALLOC_CAP_SPIRAM, ownership transferred */
+    uint16_t w;
+    uint16_t h;
+} media_img_msg_t;
+
+static QueueHandle_t s_img_queue = NULL;
+
+static lv_obj_t     *s_cover_img  = NULL;   /* shown instead of s_cover once a cover arrives */
+static lv_img_dsc_t  s_cover_dsc;
+static uint8_t       *s_cover_data = NULL;   /* currently displayed buffer, owned here */
+
+static lv_obj_t     *s_info_img   = NULL;   /* shown instead of title/artist labels once an info strip arrives */
+static lv_img_dsc_t  s_info_dsc;
+static uint8_t       *s_info_data = NULL;
+
+static void ui_media_on_hid_img(uint8_t kind, uint8_t *rgb565_data, uint16_t w, uint16_t h);
+
+/* -----------------------------------------------------------------------
  * Helpers
  * ----------------------------------------------------------------------- */
 static void format_time(int sec, char *buf, size_t buf_len)
@@ -131,6 +166,81 @@ static void set_widget_enabled(lv_obj_t *obj, bool enabled)
     }
 }
 
+/* Hides the cover image (if shown) and frees its buffer, reverting to the
+ * placeholder glyph box (s_cover). Safe to call with nothing currently
+ * shown. */
+static void clear_cover_image(void)
+{
+    if (s_cover_img) lv_obj_add_flag(s_cover_img, LV_OBJ_FLAG_HIDDEN);
+    if (s_cover)     lv_obj_clear_flag(s_cover, LV_OBJ_FLAG_HIDDEN);
+
+    if (s_cover_data) {
+        heap_caps_free(s_cover_data);
+        s_cover_data = NULL;
+    }
+}
+
+/* Same idea for the title/artist info strip -- reverts to the "None" text
+ * labels. */
+static void clear_info_image(void)
+{
+    if (s_info_img)  lv_obj_add_flag(s_info_img, LV_OBJ_FLAG_HIDDEN);
+    if (s_title_lbl)  lv_obj_clear_flag(s_title_lbl, LV_OBJ_FLAG_HIDDEN);
+    if (s_artist_lbl) lv_obj_clear_flag(s_artist_lbl, LV_OBJ_FLAG_HIDDEN);
+
+    if (s_info_data) {
+        heap_caps_free(s_info_data);
+        s_info_data = NULL;
+    }
+}
+
+/* Swaps in a freshly decoded RGB565 buffer as the cover image, freeing
+ * whatever was shown before and hiding the placeholder glyph box. Takes
+ * ownership of rgb565_data. */
+static void apply_cover_image(uint8_t *rgb565_data, uint16_t w, uint16_t h)
+{
+    if (s_cover_data) heap_caps_free(s_cover_data);
+    s_cover_data = rgb565_data;
+
+    s_cover_dsc.header.cf          = LV_IMG_CF_TRUE_COLOR;
+    s_cover_dsc.header.always_zero = 0;
+    s_cover_dsc.header.w           = w;
+    s_cover_dsc.header.h           = h;
+    s_cover_dsc.data_size          = (uint32_t)w * h * 2;
+    s_cover_dsc.data               = rgb565_data;
+
+    lv_img_cache_invalidate_src(&s_cover_dsc);
+    lv_img_set_src(s_cover_img, &s_cover_dsc);
+    lv_obj_clear_flag(s_cover_img, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_cover, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Same idea for the title/artist info strip. */
+static void apply_info_image(uint8_t *rgb565_data, uint16_t w, uint16_t h)
+{
+    if (s_info_data) heap_caps_free(s_info_data);
+    s_info_data = rgb565_data;
+
+    /* TRUE_COLOR_ALPHA (3 bytes/px: RGB565 LE + alpha), not plain
+     * TRUE_COLOR -- the whole point of sending this as a PNG (see
+     * usb_hid.c's decode_png_to_rgb565()) is a real transparent
+     * background so the text doesn't sit on a solid rectangle once Media
+     * has an actual background image behind it; LVGL alpha-blends this
+     * against s_page (or later, the bg image) at render time. */
+    s_info_dsc.header.cf          = LV_IMG_CF_TRUE_COLOR_ALPHA;
+    s_info_dsc.header.always_zero = 0;
+    s_info_dsc.header.w           = w;
+    s_info_dsc.header.h           = h;
+    s_info_dsc.data_size          = (uint32_t)w * h * 3;
+    s_info_dsc.data               = rgb565_data;
+
+    lv_img_cache_invalidate_src(&s_info_dsc);
+    lv_img_set_src(s_info_img, &s_info_dsc);
+    lv_obj_clear_flag(s_info_img, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_title_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_artist_lbl, LV_OBJ_FLAG_HIDDEN);
+}
+
 /* Applies (or re-applies) the connected/disconnected look. Cheap to call
  * unconditionally every tick, but media_timer_cb only calls it on actual
  * transitions to avoid needlessly re-touching LVGL styles every 80ms. */
@@ -150,6 +260,12 @@ static void apply_connected_state(bool connected)
         lv_label_set_text(s_time_total_lbl, "-:--");
         lv_label_set_text(s_play_icon_lbl, LV_SYMBOL_PLAY);
         lv_slider_set_value(s_progress_bar, 0, LV_ANIM_OFF);
+
+        /* Drop any cover/info image and fall back to the placeholder
+         * glyph / "None" labels -- a stale image from whatever was
+         * playing before disconnect shouldn't linger on screen. */
+        clear_cover_image();
+        clear_info_image();
     }
 }
 
@@ -258,6 +374,30 @@ static void media_timer_cb(lv_timer_t *timer)
     if (s_real_data_received != s_ui_enabled)
         apply_connected_state(s_real_data_received);
 
+    /* Drain cover/info image queue -- rare compared to progress/level, so
+     * just apply every message in arrival order (each apply_*_image() call
+     * frees whatever it's replacing). Only meaningful while connected; if
+     * a message somehow arrives after disconnect (race with the ~3s
+     * progress timeout) just free it instead of showing a stale image. */
+    media_img_msg_t img_msg;
+    while (s_img_queue && xQueueReceive(s_img_queue, &img_msg, 0) == pdTRUE) {
+        /* rgb565_data == NULL is the "clear" sentinel (see img_recv_start()
+         * in usb_hid.c) -- PC has no image for this kind right now (e.g.
+         * Now Playing lost focus/session), revert to the placeholder
+         * instead of applying a buffer. */
+        if (!s_real_data_received) {
+            if (img_msg.rgb565_data) heap_caps_free(img_msg.rgb565_data);
+        } else if (img_msg.kind == HID_MEDIA_IMG_KIND_COVER) {
+            if (img_msg.rgb565_data) apply_cover_image(img_msg.rgb565_data, img_msg.w, img_msg.h);
+            else clear_cover_image();
+        } else if (img_msg.kind == HID_MEDIA_IMG_KIND_INFO) {
+            if (img_msg.rgb565_data) apply_info_image(img_msg.rgb565_data, img_msg.w, img_msg.h);
+            else clear_info_image();
+        } else if (img_msg.rgb565_data) {
+            heap_caps_free(img_msg.rgb565_data);
+        }
+    }
+
     /* Drain real audio level queue -- keep only the latest entry, same
      * ~3s timeout convention as the progress queue above. Independent of
      * s_real_data_received: audio level and Now Playing are separate HID
@@ -355,18 +495,20 @@ static void build_player_card(lv_obj_t *scr)
     s_page = lv_obj_create(scr);
     lv_obj_set_size(s_page, CONTENT_W, CONTENT_H);
     lv_obj_set_pos(s_page, SIDEBAR_W, 0);
-    lv_obj_set_style_bg_color(s_page, lv_color_hex(0x111111), 0);
+    lv_obj_set_style_bg_color(s_page, lv_color_hex(0x222222), 0);   /* same fallback as ui_deck.c/ui_monitor.c's "no bg selected" flat color */
     lv_obj_set_style_border_width(s_page, 0, 0);
     lv_obj_set_style_radius(s_page, 0, 0);
     lv_obj_set_style_pad_all(s_page, 0, 0);
     lv_obj_clear_flag(s_page, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* TODO: once Media has a real bg_image (SD-loaded, like Deck/Monitor),
+    /* TODO: Media will eventually get its own settings screen (side icon +
+     * bg image, like Deck/Monitor's per-page config) -- once that lands,
      * add a semi-transparent mask layer between the bg and the card
-     * widgets below -- same bg(child0)+mask(child1) convention as
+     * widgets below, same bg(child0)+mask(child1) convention as
      * ui_deck.c's create_page()/ui_monitor.c's make_page(), so the player
      * card stays readable over a busy background image. Flat color only
-     * for now, no bg image support yet. */
+     * for now (0x222222, same "no bg selected" fallback Deck/Monitor use),
+     * no bg image support yet -- deliberately deferred, not a bug. */
 
     /* Cover placeholder -- always shown as-is, no real cover art yet. */
     s_cover = lv_obj_create(s_page);
@@ -383,11 +525,21 @@ static void build_player_card(lv_obj_t *scr)
     lv_obj_set_style_text_font(cover_glyph, &lv_font_montserrat_48, 0);
     lv_obj_center(cover_glyph);
 
-    /* Title -- shows "None" until a real title/artist HID protocol exists
-     * (see file header). LV_LABEL_LONG_SCROLL_CIRCULAR is kept configured
-     * for when that lands: a PC-rendered scrolling image strip will
-     * eventually replace this label (no CJK font on-device), animated the
-     * same way this native marquee already works. */
+    /* Cover image -- same box/position as the placeholder above, hidden
+     * until a real cover arrives over CMD_NOWPLAYING_IMG_* (see
+     * apply_cover_image()/clear_cover_image()). PC encodes to exactly
+     * HID_MEDIA_IMG_COVER_W x H before sending. */
+    s_cover_img = lv_img_create(s_page);
+    lv_obj_set_size(s_cover_img, HID_MEDIA_IMG_COVER_W, HID_MEDIA_IMG_COVER_H);
+    lv_obj_align(s_cover_img, LV_ALIGN_TOP_MID, 0, 36);
+    lv_obj_add_flag(s_cover_img, LV_OBJ_FLAG_HIDDEN);
+
+    /* Title -- shows "None" until a real cover/info image arrives. Kept as
+     * a plain label for the disconnected/no-image state; once
+     * CMD_NOWPLAYING_IMG_KIND_INFO delivers a PC-rendered strip (needed
+     * for CJK text, no font on-device), s_info_img is shown over this
+     * region instead and this label is hidden -- see
+     * apply_info_image()/clear_info_image(). */
     s_title_lbl = lv_label_create(s_page);
     lv_obj_set_width(s_title_lbl, 480);
     lv_label_set_long_mode(s_title_lbl, LV_LABEL_LONG_SCROLL_CIRCULAR);
@@ -404,6 +556,14 @@ static void build_player_card(lv_obj_t *scr)
     lv_obj_set_style_text_color(s_artist_lbl, lv_color_hex(0x999999), 0);
     lv_obj_set_style_text_font(s_artist_lbl, &lv_font_montserrat_16, 0);
     lv_obj_align(s_artist_lbl, LV_ALIGN_TOP_MID, 0, 308);
+
+    /* Info image -- spans the same region as the title+artist labels
+     * above (title at y=274, artist at y=308), hidden until a real one
+     * arrives. */
+    s_info_img = lv_img_create(s_page);
+    lv_obj_set_size(s_info_img, HID_MEDIA_IMG_INFO_W, HID_MEDIA_IMG_INFO_H);
+    lv_obj_align(s_info_img, LV_ALIGN_TOP_MID, 0, 270);
+    lv_obj_add_flag(s_info_img, LV_OBJ_FLAG_HIDDEN);
 
     /* Progress bar -- lv_slider, not lv_bar: lv_bar is display-only and
      * cannot be dragged, lv_slider is the draggable counterpart. Knob is
@@ -488,6 +648,7 @@ void ui_media_enter(lv_obj_t *sidebar)
      * -- same ordering as ui_monitor_enter(). */
     s_progress_queue = xQueueCreate(1, sizeof(media_progress_t));
     s_level_queue    = xQueueCreate(1, sizeof(uint8_t));
+    s_img_queue      = xQueueCreate(4, sizeof(media_img_msg_t));
 
     /* No Media config file yet -- plain background + default gear glyph. */
     ui_settings_apply_appearance(NULL);
@@ -516,9 +677,10 @@ void ui_media_enter(lv_obj_t *sidebar)
     /* Register HID callbacks and notify PC to start sending Media data */
     usb_hid_set_nowplaying_cb(ui_media_on_hid_progress);
     usb_hid_set_audio_level_cb(ui_media_on_hid_level);
+    usb_hid_set_nowplaying_img_cb(ui_media_on_hid_img);
     usb_hid_media_subscribe();
 
-    ESP_LOGI(TAG, "entered media mode (progress + level HID-driven, title/artist show None)");
+    ESP_LOGI(TAG, "entered media mode (progress + level + cover/info image HID-driven)");
 }
 
 void ui_media_exit(void)
@@ -527,6 +689,7 @@ void ui_media_exit(void)
     usb_hid_media_unsubscribe();
     usb_hid_set_nowplaying_cb(NULL);
     usb_hid_set_audio_level_cb(NULL);
+    usb_hid_set_nowplaying_img_cb(NULL);
 
     if (s_media_timer) {
         lv_timer_del(s_media_timer);
@@ -541,12 +704,26 @@ void ui_media_exit(void)
         vQueueDelete(s_level_queue);
         s_level_queue = NULL;
     }
+    if (s_img_queue) {
+        /* Drain and free any messages that never got applied -- otherwise
+         * their RGB565 buffers leak (queue holds raw pointers, no LVGL
+         * object owns them until apply_*_image() runs). */
+        media_img_msg_t leftover;
+        while (xQueueReceive(s_img_queue, &leftover, 0) == pdTRUE)
+            heap_caps_free(leftover.rgb565_data);
+        vQueueDelete(s_img_queue);
+        s_img_queue = NULL;
+    }
+
+    if (s_cover_data) { heap_caps_free(s_cover_data); s_cover_data = NULL; }
+    if (s_info_data)  { heap_caps_free(s_info_data);  s_info_data  = NULL; }
 
     if (s_page) {
         lv_obj_del(s_page);
         s_page = NULL;
     }
     s_cover = s_title_lbl = s_artist_lbl = NULL;
+    s_cover_img = s_info_img = NULL;
     s_progress_bar = s_time_elapsed_lbl = s_time_total_lbl = NULL;
     s_prev_btn = s_play_btn = s_next_btn = s_play_icon_lbl = NULL;
 
@@ -610,4 +787,23 @@ void ui_media_push_level(uint8_t level)
 static void ui_media_on_hid_level(uint8_t level)
 {
     ui_media_push_level(level);
+}
+
+/* usb_hid.c hands off ownership of rgb565_data here -- if the queue is
+ * missing (not entered/already exited) or full, this frees it immediately
+ * rather than leaking it. media_timer_cb() (LVGL thread) is the only
+ * other place that frees an s_img_queue item, applying it via
+ * apply_cover_image()/apply_info_image(). */
+static void ui_media_on_hid_img(uint8_t kind, uint8_t *rgb565_data, uint16_t w, uint16_t h)
+{
+    if (!s_img_queue) {
+        heap_caps_free(rgb565_data);
+        return;
+    }
+
+    media_img_msg_t msg = { .kind = kind, .rgb565_data = rgb565_data, .w = w, .h = h };
+    if (xQueueSend(s_img_queue, &msg, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "img queue full, dropping kind %u", kind);
+        heap_caps_free(rgb565_data);
+    }
 }

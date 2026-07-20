@@ -38,6 +38,37 @@
  * received/timeout convention as CMD_NOWPLAYING_PROGRESS. */
 #define HID_MEDIA_CMD_AUDIO_LEVEL           0x07
 
+/* Media OUT report commands (PC -> ESP), continued: cover art / title-
+ * artist image transfer. Chunked over the same 64-byte Feature report
+ * channel, reassembled and decoded on the ESP into a fixed-size RGB565
+ * buffer per kind -- PC must resize/encode to exactly the target
+ * dimensions below before sending; anything else is rejected. COVER is
+ * decoded as JPEG (photographic thumbnail, esp_new_jpeg); INFO is decoded
+ * as PNG (flat background + sharp text edges -- JPEG's lossy chroma
+ * subsampling showed visible blocking artifacts around glyphs, PNG is
+ * lossless and this content compresses to almost nothing anyway). See
+ * project notes §4.3/§4.4. */
+#define HID_MEDIA_CMD_NOWPLAYING_IMG_START  0x08
+#define HID_MEDIA_CMD_NOWPLAYING_IMG_CHUNK  0x09
+#define HID_MEDIA_CMD_NOWPLAYING_IMG_END    0x0A
+
+/* Image "kind" byte, sent with START/CHUNK/END -- two independent transfer
+ * slots so a cover update and an info-strip update can be in flight at the
+ * same time without stepping on each other. */
+#define HID_MEDIA_IMG_KIND_COVER  0
+#define HID_MEDIA_IMG_KIND_INFO   1
+#define HID_MEDIA_IMG_KIND_COUNT  2
+
+/* Fixed target dimensions per kind (PC must encode to exactly this size,
+ * ESP rejects a decoded JPEG whose header reports anything else). COVER
+ * matches ui_media.c's cover art box; INFO is a single strip holding both
+ * the title (top) and artist (bottom) lines, rendered PC-side since the
+ * ESP has no CJK font on-device. */
+#define HID_MEDIA_IMG_COVER_W  220
+#define HID_MEDIA_IMG_COVER_H  220
+#define HID_MEDIA_IMG_INFO_W   480
+#define HID_MEDIA_IMG_INFO_H   70
+
 /* Media control IN report bytes (ESP -> PC)
  * page = 0xFE signals a Media control message -- parallel, independent
  * namespace from the monitor 0xFF channel above (not a button press). */
@@ -116,6 +147,23 @@ void usb_hid_set_nowplaying_cb(void (*cb)(uint32_t position_ms,
 /* Register callback invoked when PC sends CMD_AUDIO_LEVEL.
  * Pass NULL to unregister. Called from the TinyUSB task context. */
 void usb_hid_set_audio_level_cb(void (*cb)(uint8_t level));
+
+/* Register callback invoked when a cover/info image (see
+ * HID_MEDIA_CMD_NOWPLAYING_IMG_*) finishes reassembly and decode.
+ * kind is HID_MEDIA_IMG_KIND_COVER/INFO, w/h are the fixed dimensions for
+ * that kind, and rgb565_data is a heap_caps_malloc(MALLOC_CAP_SPIRAM)
+ * buffer. Ownership transfers to the callback -- it must eventually
+ * heap_caps_free() it once done (see ui_media.c). Buffer format/size
+ * differs by kind (COVER is opaque JPEG -> plain RGB565, w*h*2 bytes;
+ * INFO is PNG with alpha -> RGB565+alpha, w*h*3 bytes -- see usb_hid.c's
+ * decode_jpeg_to_rgb565()/decode_png_to_rgb565()).
+ * rgb565_data is NULL (w/h both 0) as a "clear" sentinel when PC sends
+ * CMD_NOWPLAYING_IMG_START with total_size=0 -- e.g. Now Playing lost
+ * focus/session and has nothing to show for that kind anymore.
+ * Pass NULL to unregister. Called from the TinyUSB task context -- no
+ * LVGL calls here, same rule as the other callbacks. */
+void usb_hid_set_nowplaying_img_cb(void (*cb)(uint8_t kind, uint8_t *rgb565_data,
+                                              uint16_t w, uint16_t h));
 
 const tusb_desc_device_t *usb_hid_get_device_desc(void);
 const uint8_t            *usb_hid_get_config_desc(void);
