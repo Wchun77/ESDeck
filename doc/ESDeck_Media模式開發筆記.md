@@ -1,7 +1,7 @@
 # ESDeck Media 模式開發筆記
 
 記錄日期:2026-07-20
-分支:`feature/media-mode-ui-mock`(ESDeck 韌體專案)
+分支:`feature/media-mode`(ESDeck 韌體專案,原名 `feature/media-mode-ui-mock`,後重新命名;此分支會把 Media 功能全部做完再合併回 main)
 
 ---
 
@@ -164,7 +164,7 @@ LVGL 原生跑馬灯(`LV_LABEL_LONG_SCROLL_CIRCULAR`)本質是「固定寬度 cl
 
 ```
 cd ESDeck
-git checkout feature/media-mode-ui-mock
+git checkout feature/media-mode
 idf.py reconfigure   # 保險起見,確保新檔案有被抓進 CMake
 idf.py -p PORT build flash monitor
 ```
