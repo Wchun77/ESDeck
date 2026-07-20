@@ -93,7 +93,14 @@ static void (*s_time_cb)(uint8_t hour, uint8_t min, uint8_t sec,
                          uint8_t month, uint8_t day, uint8_t wday) = NULL;
 
 /* Called when PC sends CMD_QUERY; returns true if currently in monitor mode */
-static bool (*s_mode_query_cb)(void) = NULL;
+static uint8_t (*s_mode_query_cb)(void) = NULL;
+
+/* Called when PC sends CMD_NOWPLAYING_PROGRESS */
+static void (*s_nowplaying_cb)(uint32_t position_ms, uint32_t duration_ms,
+                               bool playing) = NULL;
+
+/* Called when PC sends CMD_AUDIO_LEVEL */
+static void (*s_audio_level_cb)(uint8_t level) = NULL;
 
 void usb_hid_set_monitor_cb(void (*cb)(uint8_t, uint8_t, uint8_t, uint8_t,
                                        uint8_t, uint8_t, uint8_t, uint8_t,
@@ -109,9 +116,19 @@ void usb_hid_set_time_cb(void (*cb)(uint8_t, uint8_t, uint8_t,
     s_time_cb = cb;
 }
 
-void usb_hid_set_mode_query_cb(bool (*cb)(void))
+void usb_hid_set_mode_query_cb(uint8_t (*cb)(void))
 {
     s_mode_query_cb = cb;
+}
+
+void usb_hid_set_nowplaying_cb(void (*cb)(uint32_t, uint32_t, bool))
+{
+    s_nowplaying_cb = cb;
+}
+
+void usb_hid_set_audio_level_cb(void (*cb)(uint8_t))
+{
+    s_audio_level_cb = cb;
 }
 
 /* -----------------------------------------------------------------------
@@ -196,13 +213,61 @@ void usb_hid_monitor_unsubscribe(void)
     ESP_LOGI(TAG, "monitor unsubscribe sent");
 }
 
-void usb_hid_monitor_reply_mode(bool in_monitor)
+void usb_hid_reply_mode(uint8_t mode)
 {
     if (!s_active || !tud_hid_ready()) return;
-    uint8_t btn = in_monitor ? HID_MON_BTN_MODE_MONITOR : HID_MON_BTN_MODE_DECK;
+
+    uint8_t btn;
+    const char *name;
+    switch (mode) {
+        case 1:  btn = HID_MON_BTN_MODE_MONITOR; name = "monitor"; break;
+        case 2:  btn = HID_MON_BTN_MODE_MEDIA;   name = "media";   break;
+        default: btn = HID_MON_BTN_MODE_DECK;    name = "deck";    break;
+    }
+
     uint8_t report[8] = { HID_MON_PAGE_CTRL, btn, 0, 0, 0, 0, 0, 0 };
     tud_hid_report(0, report, sizeof(report));
-    ESP_LOGI(TAG, "mode reply: %s", in_monitor ? "monitor" : "deck");
+    ESP_LOGI(TAG, "mode reply: %s", name);
+}
+
+void usb_hid_media_subscribe(void)
+{
+    if (!s_active || !tud_hid_ready()) return;
+    uint8_t report[8] = { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_SUBSCRIBE, 0, 0, 0, 0, 0, 0 };
+    tud_hid_report(0, report, sizeof(report));
+    ESP_LOGI(TAG, "media subscribe sent");
+}
+
+void usb_hid_media_unsubscribe(void)
+{
+    if (!s_active || !tud_hid_ready()) return;
+    uint8_t report[8] = { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_UNSUBSCRIBE, 0, 0, 0, 0, 0, 0 };
+    tud_hid_report(0, report, sizeof(report));
+    ESP_LOGI(TAG, "media unsubscribe sent");
+}
+
+void usb_hid_media_play_pause(void)
+{
+    if (!s_active || !tud_hid_ready()) return;
+    uint8_t report[8] = { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_PLAY_PAUSE, 0, 0, 0, 0, 0, 0 };
+    tud_hid_report(0, report, sizeof(report));
+    ESP_LOGI(TAG, "media play/pause sent");
+}
+
+void usb_hid_media_next(void)
+{
+    if (!s_active || !tud_hid_ready()) return;
+    uint8_t report[8] = { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_NEXT, 0, 0, 0, 0, 0, 0 };
+    tud_hid_report(0, report, sizeof(report));
+    ESP_LOGI(TAG, "media next sent");
+}
+
+void usb_hid_media_prev(void)
+{
+    if (!s_active || !tud_hid_ready()) return;
+    uint8_t report[8] = { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_PREV, 0, 0, 0, 0, 0, 0 };
+    tud_hid_report(0, report, sizeof(report));
+    ESP_LOGI(TAG, "media prev sent");
 }
 
 /* -----------------------------------------------------------------------
@@ -255,8 +320,26 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
         }
     }
     else if (cmd == HID_MON_CMD_QUERY) {
-        bool in_monitor = s_mode_query_cb ? s_mode_query_cb() : false;
-        usb_hid_monitor_reply_mode(in_monitor);
+        uint8_t mode = s_mode_query_cb ? s_mode_query_cb() : 0;
+        usb_hid_reply_mode(mode);
+    }
+    else if (cmd == HID_MEDIA_CMD_NOWPLAYING_PROGRESS && bufsize >= 10) {
+        if (s_nowplaying_cb) {
+            uint32_t position_ms = (uint32_t)buffer[1]
+                                  | ((uint32_t)buffer[2] << 8)
+                                  | ((uint32_t)buffer[3] << 16)
+                                  | ((uint32_t)buffer[4] << 24);
+            uint32_t duration_ms = (uint32_t)buffer[5]
+                                  | ((uint32_t)buffer[6] << 8)
+                                  | ((uint32_t)buffer[7] << 16)
+                                  | ((uint32_t)buffer[8] << 24);
+            bool playing = buffer[9] != 0;
+            s_nowplaying_cb(position_ms, duration_ms, playing);
+        }
+    }
+    else if (cmd == HID_MEDIA_CMD_AUDIO_LEVEL && bufsize >= 2) {
+        if (s_audio_level_cb)
+            s_audio_level_cb(buffer[1]);
     }
 }
 

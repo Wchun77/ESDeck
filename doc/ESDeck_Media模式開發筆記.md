@@ -116,12 +116,15 @@ LVGL 原生跑馬灯(`LV_LABEL_LONG_SCROLL_CIRCULAR`)本質是「固定寬度 cl
 
 **PC → ESP**:延續現有 `0x03/0x04/0x05` 之後:
 
-| cmd | payload 概念 | 說明 |
-|---|---|---|
-| 0x06 CMD_NOWPLAYING_PROGRESS | position(4B)/duration(4B)/playing(1B) | 數字類,小,可以像 CMD_DATA 一樣每秒送 |
-| 0x07 CMD_NOWPLAYING_IMG_START | generation_id(1B)/total_size(2B)/kind(1B:封面 or 文字條) | 宣告一次圖片傳輸開始 |
-| 0x08 CMD_NOWPLAYING_IMG_CHUNK | generation_id(1B)/chunk_idx(2B)/data(...) | 圖片分塊 |
-| 0x09 CMD_NOWPLAYING_IMG_END | generation_id(1B) | 收尾,通知 ESP 可以解碼顯示了 |
+| cmd | payload 概念 | 說明 | 狀態 |
+|---|---|---|---|
+| 0x06 CMD_NOWPLAYING_PROGRESS | position(4B)/duration(4B)/playing(1B) | 數字類,小,每秒送 | **已實作** |
+| 0x07 CMD_AUDIO_LEVEL | level(1B, 0-100) | 第 5 節音頻視覺化「簡單版」VU 值,10Hz 送 | **已實作** |
+| 0x08 CMD_NOWPLAYING_IMG_START | generation_id(1B)/total_size(2B)/kind(1B:封面 or 文字條) | 宣告一次圖片傳輸開始 | 未實作 |
+| 0x09 CMD_NOWPLAYING_IMG_CHUNK | generation_id(1B)/chunk_idx(2B)/data(...) | 圖片分塊 | 未實作 |
+| 0x0A CMD_NOWPLAYING_IMG_END | generation_id(1B) | 收尾,通知 ESP 可以解碼顯示了 | 未實作 |
+
+> cmd byte 編號已依實作結果調整:原本規劃 0x07 給圖片傳輸開頭用,但音量 VU 值(第 5 節)先落地,所以圖片相關三個 cmd 往後遞補到 0x08-0x0A。
 
 `kind` 用來區分這塊是「封面圖」還是「歌名/演出者渲染出來的文字圖」,兩種走同一套 chunk 機制,只是貼的位置跟圖片尺寸不同。
 
@@ -153,8 +156,17 @@ LVGL 原生跑馬灯(`LV_LABEL_LONG_SCROLL_CIRCULAR`)本質是「固定寬度 cl
 
 - [ ] `main/CMakeLists.txt` 的 `file(GLOB_RECURSE ...)` 加上 `CONFIGURE_DEPENDS`,避免以後新增 `ui/*.c` 檔案又忘記重新 configure(這次遇到的連結錯誤就是這個原因)
 - [ ] Media 內容區加半透明背景遮罩(等真的有 bg_image 支援時一起做,`ui_media.c` 已留 TODO 註解)
-- [ ] 決定並實作第 4.4 節的 Now Playing HID 協定(PC 端 Media Session API 抓歌曲資訊、GDI+ 畫文字條、封面 JPEG 縮圖 pipeline)
-- [ ] 決定並實作第 5 節的音頻視覺化真實資料(PC 端 NAudio loopback capture)
+- [x] 第 4.4 節 Now Playing HID 協定(數字部分)-- **已實作**,而且已經拔掉階段一的 UI 原型假資料(mock track 清單、sine wave、本地計時器全部刪除):
+  - `HID_MEDIA_CMD_NOWPLAYING_PROGRESS=0x06`(position/duration/playing)+ `page=0xFE` 訂閱通道。PC 端 `NowPlayingWatcher`(讀 Media Session API,`Position` 用 `LastUpdatedTime` 內插成即時值,避免 Windows 只在離散事件推播位置造成的偏移/凍結)+ `NowPlayingSender`(每秒送 HID)。
+  - `CMD_QUERY` 已擴充成三態(deck/monitor/media,`usb_hid_reply_mode()`),PC 端 App 比較晚啟動、ESP 已經在 Media 頁的情況會自動補訂閱。
+  - **ESP → PC 播放控制已實作**:新增 `HID_MEDIA_BTN_PLAY_PAUSE/NEXT/PREV`(0x03-0x05,同一個 `page=0xFE` 通道),ESP 端按鈕按下去送指令給 PC,PC 端 `NowPlayingWatcher.TogglePlayPause()/Next()/Previous()` 呼叫 `GlobalSystemMediaTransportControlsSession` 的對應方法真的控制播放器;按鈕本身不做本地樂觀更新,狀態一律等下一筆真資料回來才變。
+  - **連線狀態鎖定**:`ui_media.c` 沒收到真資料(未訂閱成功、或 ~3s 逾時)時,歌名/演出者顯示「None」,時間顯示「-:--」,進度條與 prev/play/next 三顆按鈕整組 disable(不可拖曳/不可按),不再用假資料撐著看起來像在動。
+  - **尚未實作**:歌名/演出者/封面圖(cmd 已改配 0x08-0x0A,PC 端 GDI+ 畫文字條 + JPEG 縮圖 pipeline)、拖曳進度條 seek(目前放開手只是等下一筆真資料校正,沒有送 seek 指令回 PC)
+- [x] 第 5 節音頻視覺化「簡單版」-- **已實作**,同樣拔掉了原本的 sine wave 假資料:
+  - `CMD_AUDIO_LEVEL=0x07`,PC 端 `AudioLevelWatcher`(WASAPI loopback)+ `AudioLevelSender`(10Hz,跟 Now Playing 共用 0xFE 訂閱通道)。
+  - **平滑處理**:PC 端加了 attack/release 包絡(攻擊 30ms、釋放 250ms 的指數平滑),不是每個 buffer 的瞬間 peak 直接送,避免數值跳得生硬;ESP 端 `ui_media.c` 的 level bar 改用 `LV_ANIM_ON` + `lv_bar_set_anim_time(120)`,收到新值時用補間動畫過渡,不是瞬間跳格。
+  - 沒收到真資料(或 ~3s 逾時)時 bar 直接歸零,不再退回 sine wave。
+  - **尚未**:FFT 頻段進階版(§5「進階版」)
 - [ ] Media 模式的「設定」畫面(音源靈敏度、視覺化樣式等)目前完全沒有,只有 Deck/Monitor 有自己的 config dialog
 - [ ] `usb_hid_release()`(0xFF/0xFF 放開事件)目前是死碼,如果之後要做「長按」之類的功能才需要真的接上
 

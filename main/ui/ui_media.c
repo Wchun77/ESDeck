@@ -1,9 +1,10 @@
 #include "ui_media.h"
 #include "ui.h"
 #include "ui_settings.h"
+#include "usb/usb_hid.h"
 #include "esp_log.h"
-#include "esp_random.h"
-#include <math.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include <stdio.h>
 
 #define TAG  "MEDIA"
@@ -13,39 +14,35 @@
 #define CONTENT_H   SCREEN_H
 
 /* -----------------------------------------------------------------------
- * UI PROTOTYPE ONLY -- everything below is fake data driven by a local
- * timer. No PC/HID wiring yet (see ui_media.h). The level bar uses a sine
- * wave + jitter to look alive; the player card cycles through a small
- * built-in track list so title length / marquee behaviour can be eyeballed
- * before the real HID protocol (image-chunked cover art + title strip,
- * see project notes) is designed.
+ * Media mode is entirely HID-driven now -- no more local fake/mock data.
+ * Two independent HID channels feed this page while subscribed
+ * (page=0xFE, see usb_hid.h):
+ *   - CMD_NOWPLAYING_PROGRESS(0x06): position/duration/playing, drives the
+ *     progress bar, time labels and play/pause icon.
+ *   - CMD_AUDIO_LEVEL(0x07): sidebar VU-meter bar value.
+ * Both use a queue-plus-~3s-timeout convention, same as ui_monitor.c's
+ * s_data_queue: while nothing has arrived yet (or the PC stops sending),
+ * the UI shows a disabled/"None" state rather than making anything up.
+ * See ui_media_on_hid_progress() / ui_media_on_hid_level() near the bottom.
  *
- * The title label uses LVGL's native LV_LABEL_LONG_SCROLL_CIRCULAR as a
- * stand-in marquee. This only works here because the mock titles are
- * plain ASCII (Montserrat has the glyphs) -- the real device has no CJK
- * font, so the production version will replace this label with a
- * PC-rendered scrolling image strip and animate its x-offset the same way
- * (see discussion: text-as-image, same chunk pipeline as cover art).
+ * Transport buttons (prev/play-pause/next) are one-way remote control --
+ * pressing one sends a command to the PC (usb_hid_media_play_pause() etc,
+ * see usb_hid.h) and does NOT touch local state; the resulting play/pause
+ * icon or track change comes back through the normal progress packets like
+ * any other change, same as pressing the button in the PC's own player.
+ * They're only clickable while s_real_data_received is true (see
+ * apply_connected_state()).
+ *
+ * Title/artist always show "None" -- there is no title/artist HID protocol
+ * yet, that needs a PC-rendered image pipeline (no CJK font on-device, see
+ * project notes §4.1) and is a separate, not-yet-designed piece of work.
  * ----------------------------------------------------------------------- */
-
-typedef struct {
-    const char *title;
-    const char *artist;
-    int         duration_sec;
-} mock_track_t;
-
-static const mock_track_t s_mock_tracks[] = {
-    { "Clair de Lune",                                                    "Debussy",                      257 },
-    { "Bohemian Rhapsody",                                                "Queen",                         355 },
-    { "A Very Long Song Title That Should Definitely Scroll On This Screen", "Some Artist With A Long Name", 217 },
-};
-#define MOCK_TRACK_COUNT  (sizeof(s_mock_tracks) / sizeof(s_mock_tracks[0]))
 
 /* -----------------------------------------------------------------------
  * State
  * ----------------------------------------------------------------------- */
 static lv_obj_t   *s_sidebar_bar_cont = NULL;  /* sidebar sub-region, child of shared sidebar */
-static lv_obj_t   *s_level_bar        = NULL;  /* vertical fake VU meter */
+static lv_obj_t   *s_level_bar        = NULL;  /* vertical VU meter, HID-driven */
 
 static lv_obj_t   *s_page          = NULL;     /* content area root */
 static lv_obj_t   *s_cover         = NULL;
@@ -54,17 +51,43 @@ static lv_obj_t   *s_artist_lbl    = NULL;
 static lv_obj_t   *s_progress_bar  = NULL;
 static lv_obj_t   *s_time_elapsed_lbl = NULL;
 static lv_obj_t   *s_time_total_lbl   = NULL;
+static lv_obj_t   *s_prev_btn      = NULL;
 static lv_obj_t   *s_play_btn      = NULL;
+static lv_obj_t   *s_next_btn      = NULL;
 static lv_obj_t   *s_play_icon_lbl = NULL;
 
-static lv_timer_t *s_fake_timer = NULL;
+static lv_timer_t *s_media_timer = NULL;
 
-static int  s_track_idx    = 0;
-static int  s_progress_sec = 0;
-static bool s_playing      = true;
-static bool s_seeking      = false;  /* true while user is dragging the progress slider */
-static float s_level_phase = 0.0f;
-static int  s_tick_count   = 0;   /* ticks since last 1s progress step */
+static bool s_seeking = false;   /* true while user is dragging the progress slider */
+static bool s_ui_enabled = false; /* last-applied connected/enabled UI state, see apply_connected_state() */
+
+/* -----------------------------------------------------------------------
+ * Real Now Playing progress -- pushed from usb_hid's TinyUSB task via
+ * ui_media_push_progress(), drained on the LVGL side by media_timer_cb().
+ * Same queue-plus-timeout convention as ui_monitor.c's s_data_queue.
+ * ----------------------------------------------------------------------- */
+typedef struct {
+    uint32_t position_ms;
+    uint32_t duration_ms;
+    bool     playing;
+} media_progress_t;
+
+static QueueHandle_t    s_progress_queue      = NULL;
+static media_progress_t s_real_progress       = { 0 };
+static bool             s_real_data_received  = false;
+static int              s_real_data_timeout   = 0;   /* media_timer_cb ticks since last real packet */
+
+static void ui_media_on_hid_progress(uint32_t position_ms, uint32_t duration_ms, bool playing);
+
+/* Real sidebar audio level -- same convention, independent of the progress
+ * queue above (audio level and Now Playing arrive as separate HID cmds and
+ * can go stale independently). */
+static QueueHandle_t s_level_queue         = NULL;
+static uint8_t       s_real_level          = 0;
+static bool          s_real_level_received = false;
+static int           s_real_level_timeout  = 0;
+
+static void ui_media_on_hid_level(uint8_t level);
 
 /* -----------------------------------------------------------------------
  * Helpers
@@ -75,40 +98,70 @@ static void format_time(int sec, char *buf, size_t buf_len)
     snprintf(buf, buf_len, "%d:%02d", sec / 60, sec % 60);
 }
 
-static void load_track(int idx)
+/* Dim + block input on a widget as a unit (LVGL renders an object with
+ * opa<255 -- and its children -- as one blended layer, so this dims icon
+ * labels inside buttons too, not just the button background). Clearing
+ * CLICKABLE is the actual input block; DISABLED state is set alongside for
+ * any default-theme/semantic behaviour that keys off it. */
+static void set_widget_enabled(lv_obj_t *obj, bool enabled)
 {
-    const mock_track_t *t = &s_mock_tracks[idx];
-    lv_label_set_text(s_title_lbl, t->title);
-    lv_label_set_text(s_artist_lbl, t->artist);
-    s_progress_sec = 0;
-    lv_slider_set_value(s_progress_bar, 0, LV_ANIM_OFF);
+    if (!obj) return;
 
-    char buf[16];
-    format_time(0, buf, sizeof(buf));
-    lv_label_set_text(s_time_elapsed_lbl, buf);
-    format_time(t->duration_sec, buf, sizeof(buf));
-    lv_label_set_text(s_time_total_lbl, buf);
+    if (enabled) {
+        lv_obj_clear_state(obj, LV_STATE_DISABLED);
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_opa(obj, LV_OPA_COVER, 0);
+    } else {
+        lv_obj_add_state(obj, LV_STATE_DISABLED);
+        lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_opa(obj, LV_OPA_50, 0);
+    }
+}
+
+/* Applies (or re-applies) the connected/disconnected look. Cheap to call
+ * unconditionally every tick, but media_timer_cb only calls it on actual
+ * transitions to avoid needlessly re-touching LVGL styles every 80ms. */
+static void apply_connected_state(bool connected)
+{
+    s_ui_enabled = connected;
+
+    set_widget_enabled(s_progress_bar, connected);
+    set_widget_enabled(s_prev_btn, connected);
+    set_widget_enabled(s_play_btn, connected);
+    set_widget_enabled(s_next_btn, connected);
+
+    if (!connected) {
+        lv_label_set_text(s_title_lbl, "None");
+        lv_label_set_text(s_artist_lbl, "None");
+        lv_label_set_text(s_time_elapsed_lbl, "-:--");
+        lv_label_set_text(s_time_total_lbl, "-:--");
+        lv_label_set_text(s_play_icon_lbl, LV_SYMBOL_PLAY);
+        lv_slider_set_value(s_progress_bar, 0, LV_ANIM_OFF);
+    }
 }
 
 /* -----------------------------------------------------------------------
- * Transport button callbacks -- mock only, local state, no PC action.
+ * Transport button callbacks -- one-way remote control, see file header.
+ * Guarded on s_real_data_received even though the buttons are already
+ * un-clickable while disconnected (set_widget_enabled), as a defensive
+ * belt-and-suspenders against any stray event.
  * ----------------------------------------------------------------------- */
 static void play_pause_cb(lv_event_t *e)
 {
-    s_playing = !s_playing;
-    lv_label_set_text(s_play_icon_lbl, s_playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+    if (!s_real_data_received) return;
+    usb_hid_media_play_pause();
 }
 
 static void prev_cb(lv_event_t *e)
 {
-    s_track_idx = (s_track_idx - 1 + MOCK_TRACK_COUNT) % MOCK_TRACK_COUNT;
-    load_track(s_track_idx);
+    if (!s_real_data_received) return;
+    usb_hid_media_prev();
 }
 
 static void next_cb(lv_event_t *e)
 {
-    s_track_idx = (s_track_idx + 1) % MOCK_TRACK_COUNT;
-    load_track(s_track_idx);
+    if (!s_real_data_received) return;
+    usb_hid_media_next();
 }
 
 /* Tapping the sidebar bar is how the user leaves the Settings page and
@@ -122,10 +175,14 @@ static void sidebar_bar_click_cb(lv_event_t *e)
     ui_media_reselect_current();
 }
 
-/* Progress slider -- drag to seek. LV_EVENT_PRESSED/RELEASED bracket the
- * drag so fake_timer_cb() stops overwriting the slider value out from
- * under the user's finger; VALUE_CHANGED fires continuously while
- * dragging (and once on a plain tap) so the time label tracks live. */
+/* Progress slider -- drag to preview a seek position locally.
+ * LV_EVENT_PRESSED/RELEASED bracket the drag so media_timer_cb() stops
+ * overwriting the slider value out from under the user's finger;
+ * VALUE_CHANGED fires continuously while dragging so the time label tracks
+ * live. NOTE: this does not send a seek command to the PC yet (no such HID
+ * cmd exists) -- releasing just lets the next real packet resync the
+ * slider to the PC's actual position within ~1s, same as any other local
+ * display getting corrected. */
 static void progress_seek_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
@@ -137,55 +194,94 @@ static void progress_seek_cb(lv_event_t *e)
 
     if (code == LV_EVENT_VALUE_CHANGED || code == LV_EVENT_RELEASED) {
         int pct = lv_slider_get_value(s_progress_bar);
-        const mock_track_t *t = &s_mock_tracks[s_track_idx];
-        s_progress_sec = pct * t->duration_sec / 100;
+        uint32_t duration_sec = s_real_progress.duration_ms / 1000;
+        int preview_sec = (int)(pct * (int)duration_sec / 100);
 
         char buf[16];
-        format_time(s_progress_sec, buf, sizeof(buf));
+        format_time(preview_sec, buf, sizeof(buf));
         lv_label_set_text(s_time_elapsed_lbl, buf);
     }
 
     if (code == LV_EVENT_RELEASED) {
         s_seeking = false;
-        s_tick_count = 0;   /* re-sync the ~1s cadence to the moment the user let go */
     }
 }
 
 /* -----------------------------------------------------------------------
- * Fake data timer -- 80ms tick.
- *   - level bar updates every tick (smooth wobble)
- *   - progress advances once per ~1s (12 ticks), loops track on end
+ * Media update timer -- 80ms tick. Drains both HID queues, applies
+ * connected/disconnected UI state on transitions, and while connected
+ * drives the progress bar / time labels / play-pause icon / level bar
+ * straight from the latest real data.
  * ----------------------------------------------------------------------- */
-static void fake_timer_cb(lv_timer_t *timer)
+static void media_timer_cb(lv_timer_t *timer)
 {
-    /* Sine wave + jitter, clamped 0-100 -- just needs to look alive. */
-    s_level_phase += 0.35f;
-    float wave   = (sinf(s_level_phase) + 1.0f) * 0.5f;        /* 0..1 */
-    int   jitter = (int)(esp_random() % 20) - 10;              /* -10..+9 */
-    int   level  = (int)(wave * 80.0f) + 15 + jitter;
-    if (level < 0)   level = 0;
-    if (level > 100) level = 100;
-    lv_bar_set_value(s_level_bar, level, LV_ANIM_OFF);
+    /* Drain real progress queue -- keep only the latest entry. ~36 ticks
+     * (36 * 80ms ≈ 3s) of silence after having received real data drops
+     * back to the disconnected state, same idea as ui_monitor.c's timeout. */
+    media_progress_t prog;
+    bool got_progress = false;
+    while (s_progress_queue && xQueueReceive(s_progress_queue, &prog, 0) == pdTRUE)
+        got_progress = true;
 
-    if (!s_playing || s_seeking) return;
-
-    s_tick_count++;
-    if (s_tick_count < 12) return;   /* ~12 * 80ms = ~1s */
-    s_tick_count = 0;
-
-    s_progress_sec++;
-    const mock_track_t *t = &s_mock_tracks[s_track_idx];
-    if (s_progress_sec >= t->duration_sec) {
-        next_cb(NULL);
-        return;
+    if (got_progress) {
+        s_real_progress      = prog;
+        s_real_data_received = true;
+        s_real_data_timeout  = 0;
+    } else if (s_real_data_received) {
+        s_real_data_timeout++;
+        if (s_real_data_timeout >= 36) {
+            s_real_data_received = false;
+            s_real_data_timeout  = 0;
+        }
     }
 
-    int pct = (t->duration_sec > 0) ? (s_progress_sec * 100 / t->duration_sec) : 0;
-    lv_slider_set_value(s_progress_bar, pct, LV_ANIM_OFF);
+    if (s_real_data_received != s_ui_enabled)
+        apply_connected_state(s_real_data_received);
 
-    char buf[16];
-    format_time(s_progress_sec, buf, sizeof(buf));
-    lv_label_set_text(s_time_elapsed_lbl, buf);
+    /* Drain real audio level queue -- keep only the latest entry, same
+     * ~3s timeout convention as the progress queue above. Independent of
+     * s_real_data_received: audio level and Now Playing are separate HID
+     * cmds and can go stale on their own schedules. */
+    uint8_t lvl;
+    bool got_level = false;
+    while (s_level_queue && xQueueReceive(s_level_queue, &lvl, 0) == pdTRUE)
+        got_level = true;
+
+    if (got_level) {
+        s_real_level          = lvl;
+        s_real_level_received = true;
+        s_real_level_timeout  = 0;
+        /* LV_ANIM_ON: blend towards the new value instead of snapping,
+         * so the bar reads as fluid motion rather than a rigid step every
+         * time a new sample arrives. */
+        lv_bar_set_value(s_level_bar, s_real_level, LV_ANIM_ON);
+    } else if (s_real_level_received) {
+        s_real_level_timeout++;
+        if (s_real_level_timeout >= 36) {
+            s_real_level_received = false;
+            s_real_level_timeout  = 0;
+            lv_bar_set_value(s_level_bar, 0, LV_ANIM_OFF);
+        }
+    }
+
+    if (!s_real_data_received) return;
+
+    lv_label_set_text(s_play_icon_lbl,
+                      s_real_progress.playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+
+    if (!s_seeking) {
+        uint32_t position_sec = s_real_progress.position_ms / 1000;
+        uint32_t duration_sec = s_real_progress.duration_ms / 1000;
+        int pct = (duration_sec > 0) ? (int)(position_sec * 100 / duration_sec) : 0;
+        if (pct > 100) pct = 100;
+        lv_slider_set_value(s_progress_bar, pct, LV_ANIM_OFF);
+
+        char buf[16];
+        format_time((int)position_sec, buf, sizeof(buf));
+        lv_label_set_text(s_time_elapsed_lbl, buf);
+        format_time((int)duration_sec, buf, sizeof(buf));
+        lv_label_set_text(s_time_total_lbl, buf);
+    }
 }
 
 /* -----------------------------------------------------------------------
@@ -212,6 +308,7 @@ static void build_sidebar_bar(lv_obj_t *sidebar)
     lv_obj_align(s_level_bar, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_bar_set_range(s_level_bar, 0, 100);
     lv_bar_set_value(s_level_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_anim_time(s_level_bar, 120, LV_PART_MAIN);   /* blend duration for LV_ANIM_ON updates */
     lv_obj_set_style_bg_color(s_level_bar, lv_color_hex(0x1a1a1a), LV_PART_MAIN);
     lv_obj_set_style_radius(s_level_bar, 0, LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_level_bar, lv_color_hex(0x00d4ff), LV_PART_INDICATOR);
@@ -219,7 +316,7 @@ static void build_sidebar_bar(lv_obj_t *sidebar)
 }
 
 /* -----------------------------------------------------------------------
- * Content area: mock player card
+ * Content area: Now Playing player card
  * ----------------------------------------------------------------------- */
 static void build_player_card(lv_obj_t *scr)
 {
@@ -239,7 +336,7 @@ static void build_player_card(lv_obj_t *scr)
      * card stays readable over a busy background image. Flat color only
      * for now, no bg image support yet. */
 
-    /* Cover placeholder */
+    /* Cover placeholder -- always shown as-is, no real cover art yet. */
     s_cover = lv_obj_create(s_page);
     lv_obj_set_size(s_cover, 220, 220);
     lv_obj_align(s_cover, LV_ALIGN_TOP_MID, 0, 36);
@@ -254,7 +351,11 @@ static void build_player_card(lv_obj_t *scr)
     lv_obj_set_style_text_font(cover_glyph, &lv_font_montserrat_48, 0);
     lv_obj_center(cover_glyph);
 
-    /* Title -- native LVGL marquee stand-in, see file header comment. */
+    /* Title -- shows "None" until a real title/artist HID protocol exists
+     * (see file header). LV_LABEL_LONG_SCROLL_CIRCULAR is kept configured
+     * for when that lands: a PC-rendered scrolling image strip will
+     * eventually replace this label (no CJK font on-device), animated the
+     * same way this native marquee already works. */
     s_title_lbl = lv_label_create(s_page);
     lv_obj_set_width(s_title_lbl, 480);
     lv_label_set_long_mode(s_title_lbl, LV_LABEL_LONG_SCROLL_CIRCULAR);
@@ -275,7 +376,9 @@ static void build_player_card(lv_obj_t *scr)
     /* Progress bar -- lv_slider, not lv_bar: lv_bar is display-only and
      * cannot be dragged, lv_slider is the draggable counterpart. Knob is
      * kept small (visually close to a plain bar) but its hit-area is
-     * padded out so it's still easy to grab on a touchscreen. */
+     * padded out so it's still easy to grab on a touchscreen. Starts
+     * disabled -- apply_connected_state(true) enables it once real data
+     * arrives. */
     s_progress_bar = lv_slider_create(s_page);
     lv_obj_set_size(s_progress_bar, 480, 8);
     lv_obj_align(s_progress_bar, LV_ALIGN_TOP_MID, 0, 356);
@@ -305,15 +408,16 @@ static void build_player_card(lv_obj_t *scr)
     lv_obj_set_style_text_font(s_time_total_lbl, &lv_font_montserrat_12, 0);
     lv_obj_align(s_time_total_lbl, LV_ALIGN_TOP_MID, 240, 384);
 
-    /* Transport buttons: prev / play-pause / next */
-    lv_obj_t *prev_btn = lv_btn_create(s_page);
-    lv_obj_set_size(prev_btn, 56, 56);
-    lv_obj_set_style_radius(prev_btn, 28, 0);
-    lv_obj_set_style_bg_color(prev_btn, lv_color_hex(0x2a2a2a), 0);
-    lv_obj_align(prev_btn, LV_ALIGN_TOP_MID, -76, 400);
-    lv_obj_add_event_cb(prev_btn, prev_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_clear_flag(prev_btn, LV_OBJ_FLAG_PRESS_LOCK);
-    lv_obj_t *prev_lbl = lv_label_create(prev_btn);
+    /* Transport buttons: prev / play-pause / next -- one-way remote
+     * control, see file header. Start disabled, same as the progress bar. */
+    s_prev_btn = lv_btn_create(s_page);
+    lv_obj_set_size(s_prev_btn, 56, 56);
+    lv_obj_set_style_radius(s_prev_btn, 28, 0);
+    lv_obj_set_style_bg_color(s_prev_btn, lv_color_hex(0x2a2a2a), 0);
+    lv_obj_align(s_prev_btn, LV_ALIGN_TOP_MID, -76, 400);
+    lv_obj_add_event_cb(s_prev_btn, prev_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_clear_flag(s_prev_btn, LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_t *prev_lbl = lv_label_create(s_prev_btn);
     lv_label_set_text(prev_lbl, LV_SYMBOL_PREV);
     lv_obj_center(prev_lbl);
 
@@ -325,18 +429,18 @@ static void build_player_card(lv_obj_t *scr)
     lv_obj_add_event_cb(s_play_btn, play_pause_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_clear_flag(s_play_btn, LV_OBJ_FLAG_PRESS_LOCK);
     s_play_icon_lbl = lv_label_create(s_play_btn);
-    lv_label_set_text(s_play_icon_lbl, LV_SYMBOL_PAUSE);
+    lv_label_set_text(s_play_icon_lbl, LV_SYMBOL_PLAY);
     lv_obj_set_style_text_font(s_play_icon_lbl, &lv_font_montserrat_24, 0);
     lv_obj_center(s_play_icon_lbl);
 
-    lv_obj_t *next_btn = lv_btn_create(s_page);
-    lv_obj_set_size(next_btn, 56, 56);
-    lv_obj_set_style_radius(next_btn, 28, 0);
-    lv_obj_set_style_bg_color(next_btn, lv_color_hex(0x2a2a2a), 0);
-    lv_obj_align(next_btn, LV_ALIGN_TOP_MID, 76, 400);
-    lv_obj_add_event_cb(next_btn, next_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_clear_flag(next_btn, LV_OBJ_FLAG_PRESS_LOCK);
-    lv_obj_t *next_lbl = lv_label_create(next_btn);
+    s_next_btn = lv_btn_create(s_page);
+    lv_obj_set_size(s_next_btn, 56, 56);
+    lv_obj_set_style_radius(s_next_btn, 28, 0);
+    lv_obj_set_style_bg_color(s_next_btn, lv_color_hex(0x2a2a2a), 0);
+    lv_obj_align(s_next_btn, LV_ALIGN_TOP_MID, 76, 400);
+    lv_obj_add_event_cb(s_next_btn, next_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_clear_flag(s_next_btn, LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_t *next_lbl = lv_label_create(s_next_btn);
     lv_label_set_text(next_lbl, LV_SYMBOL_NEXT);
     lv_obj_center(next_lbl);
 }
@@ -348,31 +452,60 @@ void ui_media_enter(lv_obj_t *sidebar)
 {
     lv_obj_t *scr = lv_scr_act();
 
+    /* Create queues before starting the timer or registering HID callbacks
+     * -- same ordering as ui_monitor_enter(). */
+    s_progress_queue = xQueueCreate(1, sizeof(media_progress_t));
+    s_level_queue    = xQueueCreate(1, sizeof(uint8_t));
+
     /* No Media config file yet -- plain background + default gear glyph. */
     ui_settings_apply_appearance(NULL);
 
     build_sidebar_bar(sidebar);
     build_player_card(scr);
 
-    s_track_idx    = 0;
-    s_progress_sec = 0;
-    s_playing      = true;
-    s_seeking      = false;
-    s_tick_count   = 0;
-    s_level_phase  = 0.0f;
-    load_track(s_track_idx);
+    s_seeking             = false;
+    s_real_data_received  = false;
+    s_real_data_timeout   = 0;
+    s_real_level_received = false;
+    s_real_level_timeout  = 0;
 
-    s_fake_timer = lv_timer_create(fake_timer_cb, 80, NULL);
-    lv_timer_ready(s_fake_timer);
+    /* Start in the disconnected look. apply_connected_state() always
+     * applies unconditionally (the "only on transition" skip lives in
+     * media_timer_cb, not here), so this unconditionally draws the
+     * disabled/"None" state fresh for this session regardless of
+     * whatever s_ui_enabled was left at from a previous session. */
+    apply_connected_state(false);
 
-    ESP_LOGI(TAG, "entered media mode (UI mock, no PC data)");
+    s_media_timer = lv_timer_create(media_timer_cb, 80, NULL);
+    lv_timer_ready(s_media_timer);
+
+    /* Register HID callbacks and notify PC to start sending Media data */
+    usb_hid_set_nowplaying_cb(ui_media_on_hid_progress);
+    usb_hid_set_audio_level_cb(ui_media_on_hid_level);
+    usb_hid_media_subscribe();
+
+    ESP_LOGI(TAG, "entered media mode (progress + level HID-driven, title/artist show None)");
 }
 
 void ui_media_exit(void)
 {
-    if (s_fake_timer) {
-        lv_timer_del(s_fake_timer);
-        s_fake_timer = NULL;
+    /* Notify PC to stop sending data and unregister callbacks first */
+    usb_hid_media_unsubscribe();
+    usb_hid_set_nowplaying_cb(NULL);
+    usb_hid_set_audio_level_cb(NULL);
+
+    if (s_media_timer) {
+        lv_timer_del(s_media_timer);
+        s_media_timer = NULL;
+    }
+
+    if (s_progress_queue) {
+        vQueueDelete(s_progress_queue);
+        s_progress_queue = NULL;
+    }
+    if (s_level_queue) {
+        vQueueDelete(s_level_queue);
+        s_level_queue = NULL;
     }
 
     if (s_page) {
@@ -381,13 +514,19 @@ void ui_media_exit(void)
     }
     s_cover = s_title_lbl = s_artist_lbl = NULL;
     s_progress_bar = s_time_elapsed_lbl = s_time_total_lbl = NULL;
-    s_play_btn = s_play_icon_lbl = NULL;
+    s_prev_btn = s_play_btn = s_next_btn = s_play_icon_lbl = NULL;
 
     if (s_sidebar_bar_cont) {
         lv_obj_del(s_sidebar_bar_cont);
         s_sidebar_bar_cont = NULL;
     }
     s_level_bar = NULL;
+
+    s_real_data_received  = false;
+    s_real_data_timeout   = 0;
+    s_real_level_received = false;
+    s_real_level_timeout  = 0;
+    s_ui_enabled           = false;
 
     ESP_LOGI(TAG, "exited media mode");
 }
@@ -402,4 +541,36 @@ void ui_media_reselect_current(void)
 {
     if (!s_page) return;
     lv_obj_clear_flag(s_page, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_media_push_progress(uint32_t position_ms, uint32_t duration_ms, bool playing)
+{
+    if (!s_progress_queue) return;
+    media_progress_t p = {
+        .position_ms = position_ms,
+        .duration_ms = duration_ms,
+        .playing     = playing,
+    };
+    xQueueOverwrite(s_progress_queue, &p);
+}
+
+/* -----------------------------------------------------------------------
+ * HID callbacks -- called from TinyUSB task context.
+ * Only queue operations allowed here; no LVGL calls.
+ * ----------------------------------------------------------------------- */
+static void ui_media_on_hid_progress(uint32_t position_ms, uint32_t duration_ms, bool playing)
+{
+    ui_media_push_progress(position_ms, duration_ms, playing);
+}
+
+void ui_media_push_level(uint8_t level)
+{
+    if (!s_level_queue) return;
+    if (level > 100) level = 100;
+    xQueueOverwrite(s_level_queue, &level);
+}
+
+static void ui_media_on_hid_level(uint8_t level)
+{
+    ui_media_push_level(level);
 }
