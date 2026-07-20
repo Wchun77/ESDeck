@@ -233,6 +233,7 @@ esp_err_t fs_sd_write_sector(uint32_t lba, uint32_t offset, size_t size, const v
 static const char * const s_app_dirs[] = {
     SD_DIR_CONFIG_DECK,
     SD_DIR_CONFIG_MONITOR,
+    SD_DIR_CONFIG_MEDIA,
     SD_DIR_ASSETS_ICONS,
     SD_DIR_ASSETS_BG,
     SD_DIR_ASSETS_FONTS,

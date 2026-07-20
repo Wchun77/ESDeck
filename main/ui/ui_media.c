@@ -1,6 +1,8 @@
 #include "ui_media.h"
 #include "ui.h"
 #include "ui_settings.h"
+#include "ui_media_config.h"
+#include "ui_config.h"
 #include "usb/usb_hid.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -8,6 +10,7 @@
 #include "freertos/queue.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define TAG  "MEDIA"
 
@@ -51,6 +54,13 @@ static lv_obj_t   *s_sidebar_bar_cont = NULL;  /* sidebar sub-region, child of s
 static lv_obj_t   *s_level_bar        = NULL;  /* vertical VU meter, HID-driven */
 
 static lv_obj_t   *s_page          = NULL;     /* content area root */
+static lv_obj_t   *s_bg_img        = NULL;     /* page child0, only created when config bg_image is set */
+static lv_obj_t   *s_bg_mask       = NULL;     /* page child1, black 50% opa over s_bg_img */
+static lv_img_dsc_t s_bg_dsc;
+static uint8_t     *s_bg_data      = NULL;
+
+static ui_media_config_t s_media_cfg;          /* loaded once in ui_media_enter(), see ui_media_config.h */
+
 static lv_obj_t   *s_cover         = NULL;
 static lv_obj_t   *s_title_lbl     = NULL;
 static lv_obj_t   *s_artist_lbl    = NULL;
@@ -488,6 +498,118 @@ static void build_sidebar_bar(lv_obj_t *sidebar)
 }
 
 /* -----------------------------------------------------------------------
+ * Background image -- decodes s_media_cfg.bg_image (if set) straight into
+ * a PSRAM buffer, same shape as ui_monitor_img.c's decode_to_psram() (own
+ * small copy rather than a shared one, matching how ui_config.c/
+ * ui_monitor_config.c already each keep their own read_file()/str_field()
+ * rather than sharing). Runs on the LVGL thread already (called from
+ * ui_media_enter(), itself reached via a Settings menu item click), so
+ * unlike usb_hid.c's PNG decode this needs no lvgl_port_lock().
+ * ----------------------------------------------------------------------- */
+static bool decode_bg_to_psram(const char *path, lv_img_dsc_t *dsc)
+{
+    lv_img_decoder_dsc_t dec;
+    memset(&dec, 0, sizeof(dec));
+
+    if (lv_img_decoder_open(&dec, path, lv_color_white(), 0) != LV_RES_OK) {
+        ESP_LOGW(TAG, "bg decode open failed: %s", path);
+        return false;
+    }
+
+    uint32_t    w  = dec.header.w;
+    uint32_t    h  = dec.header.h;
+    lv_img_cf_t cf = dec.header.cf;
+    uint8_t     px = lv_img_cf_get_px_size(cf) / 8;
+
+    /* JPEG reports px_size == 0 -- fix up to TRUE_COLOR, same as
+     * ui_monitor_img.c's decode_to_psram(). */
+    if (px == 0) {
+        cf = LV_IMG_CF_TRUE_COLOR;
+        px = sizeof(lv_color_t);
+    }
+
+    size_t   sz  = (size_t)w * h * px;
+    uint8_t *buf = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        ESP_LOGW(TAG, "bg PSRAM alloc failed (%lu KB): %s", (unsigned long)(sz / 1024), path);
+        lv_img_decoder_close(&dec);
+        return false;
+    }
+
+    bool ok = true;
+    if (dec.img_data) {
+        memcpy(buf, dec.img_data, sz);
+    } else {
+        size_t stride = (size_t)w * px;
+        for (lv_coord_t y = 0; y < (lv_coord_t)h && ok; y++) {
+            if (lv_img_decoder_read_line(&dec, 0, y, (lv_coord_t)w,
+                                          buf + (size_t)y * stride) != LV_RES_OK) {
+                ok = false;
+            }
+        }
+    }
+    lv_img_decoder_close(&dec);
+
+    if (!ok) {
+        heap_caps_free(buf);
+        return false;
+    }
+
+    dsc->header.cf          = cf;
+    dsc->header.always_zero = 0;
+    dsc->header.w           = w;
+    dsc->header.h           = h;
+    dsc->data_size          = sz;
+    dsc->data               = buf;
+    return true;
+}
+
+/* Builds the bg(child0)+mask(child1) pair on top of s_page, same
+ * cover-fit zoom/center math as ui_deck.c's ui_deck_lazy_bg_set() (see
+ * there for the reasoning behind each line). No-op if bg_image is empty
+ * -- s_page's flat 0x222222 fallback (set in build_player_card()) is
+ * left showing as-is, matching Deck/Monitor's own "no bg selected" look. */
+static void build_bg(void)
+{
+    if (!s_media_cfg.bg_image[0]) return;
+
+    char path[sizeof("S:") + sizeof(UI_CONFIG_BG_PATH) + 1 + UI_MEDIA_CFG_BG_LEN];
+    snprintf(path, sizeof(path), "S:%s/%s", UI_CONFIG_BG_PATH, s_media_cfg.bg_image);
+
+    if (!decode_bg_to_psram(path, &s_bg_dsc)) return;
+    s_bg_data = (uint8_t *)s_bg_dsc.data;
+
+    uint32_t zoom_x   = (uint32_t)CONTENT_W * 256 / s_bg_dsc.header.w;
+    uint32_t zoom_y   = (uint32_t)CONTENT_H * 256 / s_bg_dsc.header.h;
+    uint32_t zoom     = (zoom_x > zoom_y) ? zoom_x : zoom_y;
+    int32_t  scaled_w = (int32_t)s_bg_dsc.header.w * (int32_t)zoom / 256;
+    int32_t  scaled_h = (int32_t)s_bg_dsc.header.h * (int32_t)zoom / 256;
+    int32_t  off_x    = ((int32_t)CONTENT_W - scaled_w) / 2;
+    int32_t  off_y    = ((int32_t)CONTENT_H - scaled_h) / 2;
+
+    s_bg_img = lv_img_create(s_page);
+    lv_obj_move_to_index(s_bg_img, 0);
+    lv_img_set_src(s_bg_img, &s_bg_dsc);
+    lv_img_set_pivot(s_bg_img, 0, 0);
+    lv_obj_set_pos(s_bg_img, off_x, off_y);
+    lv_obj_set_size(s_bg_img, CONTENT_W, CONTENT_H);
+    lv_img_set_zoom(s_bg_img, (uint16_t)zoom);
+    lv_obj_add_flag(s_bg_img, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_clear_flag(s_bg_img, LV_OBJ_FLAG_CLICKABLE);
+
+    s_bg_mask = lv_obj_create(s_page);
+    lv_obj_move_to_index(s_bg_mask, 1);
+    lv_obj_set_size(s_bg_mask, CONTENT_W, CONTENT_H);
+    lv_obj_set_pos(s_bg_mask, 0, 0);
+    lv_obj_set_style_bg_color(s_bg_mask, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_bg_mask, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_bg_mask, 0, 0);
+    lv_obj_set_style_radius(s_bg_mask, 0, 0);
+    lv_obj_add_flag(s_bg_mask, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_clear_flag(s_bg_mask, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+}
+
+/* -----------------------------------------------------------------------
  * Content area: Now Playing player card
  * ----------------------------------------------------------------------- */
 static void build_player_card(lv_obj_t *scr)
@@ -501,14 +623,7 @@ static void build_player_card(lv_obj_t *scr)
     lv_obj_set_style_pad_all(s_page, 0, 0);
     lv_obj_clear_flag(s_page, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* TODO: Media will eventually get its own settings screen (side icon +
-     * bg image, like Deck/Monitor's per-page config) -- once that lands,
-     * add a semi-transparent mask layer between the bg and the card
-     * widgets below, same bg(child0)+mask(child1) convention as
-     * ui_deck.c's create_page()/ui_monitor.c's make_page(), so the player
-     * card stays readable over a busy background image. Flat color only
-     * for now (0x222222, same "no bg selected" fallback Deck/Monitor use),
-     * no bg image support yet -- deliberately deferred, not a bug. */
+    build_bg();   /* child0/child1 bg+mask, before any widgets below -- see build_bg() */
 
     /* Cover placeholder -- always shown as-is, no real cover art yet. */
     s_cover = lv_obj_create(s_page);
@@ -532,6 +647,7 @@ static void build_player_card(lv_obj_t *scr)
     s_cover_img = lv_img_create(s_page);
     lv_obj_set_size(s_cover_img, HID_MEDIA_IMG_COVER_W, HID_MEDIA_IMG_COVER_H);
     lv_obj_align(s_cover_img, LV_ALIGN_TOP_MID, 0, 36);
+    lv_obj_set_style_bg_opa(s_cover_img, LV_OPA_TRANSP, 0);   /* harmless here (always opaque JPEG), kept for consistency with s_info_img */
     lv_obj_add_flag(s_cover_img, LV_OBJ_FLAG_HIDDEN);
 
     /* Title -- shows "None" until a real cover/info image arrives. Kept as
@@ -563,6 +679,15 @@ static void build_player_card(lv_obj_t *scr)
     s_info_img = lv_img_create(s_page);
     lv_obj_set_size(s_info_img, HID_MEDIA_IMG_INFO_W, HID_MEDIA_IMG_INFO_H);
     lv_obj_align(s_info_img, LV_ALIGN_TOP_MID, 0, 270);
+    /* The theme applies a default LV_PART_MAIN bg fill to lv_img objects
+     * like any other lv_obj -- invisible everywhere else in this file
+     * because those images are always fully opaque and cover their whole
+     * widget area, but this one has a real alpha channel (see
+     * apply_info_image()), so without explicitly clearing it the widget's
+     * own opaque background paints first and shows through as a solid
+     * block behind the text instead of whatever's actually behind the
+     * widget in the page (the flat color or bg image). */
+    lv_obj_set_style_bg_opa(s_info_img, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(s_info_img, LV_OBJ_FLAG_HIDDEN);
 
     /* Progress bar -- lv_slider, not lv_bar: lv_bar is display-only and
@@ -650,8 +775,16 @@ void ui_media_enter(lv_obj_t *sidebar)
     s_level_queue    = xQueueCreate(1, sizeof(uint8_t));
     s_img_queue      = xQueueCreate(4, sizeof(media_img_msg_t));
 
-    /* No Media config file yet -- plain background + default gear glyph. */
-    ui_settings_apply_appearance(NULL);
+    /* Single fixed config file for now (config/media/settings.json, no
+     * picker UI yet) -- see ui_media_config.h. Missing/invalid file just
+     * means "no config": ui_media_config_load() leaves s_media_cfg all-
+     * zeroed, so build_bg() below no-ops (empty bg_image) and
+     * s_media_cfg.settings is already the same all-empty struct
+     * ui_settings_apply_appearance(NULL) substitutes internally -- no
+     * need to special-case NULL here, passing it unconditionally is
+     * already equivalent. */
+    ui_media_config_load(&s_media_cfg);
+    ui_settings_apply_appearance(&s_media_cfg.settings);
 
     build_sidebar_bar(sidebar);
     build_player_card(scr);
@@ -717,11 +850,23 @@ void ui_media_exit(void)
 
     if (s_cover_data) { heap_caps_free(s_cover_data); s_cover_data = NULL; }
     if (s_info_data)  { heap_caps_free(s_info_data);  s_info_data  = NULL; }
+    if (s_bg_data)    { heap_caps_free(s_bg_data);    s_bg_data    = NULL; }
+
+    /* s_page owns s_bg_img/s_bg_mask as children -- lv_obj_del(s_page)
+     * below deletes them too. lv_img_cache_invalidate_src(NULL) still
+     * needed first though: LVGL's image cache keys decoded entries by
+     * source pointer (&s_bg_dsc), which is a static -- the SAME address
+     * every time Media is re-entered, only its .data changes to a fresh
+     * buffer -- so without this a stale cache hit could serve the just-
+     * freed buffer above on next entry. Same issue ui_monitor_img.c's
+     * ui_monitor_img_free_all() already documents/handles for Monitor. */
+    lv_img_cache_invalidate_src(NULL);
 
     if (s_page) {
         lv_obj_del(s_page);
         s_page = NULL;
     }
+    s_bg_img = s_bg_mask = NULL;
     s_cover = s_title_lbl = s_artist_lbl = NULL;
     s_cover_img = s_info_img = NULL;
     s_progress_bar = s_time_elapsed_lbl = s_time_total_lbl = NULL;
