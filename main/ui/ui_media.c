@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include <stdio.h>
+#include <stdlib.h>
 
 #define TAG  "MEDIA"
 
@@ -60,6 +61,18 @@ static lv_timer_t *s_media_timer = NULL;
 
 static bool s_seeking = false;   /* true while user is dragging the progress slider */
 static bool s_ui_enabled = false; /* last-applied connected/enabled UI state, see apply_connected_state() */
+
+/* Seek confirmation grace window -- after sending HID_MEDIA_BTN_SEEK on
+ * release, media_timer_cb would otherwise immediately overwrite the slider
+ * with the stale s_real_progress from before the seek (visible snap-back),
+ * then jump again once the PC's confirming packet arrives. Freeze display
+ * at the target instead until either a progress packet close to that target
+ * shows up, or a timeout elapses (in case the seek command / confirmation
+ * gets lost) -- same idea as s_seeking but spanning the round trip. */
+static bool s_seek_pending       = false;
+static int  s_seek_target_sec    = 0;
+static int  s_seek_pending_ticks = 0;
+#define SEEK_PENDING_TIMEOUT_TICKS 25   /* ~2s at 80ms/tick */
 
 /* -----------------------------------------------------------------------
  * Real Now Playing progress -- pushed from usb_hid's TinyUSB task via
@@ -179,10 +192,9 @@ static void sidebar_bar_click_cb(lv_event_t *e)
  * LV_EVENT_PRESSED/RELEASED bracket the drag so media_timer_cb() stops
  * overwriting the slider value out from under the user's finger;
  * VALUE_CHANGED fires continuously while dragging so the time label tracks
- * live. NOTE: this does not send a seek command to the PC yet (no such HID
- * cmd exists) -- releasing just lets the next real packet resync the
- * slider to the PC's actual position within ~1s, same as any other local
- * display getting corrected. */
+ * live. On release, sends HID_MEDIA_BTN_SEEK with the target position and
+ * holds the display at that target (s_seek_pending) until confirmed by a
+ * real progress packet or a timeout -- see media_timer_cb(). */
 static void progress_seek_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
@@ -200,6 +212,14 @@ static void progress_seek_cb(lv_event_t *e)
         char buf[16];
         format_time(preview_sec, buf, sizeof(buf));
         lv_label_set_text(s_time_elapsed_lbl, buf);
+
+        if (code == LV_EVENT_RELEASED && s_real_data_received) {
+            uint32_t target_ms = (uint32_t)pct * s_real_progress.duration_ms / 100;
+            usb_hid_media_seek(target_ms);
+            s_seek_pending       = true;
+            s_seek_target_sec    = preview_sec;
+            s_seek_pending_ticks = 0;
+        }
     }
 
     if (code == LV_EVENT_RELEASED) {
@@ -264,12 +284,24 @@ static void media_timer_cb(lv_timer_t *timer)
         }
     }
 
-    if (!s_real_data_received) return;
+    if (!s_real_data_received) {
+        s_seek_pending = false;
+        return;
+    }
 
     lv_label_set_text(s_play_icon_lbl,
                       s_real_progress.playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
 
-    if (!s_seeking) {
+    if (s_seek_pending) {
+        int position_sec = (int)(s_real_progress.position_ms / 1000);
+        bool confirmed = got_progress && abs(position_sec - s_seek_target_sec) <= 2;
+
+        s_seek_pending_ticks++;
+        if (confirmed || s_seek_pending_ticks >= SEEK_PENDING_TIMEOUT_TICKS)
+            s_seek_pending = false;
+    }
+
+    if (!s_seeking && !s_seek_pending) {
         uint32_t position_sec = s_real_progress.position_ms / 1000;
         uint32_t duration_sec = s_real_progress.duration_ms / 1000;
         int pct = (duration_sec > 0) ? (int)(position_sec * 100 / duration_sec) : 0;
@@ -464,6 +496,8 @@ void ui_media_enter(lv_obj_t *sidebar)
     build_player_card(scr);
 
     s_seeking             = false;
+    s_seek_pending        = false;
+    s_seek_pending_ticks  = 0;
     s_real_data_received  = false;
     s_real_data_timeout   = 0;
     s_real_level_received = false;
@@ -522,6 +556,9 @@ void ui_media_exit(void)
     }
     s_level_bar = NULL;
 
+    s_seeking             = false;
+    s_seek_pending        = false;
+    s_seek_pending_ticks  = 0;
     s_real_data_received  = false;
     s_real_data_timeout   = 0;
     s_real_level_received = false;

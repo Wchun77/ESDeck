@@ -53,6 +53,12 @@
 #define HID_MEDIA_BTN_NEXT        0x04
 #define HID_MEDIA_BTN_PREV        0x05
 
+/* Media control IN report bytes (ESP -> PC), continued: seek. Sent once on
+ * slider release, not a live drag stream. Payload after the btn byte is
+ * position_ms(4B LE): { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_SEEK,
+ * pos_b0, pos_b1, pos_b2, pos_b3, 0, 0 }. */
+#define HID_MEDIA_BTN_SEEK        0x06
+
 void usb_hid_driver_install(void);
 
 void usb_hid_activate(void);
@@ -74,6 +80,7 @@ void usb_hid_media_unsubscribe(void);
 void usb_hid_media_play_pause(void);
 void usb_hid_media_next(void);
 void usb_hid_media_prev(void);
+void usb_hid_media_seek(uint32_t position_ms);
 
 /* Reply to a CMD_QUERY with current UI mode.
  * mode: 0=deck, 1=monitor, 2=media (matches ui_mode_t in ui_settings.h --

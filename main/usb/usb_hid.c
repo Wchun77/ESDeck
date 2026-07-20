@@ -270,6 +270,21 @@ void usb_hid_media_prev(void)
     ESP_LOGI(TAG, "media prev sent");
 }
 
+void usb_hid_media_seek(uint32_t position_ms)
+{
+    if (!s_active || !tud_hid_ready()) return;
+    uint8_t report[8] = {
+        HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_SEEK,
+        (uint8_t)(position_ms & 0xFF),
+        (uint8_t)((position_ms >> 8) & 0xFF),
+        (uint8_t)((position_ms >> 16) & 0xFF),
+        (uint8_t)((position_ms >> 24) & 0xFF),
+        0, 0
+    };
+    tud_hid_report(0, report, sizeof(report));
+    ESP_LOGI(TAG, "media seek sent: %lu ms", (unsigned long)position_ms);
+}
+
 /* -----------------------------------------------------------------------
  * TinyUSB HID callbacks
  * ----------------------------------------------------------------------- */

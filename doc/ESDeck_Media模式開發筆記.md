@@ -161,7 +161,9 @@ LVGL 原生跑馬灯(`LV_LABEL_LONG_SCROLL_CIRCULAR`)本質是「固定寬度 cl
   - `CMD_QUERY` 已擴充成三態(deck/monitor/media,`usb_hid_reply_mode()`),PC 端 App 比較晚啟動、ESP 已經在 Media 頁的情況會自動補訂閱。
   - **ESP → PC 播放控制已實作**:新增 `HID_MEDIA_BTN_PLAY_PAUSE/NEXT/PREV`(0x03-0x05,同一個 `page=0xFE` 通道),ESP 端按鈕按下去送指令給 PC,PC 端 `NowPlayingWatcher.TogglePlayPause()/Next()/Previous()` 呼叫 `GlobalSystemMediaTransportControlsSession` 的對應方法真的控制播放器;按鈕本身不做本地樂觀更新,狀態一律等下一筆真資料回來才變。
   - **連線狀態鎖定**:`ui_media.c` 沒收到真資料(未訂閱成功、或 ~3s 逾時)時,歌名/演出者顯示「None」,時間顯示「-:--」,進度條與 prev/play/next 三顆按鈕整組 disable(不可拖曳/不可按),不再用假資料撐著看起來像在動。
-  - **尚未實作**:歌名/演出者/封面圖(cmd 已改配 0x08-0x0A,PC 端 GDI+ 畫文字條 + JPEG 縮圖 pipeline)、拖曳進度條 seek(目前放開手只是等下一筆真資料校正,沒有送 seek 指令回 PC)
+  - **圖示延遲修正**:`NowPlayingSender` 原本固定 1 秒送一次,狀態改變後最多要等下一輪。改成 `AutoResetEvent` 可中斷等待 + `Nudge()`,`NowPlayingWatcher` 新增 `OnStateChanged` 事件(播放狀態切換/時間軸更新時觸發),接上後任何真正的狀態變化都會立即觸發送出,不用等滿週期。
+  - **拖曳進度條 seek 已實作**:新增 `HID_MEDIA_BTN_SEEK=0x06`(`page=0xFE` 通道,payload 為 position_ms 4B LE),ESP 端 `progress_seek_cb()` 放開手時送出目標位置,PC 端 `NowPlayingWatcher.SeekTo()` 呼叫 `TryChangePlaybackPositionAsync()` 真的控制播放位置。等待 PC 確認期間(`s_seek_pending`,~2s 逾時或收到位置相符的真資料即視為確認)ESP 端畫面凍結在目標位置,避免放手後先跳回舊進度、確認封包到才又跳一次的閃爍。
+  - **尚未實作**:歌名/演出者/封面圖(cmd 已改配 0x08-0x0A,PC 端 GDI+ 畫文字條 + JPEG 縮圖 pipeline)
 - [x] 第 5 節音頻視覺化「簡單版」-- **已實作**,同樣拔掉了原本的 sine wave 假資料:
   - `CMD_AUDIO_LEVEL=0x07`,PC 端 `AudioLevelWatcher`(WASAPI loopback)+ `AudioLevelSender`(10Hz,跟 Now Playing 共用 0xFE 訂閱通道)。
   - **平滑處理**:PC 端加了 attack/release 包絡(攻擊 30ms、釋放 250ms 的指數平滑),不是每個 buffer 的瞬間 peak 直接送,避免數值跳得生硬;ESP 端 `ui_media.c` 的 level bar 改用 `LV_ANIM_ON` + `lv_bar_set_anim_time(120)`,收到新值時用補間動畫過渡,不是瞬間跳格。
