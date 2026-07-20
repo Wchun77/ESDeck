@@ -1,28 +1,51 @@
 # ESDeck Media 模式開發筆記
 
-記錄日期:2026-07-20
+記錄日期:2026-07-20,更新於 2026-07-21
 分支:`feature/media-mode`(ESDeck 韌體專案,原名 `feature/media-mode-ui-mock`,後重新命名;此分支會把 Media 功能全部做完再合併回 main)
 
 ---
 
-## 1. 現況總覽
+## 0. 現況總覽(2026-07-21 更新,續接請先看這節)
 
-正在幫 ESDeck(ESP32-S3 + LVGL,800x480 RGB 螢幕,USB HID 雙向連 PC)加一個新的頂層模式 **Media**,目標是做一個「Now Playing 播放器」畫面。
+Media 模式的「單一使用者」路徑已經全部做完並可用:真實 Now Playing 資料(歌名/演出者/進度/播放狀態)、播放控制(play/pause/prev/next)、拖曳進度條 seek、封面圖與歌名演出者文字圖傳輸(含真透明背景)、音量視覺化長條、Media 自己的背景圖 + Settings 面板外觀(bg_image + side_icon)三個屬性的 config 系統、MSC 模式互切不再 crash。詳細協定/實作歷程見下面第 1~7 節(原始開發紀錄,保留給查歷史用)。
 
-開發順序刻意分兩階段:
+**目前唯一還沒做、也是下一步要做的功能:多配置切換(config 選取器)。**
 
-1. **階段一(進行中)**:純 UI 原型,sidebar 動態長條 + 右側播放器卡片全部用假資料模擬,完全不碰 PC 端 / HID 協定。目的是先把版面、手感定案,再回頭設計協定,避免協定設計早於 UI 需求導致返工。
-2. **階段二(未開始)**:真的接上 PC 端資料(歌名、封面圖、進度、播放狀態),需要擴充 HID 協定。
+背景:第 7 節 config 系統目前是**寫死單一檔案**(`config/media/settings.json`),使用者已明確表示這是刻意先求能測試,之後一定要能像 Deck/Monitor 一樣支援「多組配置 + 選一個當作使用中」。Deck/Monitor 已經有這套機制可以直接抄:
 
-目前程式碼**只做了階段一**,PC 端(ESDeckPC,C# WinForms)完全沒有改動。
+- 用 NVS 存「目前選中哪個配置」(config 名稱或 index)
+- SD 卡 `config/<mode>/` 底下可以放多個配置(檔案或子資料夾,需要先看 Deck/Monitor 實際是怎麼分的,下面待確認)
+- Settings 選單裡有一個選配置的 UI(列表 + 選取後套用)
+
+**續接時第一步**:去讀 Deck 和 Monitor 兩邊「多配置切換」實際上是怎麼做的(先看 `ui_config.c`/`ui_config_dialog.c` 或對應 monitor 版本,找 NVS key 讀寫、SD 資料夾列舉、選單 UI 這三塊分別在哪個檔案),抓出可以直接複用的模式,再套到 `ui_media_config.c`/`ui_media.c`/`ui_settings.c` 上。**不要重新發明一套新機制**,Media 要跟 Deck/Monitor 長一樣的使用體感。
+
+尚未確認、需要在動工前先查清楚的問題(可以先讀程式碼自己找答案,不確定才問使用者):
+
+1. Deck/Monitor 的「多配置」在 SD 卡上實際的資料夾/檔案佈局長什麼樣子(例如 `config/deck/<name>/settings.json` 還是 `config/deck/<name>.json`)?
+2. 選中的配置名稱存在 NVS 的哪個 key、用什麼字串/index 格式?
+3. Settings 選單裡選配置的 UI 元件(list popup?)在哪個檔案,能不能直接複用同一個 widget 函式,只是換資料來源?
+4. 目前 Media 的 `ui_media_config_load()` 是寫死讀 `config/media/settings.json`,改成多配置後這個函式的介面要怎麼變(加個 config 名稱參數?還是改成先查 NVS 拿名稱再組路徑?)。
 
 ---
 
-## 2. 現有 HID 雙向協定(未改動,現況紀錄)
+## 1. Media 是什麼(背景)
+
+正在幫 ESDeck(ESP32-S3 + LVGL,800x480 RGB 螢幕,USB HID 雙向連 PC)加一個新的頂層模式 **Media**,是一個「Now Playing 播放器」畫面,顯示 PC 端目前正在播放的媒體(歌名、演出者、封面圖、進度、播放狀態),並可以從 ESP 端控制播放(play/pause/prev/next/拖曳進度)。
+
+開發分兩階段進行(**兩階段都已完成**):
+
+1. **階段一**:純 UI 原型,先把版面、手感定案,再回頭設計協定,避免協定設計早於 UI 需求導致返工。
+2. **階段二**:真的接上 PC 端資料,擴充 HID 協定,拔掉所有假資料。
+
+PC 端專案是 `ESDeckPC`(C# WinForms)。
+
+---
+
+## 2. 現有 HID 雙向協定
 
 自訂 Vendor HID(Usage Page 0xFF00)。IN report(ESP→PC)固定 8 bytes;Feature report(PC→ESP)payload 64 bytes,ESP 端收到時 Report ID 已被 tinyusb 剝掉,所以 ESP 端 `buffer[0]` 對應 PC 端 `report[1]`。
 
-### ESP → PC(IN report:`[byte0, byte1, 保留x6]`)
+### ESP → PC(IN report:`[byte0, byte1, ...]`)
 
 | byte0 (page) | byte1 (btn) | 觸發點 | PC 端處理 | 說明 |
 |---|---|---|---|---|
@@ -32,154 +55,92 @@
 | 0xFF | 0x02 | 離開 monitor 頁 → `usb_hid_monitor_unsubscribe()` | `MonitorSender.Unsubscribe()` | 停止收監控資料 |
 | 0xFF | 0x03 | 回覆 CMD_QUERY,目前非 monitor | `HidReceiver.OnModeReport(false)` | 目前在 deck 模式 |
 | 0xFF | 0x04 | 回覆 CMD_QUERY,目前是 monitor | `HidReceiver.OnModeReport(true)` | 目前在 monitor 模式 |
+| 0xFE | 0x01 / 0x02 | 進出 Media 頁 | `NowPlayingSender`/`AudioLevelSender`/`NowPlayingImageSender`.Subscribe()/Unsubscribe() | Media 專屬訂閱通道,跟 0xFF 平行、獨立命名空間 |
+| 0xFE | 0x03/0x04/0x05 | Media 播放控制按鈕 | `NowPlayingWatcher.TogglePlayPause()/Next()/Previous()` | play_pause/next/prev |
+| 0xFE | 0x06 | 拖曳進度條放開 | `NowPlayingWatcher.SeekTo()` | payload 帶 position_ms(4B LE) |
 
-> 註:`usb_hid_release()`(送 0xFF/0xFF)是設計了但**沒有任何地方呼叫**的死碼,目前系統裡不存在「放開」事件。
+> 註:`usb_hid_release()`(送 0xFF/0xFF)是設計了但沒有任何地方呼叫的死碼。
 
 ### PC → ESP(Feature report,ESP 端 `buffer[0]` = cmd)
 
 | cmd | payload | 觸發點 | 說明 |
 |---|---|---|---|
-| 0x03 CMD_DATA | \[1..13\]=cpu_usage/cpu_temp/ram_usage/gpu_usage/gpu_temp/gpu_vram/cpu_freq(MHz÷100)/net_up/net_down/disk_usage(每10s)/cpu_power/gpu_power/ssd_life(每10s) | `MonitorSender.WorkerLoop` 每 1s | 系統監控數值 |
-| 0x04 CMD_TIME | \[1..6\]=year(-2000)/month/day/hour/min/sec | 同上,同一輪一起送 | 校時 |
-| 0x05 CMD_QUERY | 無 | PC 連上時 `MonitorSender.SendQuery()` | 詢問 ESP 目前模式 |
+| 0x03 CMD_DATA | monitor 數值(cpu/gpu/ram/net/disk 等) | `MonitorSender.WorkerLoop` 每 1s | 系統監控數值 |
+| 0x04 CMD_TIME | \[1..6\]=year(-2000)/month/day/hour/min/sec | 同上 | 校時 |
+| 0x05 CMD_QUERY | 無 | PC 連上時 | 詢問 ESP 目前模式(已擴充三態 deck/monitor/media) |
+| 0x06 CMD_NOWPLAYING_PROGRESS | position(4B)/duration(4B)/playing(1B) | `NowPlayingSender`,狀態變化即送(`AutoResetEvent` + `Nudge()`,不用等滿週期) | 已實作 |
+| 0x07 CMD_AUDIO_LEVEL | level(1B, 0-100) | `AudioLevelSender`,10Hz | 已實作,attack 30ms/release 250ms 包絡平滑 |
+| 0x08 CMD_NOWPLAYING_IMG_START | generation(1B)/kind(1B)/total_size(2B) | 換歌 / focus 改變時 `NowPlayingImageSender` | 已實作,`total_size=0` 是清空 sentinel |
+| 0x09 CMD_NOWPLAYING_IMG_CHUNK | generation(1B)/kind(1B)/data(61B) | 同上 | 已實作 |
+| 0x0A CMD_NOWPLAYING_IMG_END | generation(1B)/kind(1B) | 同上 | 已實作,收尾觸發 ESP 端解碼 |
 
-現況:IN report 只用了前 2 bytes,Feature report 最多用到 14 bytes,兩邊都還有大量保留空間,加新 cmd 不需要改 HID descriptor。
+`kind`:0=封面(220x220,JPEG,`esp_new_jpeg` 解碼,不透明 RGB565),1=歌名/演出者文字條(480x70,PNG,LVGL 內建 PNG decoder 解碼,**真透明**背景 RGB565+alpha)。
 
 ---
 
-## 3. 階段一實作內容(已完成,在分支上)
-
-### 3.1 檔案異動清單
-
-- `main/ui/ui_settings.h`:`ui_mode_t` 加 `UI_MODE_MEDIA = 2`
-- `main/ui/ui_media.h`、`main/ui/ui_media.c`(**新檔**):Media 模式 UI 本體
-- `main/ui/ui_deck.h` / `ui_deck.c`:新增 `ui_deck_reselect_current()`
-- `main/ui/ui_monitor.h` / `ui_monitor.c`:新增 `ui_monitor_reselect_current()`
-- `main/ui/ui_settings.c`:mode 切換邏輯、根層 Settings 按鈕行為、Media 專屬選單項目
-
-`main/CMakeLists.txt` 用 `file(GLOB_RECURSE ... "ui/*.c")` 收檔案,**沒有 `CONFIGURE_DEPENDS`**——新增檔案後如果 `build/` 資料夾是舊的,不會自動被抓進去,會出現連結錯誤(`undefined reference`)。遇到這狀況時執行 `idf.py reconfigure`,或隨便存一下 `main/CMakeLists.txt` 觸發 CMake 重新掃描,或 `idf.py fullclean` 後重建。**這個 CMakeLists.txt 的 `CONFIGURE_DEPENDS` 修正本身還沒套用**(user 當時擋下這個編輯,選擇自己手動重編)。
-
-### 3.2 版面配置
+## 3. UI 版面配置
 
 沿用 Deck / Monitor 既有的「每個模式自己接管 sidebar 子區域 + 內容區」架構:
 
-- **Sidebar 子區域**(80 x 400,`s_sidebar_bar_cont`,子物件掛在全域 `sidebar` 上,位置 (0,0)):
-  - 不放頁籤按鈕,改放一條**垂直動態長條**(`s_level_bar`,`lv_bar`)
-  - 目前用 sine wave + 隨機抖動模擬音量跳動(`fake_timer_cb`,80ms tick)
-  - **貼底對齊**(`LV_ALIGN_BOTTOM_MID`),寬 28、高 `SCREEN_H-80-20`,只在上方留 20px,下緣直接頂住 sidebar 底部那塊放 Settings 齒輪鈕的黑色區域
-  - **無圓角**(radius 0,MAIN 跟 INDICATOR 都是),避免看起來像浮在中間的橢圓膠囊
-  - 整條可點擊(`LV_OBJ_FLAG_CLICKABLE`),點擊會關閉 Settings 並回到 Media 播放器畫面(因為 Media 沒有頁籤按鈕可以點來離開設定,詳見 3.3)
+- **Sidebar 子區域**(80 x 400,`s_sidebar_bar_cont`):不放頁籤按鈕,改放一條垂直長條(`s_level_bar`),接的是真實音量資料(§2 的 `CMD_AUDIO_LEVEL`),貼底對齊、無圓角,整條可點擊(關閉 Settings、回到 Media 播放器畫面)。
 
-- **內容區**(720 x 480,`s_page`,子物件掛在 `lv_scr_act()`,位置 (80,0)):
-  - 播放器卡片:封面 placeholder(灰底圓角方塊 + 音符 icon)、歌名(`LV_LABEL_LONG_SCROLL_CIRCULAR` 原生跑馬灯)、演出者、進度條、已播放/總長度時間標籤、prev/play-pause/next 三顆按鈕
-  - 內建 3 首假歌曲(其中一首標題刻意拉很長,用來預覽跑馬灯效果),next/prev 會循環切換
-  - **進度條是 `lv_slider`,不是 `lv_bar`**:`lv_bar` 唯讀不能拖,`lv_slider` 才能拖曳拖拉快轉。knob 視覺做小(padding 4),track 寬 480、置中對齊時間標籤(±240),拖曳時 `s_seeking` flag 會暫停假資料的自動進度更新,放開後重新同步
-  - 目前是**純平面深色底**,還沒有背景圖支援
-  - **TODO(使用者已提出,尚未實作)**:之後接上真的 bg_image 時,要比照 `ui_deck.c` create_page() / `ui_monitor.c` make_page() 的 bg(child0) + mask(child1) 慣例,加一層半透明遮罩,讓播放器卡片在複雜背景圖上還能看清楚。目前程式碼裡已經留了 TODO 註解在 `ui_media.c` 的 `build_player_card()` 開頭。
+- **內容區**(720 x 480,`s_page`):播放器卡片,封面圖(220x220,收到真圖前顯示音符 placeholder)、歌名(圖片跑馬灯,PC 端渲染成圖再傳,原因見下)、演出者、`lv_slider` 進度條(可拖曳 seek)、已播放/總長度時間標籤、prev/play-pause/next 三顆按鈕。**支援自訂背景圖**:cover-fit 縮放 + 黑色 50% 透明遮罩(邏輯比照 `ui_deck.c` 的 lazy_bg 慣例),沒設定 `bg_image` 時維持灰底 `0x222222`(跟 Deck/Monitor「沒選背景」時同一個顏色)。無真實資料(未訂閱/斷線 ~3s 逾時)時整組 UI(進度條、三顆按鈕)disable,歌名/演出者顯示「None」,時間顯示「-:--」,封面/文字圖清空回 placeholder。
 
-### 3.3 Mode 切換邏輯(`ui_settings.c`)
-
-- `UI_MODE_MEDIA` 走跟 Deck↔Monitor 一樣的 **switching screen + 背景 xTaskCreate** 流程(`enter_media_task` / `on_enter_media_done`,延遲 1 秒模擬未來讀取背景圖/icon 的時間),不是原本階段一開始寫的同步瞬間切換。
-- Settings 選單新增三個項目:
-  - 「Switch to Media」:Deck、Monitor 都看得到(`item_mode_to_media_cb`)
-  - 「Switch to Monitor」:只在 Media 底下看得到(`item_mode_from_media_to_monitor_cb`,重用既有 `enter_monitor_task`)
-  - 「Switch to Deck」:只在 Media 底下看得到(`item_mode_from_media_cb`)
-- 「Boot Animation」「System」子選單裡的「Switch to MSC mode」「Info」也一起開放給 Media 用(這些跟模式無關,新增 `SETMASK_ALL = SETMASK_DECK|SETMASK_MONITOR|SETMASK_MEDIA`)
-- **Settings 根層的返回鈕行為改了,三個模式都受影響**:原本只有巢狀選單(depth>0)時左上角才顯示「←」返回鈕,根層(depth==0)是隱藏的——因為 Deck/Monitor 原始設計是「點別的頁籤按鈕就等於離開設定」。Media 沒有頁籤按鈕可點,所以改成:根層時返回鈕顯示成「✕」(`LV_SYMBOL_CLOSE`),點擊會 `close_settings()`:呼叫 `ui_settings_deselect()` 後,依目前 `s_mode` 呼叫對應的 `ui_deck_reselect_current()` / `ui_monitor_reselect_current()` / `ui_media_reselect_current()`,把原本畫面的內容區重新顯示出來。這是**三個模式共用的新機制**,不只是 Media 專屬。
+**中文歌名/字型限制**:ESP 端完全沒有 CJK 字型(`ui.c` 只有 `lv_font_montserrat_16/24` 純西文),所以歌名/演出者不傳文字用 ESP 端字型渲染,改成 PC 端用 GDI+(`Microsoft JhengHei UI`,涵蓋 CJK)畫成一張圖傳過去,跟封面圖走同一套 chunk 傳輸機制。原本 UI 原型用的是 LVGL 原生跑馬灯文字物件,正式版換成圖片後如果要保留跑馬灯效果,原理不變(clip 容器 + timer 改 x 座標),只是操作對象從文字物件換成圖片物件——**目前僅實作靜態文字條,跑馬灯效果尚未套用在圖片版本上**,如果歌名/演出者太長會被裁切,這點跟原本 TODO 一樣尚待決定是否需要。
 
 ---
 
-## 4. Now Playing 資料傳輸設計討論(僅討論,尚未寫成程式)
+## 4. Config 系統(bg_image / settings 外觀)
 
-### 4.1 中文歌名問題
+Media 沿用 Deck/Monitor 既有的「每個模式自己一份 config JSON」慣例,路徑 `config/media/settings.json`(平行於 `config/deck/`、`config/monitor/`)。
 
-裝置上目前**完全沒有 CJK 字型**,`ui.c` 只用 `lv_font_montserrat_16/24`(純西文),PC 端 `FormFontBuilder.cs` 建的字型也只有時鐘用的窄範圍(數字、大寫字母)。結論:**不要把歌名文字傳給 ESP 端字型渲染**,改成 PC 端用 GDI+(任何語言字型都能畫)把歌名/演出者渲染成一張小圖,跟封面圖走同一套傳輸機制。
+三個屬性:
 
-### 4.2 跑馬灯效果怎麼保留
+```json
+{
+    "bg_image": "sunset.jpg",
+    "settings": {
+        "bg_image": "panel_bg.jpg",
+        "side_icon": "music.png"
+    }
+}
+```
 
-LVGL 原生跑馬灯(`LV_LABEL_LONG_SCROLL_CIRCULAR`)本質是「固定寬度 clip 容器 + `lv_anim` 持續改變內部物件 x 座標,循環模式會把內容多接一份做無縫循環」。這個機制不挑物件種類,套在 `lv_img` 上一樣可行:PC 端把歌名畫成一條「比顯示區寬」的圖(必要時尾端重複一次文字做無縫循環),傳過去後 ESP 端一樣用 timer 改 x 座標、外層 clip,效果跟原生文字跑馬灯一致,只是底層是圖片不是文字物件。
+- 頂層 `bg_image`:Media 播放器卡片自己的背景圖
+- `settings.bg_image` / `settings.side_icon`:Settings 覆蓋面板(齒輪鈕 + 面板背景)自己的外觀,跟 Deck/Monitor 的 `settings` 物件共用同一個 `ui_settings_appearance_t` 結構
 
-> 目前 UI 原型的歌名跑馬灯(`ui_media.c` `s_title_lbl`)用的是 **LVGL 原生 `LV_LABEL_LONG_SCROLL_CIRCULAR`**,純粹是先用假的英文字串預覽跑馬灯「感覺」,正式版才會換成上面說的圖片方案(檔案內已有註解說明這個差異)。
+三個欄位都可以省略,省略的欄位維持預設(灰底 `0x222222` / 無自訂 side icon)。檔案不存在或解析失敗時視為「無 config」,不當錯誤處理。
 
-### 4.3 封面圖傳輸(HID 頻寬考量)
+實作檔案:`main/ui/ui_media_config.h`/`.c`(新檔,cJSON 解析,PSRAM 優先配置緩衝區)、`main/app_config.h` 新增 `SD_DIR_CONFIG_MEDIA`/`SD_PATH_CONFIG_MEDIA`、`main/fs_manager/fs_sd.c` 開機自動建立該目錄。
 
-- 不走 SD 卡:不要求 PC 端在播放前先把封面圖寫進 SD 卡(SD 卡目前用途已經很多,而且事先不知道使用者要播哪首歌)
-- 直接複用開機動畫已經在用的 `esp_new_jpeg` 解碼器:PC 端把封面壓縮/縮小成小尺寸 JPEG(例如 120~160px 見方,不需要原始解析度),透過 HID chunk 傳過去,ESP 收完直接解碼丟進 LVGL image object,歌換了就丟棄重解,全程在記憶體裡,不碰 SD
-- 估算:縮到 160x160、壓縮到幾 KB 的 JPEG,就算單次 HID report 只有 64 bytes,幾 KB 也就一兩秒內能傳完
-- **切歌打斷處理**:每次「現在播放」事件給一個 generation_id,圖片 chunk 也帶這個 id;序號中途變了(代表換歌)就丟棄舊資料,等新序號的 chunk 到齊再解碼。沒收到新圖之前畫面顯示固定音符 placeholder。
-
-### 4.4 提議的新 cmd byte(尚未定案、尚未實作)
-
-延續現有協定慣例(page/cmd byte 從保留值繼續往下配):
-
-**ESP → PC**:新增 `page = 0xFE` 當作 Media 專屬控制通道(跟現有 `0xFF` monitor 控制是平行、不相交的獨立命名空間),`btn=0x01`/`0x02` 分別是訂閱/取消訂閱(進出 Media 頁面時送,跟 Monitor 那套訂閱行為模式一樣,但底層是獨立的)。
-
-**PC → ESP**:延續現有 `0x03/0x04/0x05` 之後:
-
-| cmd | payload 概念 | 說明 | 狀態 |
-|---|---|---|---|
-| 0x06 CMD_NOWPLAYING_PROGRESS | position(4B)/duration(4B)/playing(1B) | 數字類,小,每秒送 | **已實作** |
-| 0x07 CMD_AUDIO_LEVEL | level(1B, 0-100) | 第 5 節音頻視覺化「簡單版」VU 值,10Hz 送 | **已實作** |
-| 0x08 CMD_NOWPLAYING_IMG_START | generation_id(1B)/total_size(2B)/kind(1B:封面 or 文字條) | 宣告一次圖片傳輸開始 | 未實作 |
-| 0x09 CMD_NOWPLAYING_IMG_CHUNK | generation_id(1B)/chunk_idx(2B)/data(...) | 圖片分塊 | 未實作 |
-| 0x0A CMD_NOWPLAYING_IMG_END | generation_id(1B) | 收尾,通知 ESP 可以解碼顯示了 | 未實作 |
-
-> cmd byte 編號已依實作結果調整:原本規劃 0x07 給圖片傳輸開頭用,但音量 VU 值(第 5 節)先落地,所以圖片相關三個 cmd 往後遞補到 0x08-0x0A。
-
-`kind` 用來區分這塊是「封面圖」還是「歌名/演出者渲染出來的文字圖」,兩種走同一套 chunk 機制,只是貼的位置跟圖片尺寸不同。
+**目前限制(§0 提到的下一步)**:只認一個寫死的檔名,還沒有「多組配置 + 選擇使用中配置」的機制。
 
 ---
 
-## 5. 音頻視覺化(動態長條)討論
+## 5. 待辦事項
 
-- ESP 沒有麥克風,聲音處理全部在 PC 端做,ESP 只負責拿數字畫圖
-- PC 端可用 WASAPI loopback(例如 NAudio 的 `WasapiLoopbackCapture`)「聽」系統輸出音訊,不需要實體麥克風
-- **簡單版**:單一音量值(VU meter),每次送 1 byte,ESP 畫呼吸圓圈/跳動長條類的圖形——目前 UI 原型的 sidebar 長條就是這個的假資料版本
-- **進階版**:FFT 切 8~16 個頻段,每段一個 byte,64-byte report 綽綽有餘,ESP 畫成長條頻譜
-- 更新頻率建議 20~30Hz 才會看起來夠順,比照 Now Playing 的訂閱模式,只有使用者打開視覺化頁面時才拉高送資料頻率
-- **PC 端目前完全沒有音訊相關 library(NAudio 等都沒裝)**,這塊是全新依賴
+- [ ] **多配置切換**(下一步要做的,見 §0 的規劃)
+- [ ] 歌名/演出者圖片版跑馬灯效果(目前是靜態文字條,過長會被裁切)
+- [ ] 音頻視覺化「進階版」:FFT 切 8~16 頻段畫頻譜(目前只有單一 VU 值長條)
+- [ ] Media 模式自己的「設定」內容(音源靈敏度、視覺化樣式等)——注意這跟 §4 的「外觀 config(bg_image/side_icon)」是不同東西,Deck/Monitor 目前也只有外觀 config dialog,沒有這類功能性設定
+- [ ] 封面/文字圖沒有自己的逾時機制,只跟著 progress 斷線一起清掉;如果只是「focus 移到沒有 Media Session 的視窗」但 HID 還連著,圖片會維持上一首內容(進度數字本身仍正常歸零)
+- [ ] `usb_hid_release()`(0xFF/0xFF 放開事件)目前是死碼,「長按」之類功能才需要
+- [ ] `main/CMakeLists.txt` 的 `file(GLOB_RECURSE ...)` 加 `CONFIGURE_DEPENDS`,避免新增 `ui/*.c` 檔案後忘記 `idf.py reconfigure` 導致連結錯誤(這個修正本身還沒套用,使用者當時選擇手動重編繞過)
 
 ---
 
 ## 6. WiFi / Bluetooth 評估結論(不採用)
 
-開發商提醒:RGB 屏帶寬高,WiFi 連線時寫 NVS 會造成螢幕閃爍,建議「連上就做完事、別一直連」。討論後的結論:
+開發商提醒:RGB 屏帶寬高,WiFi 連線時寫 NVS 會造成螢幕閃爍,建議「連上就做完事、別一直連」。討論後結論:
 
-- **WiFi OTA**:不需要,ESP 已經有 USB MSC 模式,PC 可以直接把韌體 .bin 寫進 SD 卡,不用插拔卡片,WiFi OTA 沒有比現有方式方便
-- **天氣小工具**:PC 端 + HID 就能做到(PC 抓天氣資料轉送過來),不需要 ESP 自己連 WiFi
-- **Bluetooth(僅 BLE,ESP32-S3 沒有 Classic BT)**:手機通知推播、外接 BLE 遙控器等想法討論過,但目前沒有明確吸引力/急迫性,優先度排在 Media 播放器之後
-- 結論:**WiFi/BLE 這條線目前不推進**,先把 Media 播放器做完整
-
----
-
-## 7. 待辦事項(Follow-ups)
-
-- [ ] `main/CMakeLists.txt` 的 `file(GLOB_RECURSE ...)` 加上 `CONFIGURE_DEPENDS`,避免以後新增 `ui/*.c` 檔案又忘記重新 configure(這次遇到的連結錯誤就是這個原因)
-- [ ] Media 內容區加半透明背景遮罩(等真的有 bg_image 支援時一起做,`ui_media.c` 已留 TODO 註解)
-- [x] 第 4.4 節 Now Playing HID 協定(數字部分)-- **已實作**,而且已經拔掉階段一的 UI 原型假資料(mock track 清單、sine wave、本地計時器全部刪除):
-  - `HID_MEDIA_CMD_NOWPLAYING_PROGRESS=0x06`(position/duration/playing)+ `page=0xFE` 訂閱通道。PC 端 `NowPlayingWatcher`(讀 Media Session API,`Position` 用 `LastUpdatedTime` 內插成即時值,避免 Windows 只在離散事件推播位置造成的偏移/凍結)+ `NowPlayingSender`(每秒送 HID)。
-  - `CMD_QUERY` 已擴充成三態(deck/monitor/media,`usb_hid_reply_mode()`),PC 端 App 比較晚啟動、ESP 已經在 Media 頁的情況會自動補訂閱。
-  - **ESP → PC 播放控制已實作**:新增 `HID_MEDIA_BTN_PLAY_PAUSE/NEXT/PREV`(0x03-0x05,同一個 `page=0xFE` 通道),ESP 端按鈕按下去送指令給 PC,PC 端 `NowPlayingWatcher.TogglePlayPause()/Next()/Previous()` 呼叫 `GlobalSystemMediaTransportControlsSession` 的對應方法真的控制播放器;按鈕本身不做本地樂觀更新,狀態一律等下一筆真資料回來才變。
-  - **連線狀態鎖定**:`ui_media.c` 沒收到真資料(未訂閱成功、或 ~3s 逾時)時,歌名/演出者顯示「None」,時間顯示「-:--」,進度條與 prev/play/next 三顆按鈕整組 disable(不可拖曳/不可按),不再用假資料撐著看起來像在動。
-  - **圖示延遲修正**:`NowPlayingSender` 原本固定 1 秒送一次,狀態改變後最多要等下一輪。改成 `AutoResetEvent` 可中斷等待 + `Nudge()`,`NowPlayingWatcher` 新增 `OnStateChanged` 事件(播放狀態切換/時間軸更新時觸發),接上後任何真正的狀態變化都會立即觸發送出,不用等滿週期。
-  - **拖曳進度條 seek 已實作**:新增 `HID_MEDIA_BTN_SEEK=0x06`(`page=0xFE` 通道,payload 為 position_ms 4B LE),ESP 端 `progress_seek_cb()` 放開手時送出目標位置,PC 端 `NowPlayingWatcher.SeekTo()` 呼叫 `TryChangePlaybackPositionAsync()` 真的控制播放位置。等待 PC 確認期間(`s_seek_pending`,~2s 逾時或收到位置相符的真資料即視為確認)ESP 端畫面凍結在目標位置,避免放手後先跳回舊進度、確認封包到才又跳一次的閃爍。
-  - **封面圖 / 歌名演出者文字條已實作**:`HID_MEDIA_CMD_NOWPLAYING_IMG_START/CHUNK/END`(0x08-0x0A,`page=0xFE` 通道)。PC 端 `NowPlayingWatcher` 新增 `OnMediaPropertiesChanged` 事件(換歌時觸發,帶 `GlobalSystemMediaTransportControlsSessionMediaProperties`)驅動新的 `NowPlayingImageSender`:
-    - **封面**:直接讀 Media Session API 給的 `props.Thumbnail`(`IRandomAccessStreamReference`,透過 `DataReader` 讀 bytes,不用 `AsStreamForRead()` 是因為專案沒手動 ref `System.Runtime.WindowsRuntime.dll`),不用另外爬各家 App/網頁 —— 這是作業系統統一介面,YouTube 分頁、Spotify 等只要有跟 SMTC 註冊縮圖都拿得到。GDI+ 縮放+置中裁切成 220x220。
-    - **歌名/演出者**:GDI+ 畫成一張 480x70 的文字條圖(`Microsoft JhengHei UI` 字型,涵蓋 CJK),背景色跟 `ui_media.c` 的頁面背景(`0x111111`)一致,貼上去無縫接軌。
-    - 兩張都編碼成 JPEG(quality 80),用同一套 START(generation+kind+total_size)/ CHUNK(每包 61 bytes payload)/ END 分塊送。`generation` byte 每次換歌遞增,ESP 端用來擋掉屬於上一次傳輸、卻晚到的殘留封包。
-    - ESP 端(`usb_hid.c`)收完 END 後用既有的 `esp_new_jpeg`(跟開機動畫共用同一顆解碼器元件,各自獨立 handle)解成 RGB565,尺寸不符（不是 220x220 / 480x70)直接拒收。解碼完的 buffer 透過 `usb_hid_set_nowplaying_img_cb` 回呼(帶走 ownership)交給 `ui_media.c`,`ui_media.c` 用 `lv_img_create` 疊在封面佔位圖 / 歌名演出者 label 上面,收到圖才切換顯示、沒收到時维持 None/音符佔位。
-    - **已知限制**:封面/文字圖沒有自己的逾時機制,只跟著 `s_real_data_received`(progress 斷線)一起清掉——如果只是「focus 移到沒有 Media Session 的視窗」但 HID 還連著,圖片會維持顯示上一首的內容,不會主動清空(進度數字本身仍然正常歸零),之後有需要可以再補。
-- [x] 第 5 節音頻視覺化「簡單版」-- **已實作**,同樣拔掉了原本的 sine wave 假資料:
-  - `CMD_AUDIO_LEVEL=0x07`,PC 端 `AudioLevelWatcher`(WASAPI loopback)+ `AudioLevelSender`(10Hz,跟 Now Playing 共用 0xFE 訂閱通道)。
-  - **平滑處理**:PC 端加了 attack/release 包絡(攻擊 30ms、釋放 250ms 的指數平滑),不是每個 buffer 的瞬間 peak 直接送,避免數值跳得生硬;ESP 端 `ui_media.c` 的 level bar 改用 `LV_ANIM_ON` + `lv_bar_set_anim_time(120)`,收到新值時用補間動畫過渡,不是瞬間跳格。
-  - 沒收到真資料(或 ~3s 逾時)時 bar 直接歸零,不再退回 sine wave。
-  - **尚未**:FFT 頻段進階版(§5「進階版」)
-- [ ] Media 模式的「設定」畫面(音源靈敏度、視覺化樣式等)目前完全沒有,只有 Deck/Monitor 有自己的 config dialog
-- [ ] `usb_hid_release()`(0xFF/0xFF 放開事件)目前是死碼,如果之後要做「長按」之類的功能才需要真的接上
+- **WiFi OTA**:不需要,已有 USB MSC 模式可直接把韌體 .bin 寫進 SD 卡
+- **天氣小工具**:PC 端 + HID 就能做到,不需要 ESP 自己連 WiFi
+- **Bluetooth(僅 BLE)**:手機通知推播、外接 BLE 遙控器討論過,優先度排在 Media 播放器之後
+- 結論:WiFi/BLE 目前不推進
 
 ---
 
-## 8. 快速上手(回去繼續開發時)
+## 7. 快速上手(回去繼續開發時)
 
 ```
 cd ESDeck
@@ -190,7 +151,13 @@ idf.py -p PORT build flash monitor
 
 修改重點檔案速查:
 
-- Media 版面/假資料邏輯 → `main/ui/ui_media.c`
+- Media 版面/邏輯 → `main/ui/ui_media.c` / `.h`
+- Media config(bg_image/settings)→ `main/ui/ui_media_config.c` / `.h`
 - Mode 切換 / Settings 選單 / 根層 X 關閉鈕 → `main/ui/ui_settings.c`
 - 三態 mode enum → `main/ui/ui_settings.h`
-- HID 協定(現況,尚未擴充)→ `main/usb/usb_hid.c` / `.h`
+- HID 協定 → `main/usb/usb_hid.c` / `.h`
+- PC 端播放控制/進度 → `ESDeckPC/NowPlayingWatcher.cs`、`NowPlayingSender.cs`
+- PC 端封面/文字圖 → `ESDeckPC/NowPlayingImageSender.cs`
+- PC 端音量 → `ESDeckPC/AudioLevelWatcher.cs`、`AudioLevelSender.cs`
+
+**續接第一步(多配置切換)**:去讀 Deck/Monitor 的多配置實作(`ui_config.c`/`ui_config_dialog.c` 及 monitor 對應檔案),抓出 NVS key、SD 資料夾佈局、選單 UI 三塊的實際做法,詳細問題清單見 §0。
