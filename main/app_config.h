@@ -63,6 +63,22 @@
 #define BOOT_ANIM_CUSTOM_FPS    12
 
 /* --------------------------------------------------------------------------
+ * Boot-time log toggles
+ *
+ * These only silence logging -- the underlying features (SD scan,
+ * boot animation) keep running exactly as before either way. Comment
+ * out to disable, uncomment (or re-add the #define) to re-enable.
+ * Both left disabled here for the current feature branch -- with a lot
+ * of files on the SD card and many boot-anim frames, fs_sd_scan()'s
+ * recursive directory print and the boot animation's per-frame timing
+ * logs were drowning out everything else in the boot log. Flip back on
+ * before merging if those logs should ship enabled.
+ * -------------------------------------------------------------------------- */
+
+// #define FS_SD_SCAN_LOG_ENABLE
+// #define BOOT_ANIM_FRAME_LOG_ENABLE
+
+/* --------------------------------------------------------------------------
  * OTA update file naming
  *
  * A file under SD_PATH_UPDATE is only treated as a valid update image if

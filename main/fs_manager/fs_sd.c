@@ -76,7 +76,9 @@ bool fs_sd_init(void)
     sdmmc_card_print_info(stdout, s_card);
     fs_sd_usage_printf();
     fs_sd_ensure_layout();
+#ifdef FS_SD_SCAN_LOG_ENABLE
     fs_sd_scan();
+#endif
     return true;
 }
 

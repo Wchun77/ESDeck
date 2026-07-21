@@ -462,7 +462,9 @@ static void prefetch_task(void *arg)
 
         /* 診斷用:量測「開檔+讀取+關檔」實際花多久,用來確認SD I/O
          * 是不是目前fps的主要瓶頸(而不是憑感覺猜)。 */
+#ifdef BOOT_ANIM_FRAME_LOG_ENABLE
         TickType_t io_start = xTaskGetTickCount();
+#endif
 
         FILE *f = fopen(path, "rb");
         if (!f || s_pf_stop) {
@@ -475,8 +477,10 @@ static void prefetch_task(void *arg)
         bool truncated = (n == BOOT_ANIM_MAX_JPEG_SIZE) && !feof(f);
         fclose(f);
 
+#ifdef BOOT_ANIM_FRAME_LOG_ENABLE
         uint32_t io_ms = (xTaskGetTickCount() - io_start) * portTICK_PERIOD_MS;
         ESP_LOGI(TAG, "pf read frame %d: %u ms, %u bytes", frame_idx, (unsigned)io_ms, (unsigned)n);
+#endif
 
         if (truncated) {
             /* len==0是"動畫已結束"的專用訊號(見prefetch_next),不能拿
@@ -553,13 +557,17 @@ static bool prefetch_next(uint8_t *rgb_buf, bool *out_missing)
      * 如果這個數字接近0,代表背景task一直領先、緩衝區沒被吃空,瓶頸
      * 在解碼/顯示端;如果這個數字偏大,代表消費端常常在等SD讀取,
      * 瓶頸確實在I/O(可能是跟img_preload搶頻寬)。 */
+#ifdef BOOT_ANIM_FRAME_LOG_ENABLE
     TickType_t wait_start = xTaskGetTickCount();
+#endif
     if (xSemaphoreTake(s_pf_filled_sem, pdMS_TO_TICKS(5000)) != pdTRUE) {
         ESP_LOGW(TAG, "prefetch stalled, aborting animation");
         *out_missing = true;
         return false;
     }
+#ifdef BOOT_ANIM_FRAME_LOG_ENABLE
     uint32_t wait_ms = (xTaskGetTickCount() - wait_start) * portTICK_PERIOD_MS;
+#endif
 
     int slot = s_pf_consume_slot;
     size_t len = s_pf_slots[slot].len;
@@ -567,11 +575,15 @@ static bool prefetch_next(uint8_t *rgb_buf, bool *out_missing)
     if (len == 0) {
         *out_missing = true;
     } else {
+#ifdef BOOT_ANIM_FRAME_LOG_ENABLE
         TickType_t decode_start = xTaskGetTickCount();
+#endif
         ok = decode_jpeg_mem(s_pf_slots[slot].data, len, rgb_buf);
+#ifdef BOOT_ANIM_FRAME_LOG_ENABLE
         uint32_t decode_ms = (xTaskGetTickCount() - decode_start) * portTICK_PERIOD_MS;
         ESP_LOGI(TAG, "consume: waited %u ms for data, decode %u ms",
                  (unsigned)wait_ms, (unsigned)decode_ms);
+#endif
     }
 
     xSemaphoreGive(s_pf_free_sem);
