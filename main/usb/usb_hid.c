@@ -11,12 +11,17 @@
 #include "esp_jpeg_dec.h"
 #include "lvgl.h"
 #include "lvgl_port.h"
+#include "ui_toast.h"
 
 static const char *TAG = "USB_HID";
 
 #define TUSB_DESC_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
 
 static bool s_active = false;
+
+/* Forward decl -- defined near the bottom alongside the toast hookup it
+ * exists for, but tusb_cfg (below) needs to reference it by name. */
+static void usb_hid_event_cb(tinyusb_event_t *event, void *arg);
 
 /*
  * HID report descriptor — Vendor-defined (Usage Page 0xFF00).
@@ -456,7 +461,7 @@ void usb_hid_driver_install(void)
             .full_speed_config = s_config_desc,
             .high_speed_config = NULL,
         },
-        .event_cb  = NULL,
+        .event_cb  = usb_hid_event_cb,
         .event_arg = NULL,
     };
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
@@ -476,6 +481,44 @@ void usb_hid_driver_install(void)
 
 void usb_hid_activate(void)   { s_active = true;  ESP_LOGI(TAG, "HID activated");   }
 void usb_hid_deactivate(void) { s_active = false; ESP_LOGI(TAG, "HID deactivated"); }
+
+/* -----------------------------------------------------------------------
+ * TinyUSB attach/detach event -- via the esp_tinyusb wrapper's event_cb,
+ * not raw tud_mount_cb/tud_umount_cb.
+ *
+ * managed_components/espressif__esp_tinyusb/tinyusb.c already defines
+ * tud_mount_cb()/tud_umount_cb() itself (it forwards them to whatever
+ * event_cb is set in tinyusb_config_t) -- redefining those two here too
+ * would be (and was) a duplicate-symbol link error. The wrapper's own
+ * event_cb hook is the intended extension point instead; wired below via
+ * tusb_cfg.event_cb.
+ *
+ * Right now this is purely a stand-in "device connected/disconnected"
+ * signal to exercise ui_toast's queue/animation/dismiss behavior
+ * end-to-end (plug/unplug the USB cable) before real BLE notifications
+ * exist -- see ui_toast.h. Once BLE lands, its own connect/disconnect
+ * events push through the same ui_toast_push() call.
+ * ----------------------------------------------------------------------- */
+static void toast_hid_connected_cb(void *arg)    { (void)arg; ui_toast_push("HID Connected", 1, NULL); }
+static void toast_hid_disconnected_cb(void *arg) { (void)arg; ui_toast_push("HID Disconnected", 1, NULL); }
+
+static void usb_hid_event_cb(tinyusb_event_t *event, void *arg)
+{
+    (void)arg;
+    /* Called from the TinyUSB task, not the LVGL task -- hop over via
+     * lv_async_call() same as every other cross-task UI call in this
+     * codebase (see ui_settings.c's enter_monitor_task pattern). */
+    switch (event->id) {
+    case TINYUSB_EVENT_ATTACHED:
+        lv_async_call(toast_hid_connected_cb, NULL);
+        break;
+    case TINYUSB_EVENT_DETACHED:
+        lv_async_call(toast_hid_disconnected_cb, NULL);
+        break;
+    default:
+        break;
+    }
+}
 
 const tusb_desc_device_t *usb_hid_get_device_desc(void) { return &s_device_desc; }
 const uint8_t            *usb_hid_get_config_desc(void) { return s_config_desc;  }

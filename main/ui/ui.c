@@ -2,6 +2,7 @@
 #include "ui_img_pool.h"
 #include "ui_deck.h"
 #include "ui_settings.h"
+#include "ui_toast.h"
 #include "usb/usb_hid.h"
 #include "lvgl.h"
 #include "esp_log.h"
@@ -128,6 +129,7 @@ void my_ui_init(void)
     usb_hid_set_mode_query_cb(mode_query_cb);
 
     ui_build_static();
+    ui_toast_init();
 
     deck_cfg_t *cfg = ui_img_pool_take_preload_cfg();
     ui_deck_build(s_sidebar, cfg);
