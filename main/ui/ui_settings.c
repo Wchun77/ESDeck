@@ -9,6 +9,7 @@
 #include "ui_img_pool.h"
 #include "ui_config.h"
 #include "ui.h"
+#include "ble/ble_manager.h"
 #include "lvgl.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -49,6 +50,7 @@ typedef enum {
 typedef enum {
     SETTING_ACTION,
     SETTING_SUBMENU,
+    SETTING_TOGGLE,
 } setting_node_type_t;
 
 typedef struct setting_node_s {
@@ -58,6 +60,8 @@ typedef struct setting_node_s {
     lv_event_cb_t                 action_cb;   /* used when type == SETTING_ACTION */
     const struct setting_node_s  *children;    /* used when type == SETTING_SUBMENU */
     int                            child_count;
+    bool                        (*get_state_cb)(void);   /* used when type == SETTING_TOGGLE */
+    void                        (*set_state_cb)(bool on); /* used when type == SETTING_TOGGLE */
 } setting_node_t;
 
 #define SETTINGS_STACK_MAX 4
@@ -503,13 +507,14 @@ static void item_boot_anim_cb(lv_event_t *e)
  * growing this pattern.
  * ----------------------------------------------------------------------- */
 static const setting_node_t s_system_menu[] = {
-    { "Select Config", SETTING_ACTION, SETMASK_ALL, item_config_cb, NULL, 0 },
-    { "MSC Mode",       SETTING_ACTION, SETMASK_ALL,  item_msc_cb,    NULL, 0 },
-    { "Info",            SETTING_ACTION, SETMASK_ALL,  item_info_cb,  NULL, 0 },
+    { "Select Config", SETTING_ACTION, SETMASK_ALL, item_config_cb, NULL, 0, NULL, NULL },
+    { "Bluetooth",      SETTING_TOGGLE, SETMASK_ALL, NULL,           NULL, 0, ble_manager_is_enabled, ble_manager_set_enabled },
+    { "MSC Mode",       SETTING_ACTION, SETMASK_ALL,  item_msc_cb,    NULL, 0, NULL, NULL },
+    { "Info",            SETTING_ACTION, SETMASK_ALL,  item_info_cb,  NULL, 0, NULL, NULL },
 };
 
 static const setting_node_t s_root_menu[] = {
-    { "System",          SETTING_SUBMENU, SETMASK_ALL,    NULL,              s_system_menu,  3 },
+    { "System",          SETTING_SUBMENU, SETMASK_ALL,    NULL,              s_system_menu,  4 },
     { "Boot Animation", SETTING_ACTION, SETMASK_ALL,     item_boot_anim_cb, NULL,           0 },
     { "Keyboard Mode", SETTING_ACTION, SETMASK_DECK,    item_keyboard_cb,  NULL,           0 },
     { "Monitor Mode",  SETTING_ACTION, SETMASK_DECK,    item_mode_cb,      NULL,           0 },
@@ -538,6 +543,17 @@ static void generic_item_cb(lv_event_t *e)
     } else {
         if (node->action_cb) node->action_cb(e);
     }
+}
+
+/* SETTING_TOGGLE rows -- only the lv_switch itself is the click target
+ * (see render_current_level()), so there's no row-tap/switch-tap
+ * double-toggle to reconcile. */
+static void toggle_switch_cb(lv_event_t *e)
+{
+    const setting_node_t *node = (const setting_node_t *)lv_event_get_user_data(e);
+    lv_obj_t *sw = lv_event_get_target(e);
+    bool on = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (node->set_state_cb) node->set_state_cb(on);
 }
 
 /* Close Settings entirely and resume whatever mode is active -- the
@@ -591,18 +607,41 @@ static void render_current_level(void)
         lv_obj_set_style_outline_width(item, 0, 0);
         lv_obj_set_style_radius(item, 6, 0);
         lv_obj_clear_flag(item, LV_OBJ_FLAG_PRESS_LOCK);
-        lv_obj_add_event_cb(item, generic_item_cb, LV_EVENT_CLICKED, (void *)node);
 
         lv_obj_t *lbl = lv_label_create(item);
         lv_label_set_text(lbl, node->label);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
 
-        if (node->type == SETTING_SUBMENU) {
-            lv_obj_t *chevron = lv_label_create(item);
-            lv_label_set_text(chevron, LV_SYMBOL_RIGHT);
-            lv_obj_set_style_text_color(chevron, lv_color_hex(0x888888), 0);
-            lv_obj_align(chevron, LV_ALIGN_RIGHT_MID, -12, 0);
+        if (node->type == SETTING_TOGGLE) {
+            /* Only the switch is the click target -- the row itself isn't
+             * wired to generic_item_cb, so there's no double-toggle to
+             * reconcile between a row-tap and the switch's own tap. */
+            lv_obj_t *sw = lv_switch_create(item);
+            lv_obj_align(sw, LV_ALIGN_RIGHT_MID, -8, 0);
+            /* lv_theme_default wires an 80ms transition to
+             * LV_PART_INDICATOR|LV_STATE_CHECKED, which visibly animates
+             * on this initial add_state too (the "flash" from off to on
+             * when this page is reopened while already on) -- cosmetic
+             * only. A previous attempt to null out the transition style
+             * for just this call crashed the device (LoadProhibited in
+             * lv_obj_set_state -- passing NULL to
+             * lv_obj_set_style_transition() is stored and later
+             * dereferenced as if it were a real descriptor, it does not
+             * mean "no transition"). Not worth re-risking a crash over an
+             * 80ms cosmetic flash -- leave it as a plain add_state. */
+            if (node->get_state_cb && node->get_state_cb())
+                lv_obj_add_state(sw, LV_STATE_CHECKED);
+            lv_obj_add_event_cb(sw, toggle_switch_cb, LV_EVENT_VALUE_CHANGED, (void *)node);
+        } else {
+            lv_obj_add_event_cb(item, generic_item_cb, LV_EVENT_CLICKED, (void *)node);
+
+            if (node->type == SETTING_SUBMENU) {
+                lv_obj_t *chevron = lv_label_create(item);
+                lv_label_set_text(chevron, LV_SYMBOL_RIGHT);
+                lv_obj_set_style_text_color(chevron, lv_color_hex(0x888888), 0);
+                lv_obj_align(chevron, LV_ALIGN_RIGHT_MID, -12, 0);
+            }
         }
     }
 

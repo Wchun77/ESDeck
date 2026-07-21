@@ -4,6 +4,7 @@
 
 file(GLOB_RECURSE ui_srcs       "ui/*.c")
 file(GLOB_RECURSE usb_srcs      "usb/*.c")
+file(GLOB_RECURSE ble_srcs      "ble/*.c")
 file(GLOB_RECURSE fs_manager    "fs_manager/*.c")
 file(GLOB_RECURSE anim_srcs     "anim/*.c")
 file(GLOB_RECURSE nvs_manager   "nvs_manager/*.c")
@@ -20,6 +21,7 @@ set(COMPONENT_SRCS
 
     ${ui_srcs}
     ${usb_srcs}
+    ${ble_srcs}
     ${fs_manager}
     ${anim_srcs}
     ${nvs_manager}
@@ -34,6 +36,7 @@ set(COMPONENT_ADD_INCLUDEDIRS
     .
     "ui"
     "usb"
+    "ble"
     "fs_manager"
     "anim"
     "nvs_manager"
@@ -60,6 +63,7 @@ idf_component_register(
         json
         nvs_flash
         app_update
+        bt
 )
 
 idf_component_get_property(lvgl_lib lvgl__lvgl COMPONENT_LIB)

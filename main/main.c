@@ -5,6 +5,7 @@
 #include "ui_ota_dialog.h"
 #include "fs_manager/fs_sd.h"
 #include "usb/usb_manager.h"
+#include "ble/ble_manager.h"
 #include "boot_anim.h"
 #include "nvs_manager/nvs_manager.h"
 #include "freertos/FreeRTOS.h"
@@ -44,6 +45,8 @@ void app_main(void)
 
     ui_preload_wait();
     usb_manager_init();   /* preload task continues in background after this */
+    ble_manager_init();   /* host stack up, advertising stays off until the
+                            * Settings Bluetooth switch turns it on */
 
     if (lvgl_port_lock(-1)) {
         my_ui_init();
