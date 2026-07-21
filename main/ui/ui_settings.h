@@ -49,6 +49,10 @@ ui_mode_t ui_settings_get_mode(void);
  * Shows switching screen and re-enters asynchronously. */
 void ui_settings_monitor_reload(void);
 
+/* Exit and re-enter media mode to apply a new config.
+ * Same shape as ui_settings_monitor_reload(). */
+void ui_settings_media_reload(void);
+
 /* Update the Settings page's background image and gear sidebar icon to
  * match whichever Deck or Monitor config is currently active. Called by
  * ui_deck_build() and ui_monitor_enter() right after loading their own

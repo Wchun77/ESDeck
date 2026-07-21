@@ -775,8 +775,9 @@ void ui_media_enter(lv_obj_t *sidebar)
     s_level_queue    = xQueueCreate(1, sizeof(uint8_t));
     s_img_queue      = xQueueCreate(4, sizeof(media_img_msg_t));
 
-    /* Single fixed config file for now (config/media/settings.json, no
-     * picker UI yet) -- see ui_media_config.h. Missing/invalid file just
+    /* Loads whichever config/media/<name>.json is currently selected in
+     * NVS (see ui_media_config.h) -- same multi-config picker Deck/Monitor
+     * use. No selection yet, or the selected file missing/invalid, just
      * means "no config": ui_media_config_load() leaves s_media_cfg all-
      * zeroed, so build_bg() below no-ops (empty bg_image) and
      * s_media_cfg.settings is already the same all-empty struct

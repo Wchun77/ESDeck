@@ -1,6 +1,7 @@
 #include "ui_config_dialog.h"
 #include "ui_config.h"
 #include "ui_monitor_config.h"
+#include "ui_media_config.h"
 #include "ui_settings.h"
 #include "ui_deck.h"
 #include "ui_img_pool.h"
@@ -40,8 +41,14 @@ static lv_obj_t *s_sel_row = NULL;
 /* New config loaded during the switch preload task. */
 static deck_cfg_t s_new_cfg;
 
-/* true = showing monitor config list, false = deck config list */
-static bool s_monitor_mode = false;
+/* Which mode's config list the dialog is currently showing. */
+typedef enum {
+    CFG_DIALOG_DECK,
+    CFG_DIALOG_MONITOR,
+    CFG_DIALOG_MEDIA,
+} cfg_dialog_mode_t;
+
+static cfg_dialog_mode_t s_dialog_mode = CFG_DIALOG_DECK;
 
 /* -----------------------------------------------------------------------
  * Helpers
@@ -138,7 +145,17 @@ static void confirm_cb(lv_event_t *e)
     const char *fname = s_scan.names[s_sel_idx];
     ESP_LOGI("CFG_DLG", "switching config: %s", fname);
 
-    if (s_monitor_mode) {
+    if (s_dialog_mode == CFG_DIALOG_MEDIA) {
+        if (!ui_media_config_nvs_save(fname)) {
+            ESP_LOGE("CFG_DLG", "Failed to save media config to NVS");
+            return;
+        }
+        dialog_close();
+        ui_settings_media_reload();
+        return;
+    }
+
+    if (s_dialog_mode == CFG_DIALOG_MONITOR) {
         if (!ui_monitor_config_nvs_save(fname)) {
             ESP_LOGE("CFG_DLG", "Failed to save monitor config to NVS");
             return;
@@ -247,21 +264,36 @@ static void warn_dismiss_cb(lv_event_t *e)
     lv_obj_del(lv_event_get_target(e));
 }
 
-static void dialog_show_internal(bool monitor_mode)
+static void dialog_show_internal(cfg_dialog_mode_t mode)
 {
-    s_monitor_mode = monitor_mode;
-    s_scan = monitor_mode ? (json_scan_result_t){ .names = NULL, .count = 0 }
-                          : ui_config_scan();
-    if (monitor_mode) {
-        mon_scan_result_t mres = ui_monitor_config_scan();
-        s_scan.names = mres.names;
-        s_scan.count = mres.count;
+    s_dialog_mode = mode;
+
+    const char *cfg_dir = UI_CONFIG_DECK_PATH;
+
+    switch (mode) {
+    case CFG_DIALOG_MONITOR: {
+        mon_scan_result_t r = ui_monitor_config_scan();
+        s_scan.names = r.names;
+        s_scan.count = r.count;
+        cfg_dir = UI_MONITOR_PATH;
+        break;
+    }
+    case CFG_DIALOG_MEDIA: {
+        media_scan_result_t r = ui_media_config_scan();
+        s_scan.names = r.names;
+        s_scan.count = r.count;
+        cfg_dir = SD_PATH_CONFIG_MEDIA;
+        break;
+    }
+    default:
+        s_scan = ui_config_scan();
+        break;
     }
 
     if (s_scan.count == -1) {
         /* Directory does not exist */
         ui_config_scan_free(&s_scan);
-        ESP_LOGE("CFG_DLG", "Deck config directory not found: %s", UI_CONFIG_DECK_PATH);
+        ESP_LOGE("CFG_DLG", "Config directory not found: %s", cfg_dir);
 
         lv_obj_t *scr = lv_scr_act();
         lv_obj_t *warn_root = lv_obj_create(scr);
@@ -285,7 +317,9 @@ static void dialog_show_internal(bool monitor_mode)
         lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
 
         lv_obj_t *lbl = lv_label_create(box);
-        lv_label_set_text(lbl, "Directory not found:\n" UI_CONFIG_DECK_PATH "\n\nTap to dismiss.");
+        char msg[128];
+        snprintf(msg, sizeof(msg), "Directory not found:\n%s\n\nTap to dismiss.", cfg_dir);
+        lv_label_set_text(lbl, msg);
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xcccccc), 0);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
         lv_obj_center(lbl);
@@ -294,7 +328,7 @@ static void dialog_show_internal(bool monitor_mode)
 
     if (s_scan.count == 0) {
         ui_config_scan_free(&s_scan);
-        ESP_LOGW("CFG_DLG", "No JSON files found in %s", UI_CONFIG_DECK_PATH);
+        ESP_LOGW("CFG_DLG", "No JSON files found in %s", cfg_dir);
         return;
     }
 
@@ -339,8 +373,10 @@ static void dialog_show_internal(bool monitor_mode)
     lv_obj_set_style_pad_hor(title_bar, 16, 0);
     lv_obj_clear_flag(title_bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *title_lbl = lv_label_create(title_bar);
-    lv_label_set_text(title_lbl, s_monitor_mode ? "Select Monitor Config"
-                                                 : "Select Config");
+    const char *title_text = "Select Config";
+    if (s_dialog_mode == CFG_DIALOG_MONITOR) title_text = "Select Monitor Config";
+    else if (s_dialog_mode == CFG_DIALOG_MEDIA) title_text = "Select Media Config";
+    lv_label_set_text(title_lbl, title_text);
     lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title_lbl, lv_color_hex(0xffffff), 0);
     lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, 0, 0);
@@ -459,8 +495,10 @@ static void dialog_show_internal(bool monitor_mode)
 
     /* Pre-select the currently active config. */
     s_active_fname[0] = '\0';
-    if (s_monitor_mode)
+    if (s_dialog_mode == CFG_DIALOG_MONITOR)
         ui_monitor_config_nvs_load(s_active_fname, sizeof(s_active_fname));
+    else if (s_dialog_mode == CFG_DIALOG_MEDIA)
+        ui_media_config_nvs_load(s_active_fname, sizeof(s_active_fname));
     else
         ui_config_nvs_load(s_active_fname, sizeof(s_active_fname));
     for (int i = 0; i < s_scan.count; i++) {
@@ -476,10 +514,15 @@ static void dialog_show_internal(bool monitor_mode)
 
 void ui_config_dialog_show(void)
 {
-    dialog_show_internal(false);
+    dialog_show_internal(CFG_DIALOG_DECK);
 }
 
 void ui_monitor_config_dialog_show(void)
 {
-    dialog_show_internal(true);
+    dialog_show_internal(CFG_DIALOG_MONITOR);
+}
+
+void ui_media_config_dialog_show(void)
+{
+    dialog_show_internal(CFG_DIALOG_MEDIA);
 }

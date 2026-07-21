@@ -190,6 +190,19 @@ void ui_settings_monitor_reload(void)
     xTaskCreate(enter_monitor_task, "mon_reload", 4096, NULL, 3, NULL);
 }
 
+void ui_settings_media_reload(void)
+{
+    /* Same shape as ui_settings_monitor_reload() above -- Media's
+     * exit/enter pair is already the lightweight kind (no page/button
+     * rebuild), so reuse enter_media_task() as-is instead of a dedicated
+     * preload task like Deck's config switch needs. */
+    ui_settings_deselect();
+    ui_media_exit();
+    ui_show_switching_screen("Applying config...");
+    lv_refr_now(NULL);
+    xTaskCreate(enter_media_task, "media_reload", 4096, NULL, 3, NULL);
+}
+
 /* -----------------------------------------------------------------------
  * Item callbacks
  *
@@ -207,6 +220,8 @@ static void item_config_cb(lv_event_t *e)
 {
     if (s_mode == UI_MODE_MONITOR)
         ui_monitor_config_dialog_show();
+    else if (s_mode == UI_MODE_MEDIA)
+        ui_media_config_dialog_show();
     else
         ui_config_dialog_show();
 }
@@ -488,7 +503,7 @@ static void item_boot_anim_cb(lv_event_t *e)
  * growing this pattern.
  * ----------------------------------------------------------------------- */
 static const setting_node_t s_system_menu[] = {
-    { "Select Config", SETTING_ACTION, SETMASK_BOTH, item_config_cb, NULL, 0 },
+    { "Select Config", SETTING_ACTION, SETMASK_ALL, item_config_cb, NULL, 0 },
     { "MSC Mode",       SETTING_ACTION, SETMASK_ALL,  item_msc_cb,    NULL, 0 },
     { "Info",            SETTING_ACTION, SETMASK_ALL,  item_info_cb,  NULL, 0 },
 };
