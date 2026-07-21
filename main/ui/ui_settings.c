@@ -509,9 +509,9 @@ static const setting_node_t s_system_menu[] = {
 };
 
 static const setting_node_t s_root_menu[] = {
-    { "Keyboard Mode", SETTING_ACTION, SETMASK_DECK,    item_keyboard_cb,  NULL,           0 },
-    { "Boot Animation", SETTING_ACTION, SETMASK_ALL,     item_boot_anim_cb, NULL,           0 },
     { "System",          SETTING_SUBMENU, SETMASK_ALL,    NULL,              s_system_menu,  3 },
+    { "Boot Animation", SETTING_ACTION, SETMASK_ALL,     item_boot_anim_cb, NULL,           0 },
+    { "Keyboard Mode", SETTING_ACTION, SETMASK_DECK,    item_keyboard_cb,  NULL,           0 },
     { "Monitor Mode",  SETTING_ACTION, SETMASK_DECK,    item_mode_cb,      NULL,           0 },
     { "Deck Mode",      SETTING_ACTION, SETMASK_MONITOR, item_mode_cb,      NULL,           0 },
     { "Media Mode",     SETTING_ACTION, SETMASK_BOTH,    item_mode_to_media_cb,   NULL,     0 },
