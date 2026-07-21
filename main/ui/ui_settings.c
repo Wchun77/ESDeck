@@ -619,17 +619,12 @@ static void render_current_level(void)
              * reconcile between a row-tap and the switch's own tap. */
             lv_obj_t *sw = lv_switch_create(item);
             lv_obj_align(sw, LV_ALIGN_RIGHT_MID, -8, 0);
-            /* lv_theme_default wires an 80ms transition to
-             * LV_PART_INDICATOR|LV_STATE_CHECKED, which visibly animates
-             * on this initial add_state too (the "flash" from off to on
-             * when this page is reopened while already on) -- cosmetic
-             * only. A previous attempt to null out the transition style
-             * for just this call crashed the device (LoadProhibited in
-             * lv_obj_set_state -- passing NULL to
-             * lv_obj_set_style_transition() is stored and later
-             * dereferenced as if it were a real descriptor, it does not
-             * mean "no transition"). Not worth re-risking a crash over an
-             * 80ms cosmetic flash -- leave it as a plain add_state. */
+            /* Plain add_state is safe here -- it used to visibly flash
+             * off->on for a frame on reopen (LVGL drawing the fresh
+             * switch's default state before this applies), fixed at the
+             * theme level via CONFIG_LV_THEME_DEFAULT_TRANSITION_TIME=0
+             * in sdkconfig rather than worked around per-widget here.
+             * See https://github.com/lvgl/lvgl/issues/3157. */
             if (node->get_state_cb && node->get_state_cb())
                 lv_obj_add_state(sw, LV_STATE_CHECKED);
             lv_obj_add_event_cb(sw, toggle_switch_cb, LV_EVENT_VALUE_CHANGED, (void *)node);
