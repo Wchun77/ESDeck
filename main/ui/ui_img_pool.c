@@ -14,6 +14,13 @@ extern void        ui_deck_lazy_bg_remove_widgets(int page_idx);
 extern int         ui_deck_page_count(void);
 extern const char *ui_deck_page_bg_image(int page_idx);
 
+/* Settings' own bg image shares this same pool while Deck mode is active
+ * (see ui_settings.c's settings_lazy_bg_set()) -- it isn't one of Deck's
+ * configured page backgrounds, so the eviction match loop below needs a
+ * separate check + removal callback for it specifically. */
+extern void ui_settings_bg_widget_remove(void);
+extern void ui_settings_current_bg_path(char *out, size_t out_size);
+
 /* -----------------------------------------------------------------------
  * Pool entry
  * ----------------------------------------------------------------------- */
@@ -102,7 +109,8 @@ lv_img_dsc_t *ui_img_pool_decode(const char *path)
         }
         if (lru_idx >= 0) {
             ESP_LOGI("IMG", "LRU evict: %s", s_pool[lru_idx].key);
-            int n = ui_deck_page_count();
+            int  n       = ui_deck_page_count();
+            bool matched = false;
             for (int p = 0; p < n; p++) {
                 const char *bg = ui_deck_page_bg_image(p);
                 if (!bg || !bg[0]) continue;
@@ -110,7 +118,17 @@ lv_img_dsc_t *ui_img_pool_decode(const char *path)
                 snprintf(chk, sizeof(chk), "S:%s/%s", UI_CONFIG_BG_PATH, bg);
                 if (strcmp(chk, s_pool[lru_idx].key) == 0) {
                     ui_deck_lazy_bg_remove_widgets(p);
+                    matched = true;
                     break;
+                }
+            }
+            if (!matched) {
+                /* Not one of Deck's own pages -- check whether it's
+                 * Settings' bg instead (it shares this pool too). */
+                char settings_path[sizeof("S:") + sizeof(UI_CONFIG_BG_PATH) + 1 + UI_CONFIG_BG_LEN];
+                ui_settings_current_bg_path(settings_path, sizeof(settings_path));
+                if (settings_path[0] && strcmp(settings_path, s_pool[lru_idx].key) == 0) {
+                    ui_settings_bg_widget_remove();
                 }
             }
             heap_caps_free((void *)s_pool[lru_idx].dsc.data);
@@ -188,6 +206,12 @@ void ui_img_pool_free(void)
     s_pool     = NULL;
     s_pool_cap = 0;
     s_pool_n   = 0;
+
+    /* Settings may have been borrowing a slot in this pool -- that
+     * buffer is now gone, so its widget/reference must go too, or it's
+     * left pointing at freed PSRAM the next time Settings opens (same
+     * reasoning as ui_monitor_img_free_all()'s call to this). */
+    ui_settings_bg_widget_remove();
 }
 
 void ui_img_pool_load(const deck_cfg_t *cfg)
@@ -204,7 +228,10 @@ void ui_img_pool_load(const deck_cfg_t *cfg)
         icon_count += cfg->pages[p].button_count;
     }
 
-    int cap = icon_count + bg_count;
+    /* +1 reserves a slot for Settings' own bg image, which shares this
+     * same pool while Deck mode is active (see ui_settings.c's
+     * settings_lazy_bg_set()) instead of holding a separate buffer. */
+    int cap = icon_count + bg_count + 1;
     if (cap == 0) return;
 
     s_pool     = calloc((size_t)cap, sizeof(psram_img_t));

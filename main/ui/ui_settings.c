@@ -7,6 +7,7 @@
 #include "ui_deck.h"
 #include "ui_media.h"
 #include "ui_img_pool.h"
+#include "ui_monitor_img.h"
 #include "ui_config.h"
 #include "ui.h"
 #include "ble/ble_manager.h"
@@ -89,19 +90,37 @@ static bool       s_gear_has_icon = false; /* true = gear shows side_icon image,
 static char s_side_icon[UI_SETTINGS_SIDE_ICON_LEN];
 static char s_bg_image[UI_SETTINGS_BG_LEN];
 
-/* Settings page bg image -- decoded lazily into a private PSRAM buffer the
- * first time the page is selected after a (re)load (see
- * settings_lazy_bg_set()). Not routed through ui_img_pool: that pool's
- * capacity is sized for the current Deck config's own assets, and Settings
- * exists outside both Deck and Monitor, so it gets its own buffer -- same
- * idea as ui_monitor_img.c's decode. s_bg_dsc is a fixed static address
- * reused across config switches (only its contents change), so
- * ui_settings_apply_appearance() must invalidate LVGL's image cache when
- * swapping it out, same as ui_monitor_img_free_all() does for Monitor's
- * per-config bg images. */
-static lv_img_dsc_t s_bg_dsc;
-static bool         s_bg_loaded  = false;  /* true once s_bg_dsc holds real pixel data AND the bg+mask widgets exist on s_panel */
-static bool         s_bg_applied = false;  /* true once settings_lazy_bg_set() has run for the current s_bg_image (even if it failed) -- guards against re-running every select */
+/* Settings page bg image -- decoded lazily the first time the page is
+ * selected after a (re)load (see settings_lazy_bg_set()).
+ *
+ * Settings shares whichever mode-specific lazy/LRU pool is currently
+ * active instead of holding its own always-resident buffer that doesn't
+ * compete/cooperate with page images for the same PSRAM budget:
+ *   - Deck mode:    borrows a slot in ui_img_pool (same pool Deck's own
+ *                    page backgrounds use, marked as bg so it's eligible
+ *                    for LRU eviction like any of them).
+ *   - Monitor mode: borrows ui_monitor_img's reserved
+ *                    MON_IMG_SETTINGS_SLOT, same idea.
+ *   - Anything else (Media today, or any future mode with no pool of its
+ *     own): falls back to a private PSRAM buffer (s_bg_dsc) that
+ *     Settings decodes and frees itself, same as before this existed.
+ *
+ * s_bg_dsc_ptr points at whichever of the above is currently backing the
+ * displayed image; s_bg_owns_buf is only true for the standalone/private
+ * case, since that's the only one where Settings itself is responsible
+ * for freeing the pixel buffer -- the pool cases own their own buffer
+ * and can free it out from under Settings via LRU eviction or mode exit,
+ * see ui_settings_bg_widget_remove().
+ *
+ * s_bg_dsc is a fixed static address reused across config switches (only
+ * its contents change) in the standalone case, so ui_settings_apply_
+ * appearance() must invalidate LVGL's image cache when swapping it out,
+ * same as ui_monitor_img_free_all() does for Monitor's per-config bg
+ * images. */
+static lv_img_dsc_t  s_bg_dsc;
+static lv_img_dsc_t *s_bg_dsc_ptr  = NULL;  /* NULL until a decode has succeeded */
+static bool          s_bg_owns_buf = false; /* true only for the standalone/private-buffer case */
+static bool          s_bg_applied  = false; /* true once settings_lazy_bg_set() has run for the current s_bg_image (even if it failed) -- guards against re-running every select */
 
 /* Navigation stack -- index 0 is always the root menu. */
 static const setting_node_t *s_menu_stack[SETTINGS_STACK_MAX];
@@ -653,12 +672,69 @@ static void render_current_level(void)
     lv_obj_clear_flag(s_back_btn, LV_OBJ_FLAG_HIDDEN);
 }
 
+/* Standalone decode path -- used only when there's no lazy/LRU pool to
+ * join for the current mode (Media today). Manual JPEG/PNG decode into
+ * a caller-owned PSRAM buffer; caller is responsible for freeing it
+ * later (heap_caps_free(out->data)). Returns false (and *out untouched)
+ * on any failure. */
+static bool settings_decode_standalone(const char *bg_path, lv_img_dsc_t *out)
+{
+    lv_img_decoder_dsc_t dec;
+    memset(&dec, 0, sizeof(dec));
+    if (lv_img_decoder_open(&dec, bg_path, lv_color_white(), 0) != LV_RES_OK) {
+        ESP_LOGW("SETTINGS", "bg decode open failed: %s", bg_path);
+        return false;
+    }
+
+    uint32_t    w  = dec.header.w;
+    uint32_t    h  = dec.header.h;
+    lv_img_cf_t cf = dec.header.cf;
+    uint8_t     px = lv_img_cf_get_px_size(cf) / 8;
+    if (px == 0) { cf = LV_IMG_CF_TRUE_COLOR; px = sizeof(lv_color_t); }   /* JPEG reports 0 */
+
+    size_t   sz  = (size_t)w * h * px;
+    uint8_t *buf = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    bool ok = (buf != NULL);
+    if (ok) {
+        if (dec.img_data) {
+            memcpy(buf, dec.img_data, sz);
+        } else {
+            size_t stride = (size_t)w * px;
+            for (lv_coord_t y = 0; y < (lv_coord_t)h && ok; y++) {
+                if (lv_img_decoder_read_line(&dec, 0, y, (lv_coord_t)w,
+                                              buf + (size_t)y * stride) != LV_RES_OK) {
+                    ok = false;
+                }
+            }
+        }
+    }
+    lv_img_decoder_close(&dec);
+
+    if (!ok) {
+        ESP_LOGE("SETTINGS", "bg decode failed: %s", bg_path);
+        if (buf) heap_caps_free(buf);
+        return false;
+    }
+
+    out->header.cf          = cf;
+    out->header.always_zero = 0;
+    out->header.reserved    = 0;
+    out->header.w           = w;
+    out->header.h           = h;
+    out->data_size          = sz;
+    out->data               = buf;
+
+    ESP_LOGI("SETTINGS", "cached %s [%lux%lu %lu KB]", bg_path,
+             (unsigned long)w, (unsigned long)h, (unsigned long)(sz / 1024));
+    return true;
+}
+
 /* Lazily decode + apply the Settings page background the first time the
  * page is selected -- same "decode on first use, skip after" shape as
- * ui_deck_lazy_bg_set(), but decodes into a private PSRAM buffer instead
- * of going through ui_img_pool (see s_bg_dsc comment above). Inserted at
- * child index 0/1 of s_panel, same trick ui_deck.c uses to slide bg+mask
- * behind already-existing content (s_content here, btn_cont there). */
+ * ui_deck_lazy_bg_set(). Which backing store it decodes into depends on
+ * the active mode (see s_bg_dsc_ptr comment above). Inserted at child
+ * index 0/1 of s_panel, same trick ui_deck.c uses to slide bg+mask behind
+ * already-existing content (s_content here, btn_cont there). */
 static void settings_lazy_bg_set(void)
 {
     if (s_bg_applied || s_bg_image[0] == '\0') return;
@@ -666,73 +742,53 @@ static void settings_lazy_bg_set(void)
     char bg_path[sizeof("S:") + sizeof(UI_CONFIG_BG_PATH) + 1 + UI_SETTINGS_BG_LEN];
     snprintf(bg_path, sizeof(bg_path), "S:%s/%s", UI_CONFIG_BG_PATH, s_bg_image);
 
-    if (!s_bg_loaded) {
-        lv_img_decoder_dsc_t dec;
-        memset(&dec, 0, sizeof(dec));
-        if (lv_img_decoder_open(&dec, bg_path, lv_color_white(), 0) != LV_RES_OK) {
-            ESP_LOGW("SETTINGS", "bg decode open failed: %s", bg_path);
+    if (!s_bg_dsc_ptr) {
+        if (s_mode == UI_MODE_DECK) {
+            /* Join Deck's own pool -- shares the same PSRAM budget and
+             * LRU eviction as Deck's page backgrounds, in both
+             * directions (see ui_img_pool.c's eviction match loop). */
+            lv_img_dsc_t *dsc = ui_img_pool_decode(bg_path);
+            if (dsc) {
+                ui_img_pool_mark_bg(bg_path);
+                s_bg_dsc_ptr  = dsc;
+                s_bg_owns_buf = false;
+            }
+        } else if (s_mode == UI_MODE_MONITOR) {
+            /* Join Monitor's per-page pool via its reserved slot. */
+            ui_monitor_img_set_path(MON_IMG_SETTINGS_SLOT, bg_path);
+            if (ui_monitor_img_load_one(MON_IMG_SETTINGS_SLOT)) {
+                s_bg_dsc_ptr  = ui_monitor_img_get(MON_IMG_SETTINGS_SLOT);
+                s_bg_owns_buf = false;
+            }
+        } else {
+            /* No lazy/LRU pool exists for this mode (Media today) --
+             * fall back to a private buffer like before this existed. */
+            if (settings_decode_standalone(bg_path, &s_bg_dsc)) {
+                s_bg_dsc_ptr  = &s_bg_dsc;
+                s_bg_owns_buf = true;
+            }
+        }
+
+        if (!s_bg_dsc_ptr) {
             s_bg_applied = true;   /* don't retry every select */
             return;
         }
-
-        uint32_t    w  = dec.header.w;
-        uint32_t    h  = dec.header.h;
-        lv_img_cf_t cf = dec.header.cf;
-        uint8_t     px = lv_img_cf_get_px_size(cf) / 8;
-        if (px == 0) { cf = LV_IMG_CF_TRUE_COLOR; px = sizeof(lv_color_t); }   /* JPEG reports 0 */
-
-        size_t   sz  = (size_t)w * h * px;
-        uint8_t *buf = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        bool ok = (buf != NULL);
-        if (ok) {
-            if (dec.img_data) {
-                memcpy(buf, dec.img_data, sz);
-            } else {
-                size_t stride = (size_t)w * px;
-                for (lv_coord_t y = 0; y < (lv_coord_t)h && ok; y++) {
-                    if (lv_img_decoder_read_line(&dec, 0, y, (lv_coord_t)w,
-                                                  buf + (size_t)y * stride) != LV_RES_OK) {
-                        ok = false;
-                    }
-                }
-            }
-        }
-        lv_img_decoder_close(&dec);
-
-        if (!ok) {
-            ESP_LOGE("SETTINGS", "bg decode failed: %s", bg_path);
-            if (buf) heap_caps_free(buf);
-            s_bg_applied = true;
-            return;
-        }
-
-        s_bg_dsc.header.cf          = cf;
-        s_bg_dsc.header.always_zero = 0;
-        s_bg_dsc.header.reserved    = 0;
-        s_bg_dsc.header.w           = w;
-        s_bg_dsc.header.h           = h;
-        s_bg_dsc.data_size          = sz;
-        s_bg_dsc.data               = buf;
-        s_bg_loaded                 = true;
-
-        ESP_LOGI("SETTINGS", "cached %s [%lux%lu %lu KB]", bg_path,
-                 (unsigned long)w, (unsigned long)h, (unsigned long)(sz / 1024));
     }
 
     int page_w = SCREEN_W - SIDEBAR_W;
     int page_h = SCREEN_H;
 
-    uint32_t zoom_x   = (uint32_t)page_w * 256 / s_bg_dsc.header.w;
-    uint32_t zoom_y   = (uint32_t)page_h * 256 / s_bg_dsc.header.h;
+    uint32_t zoom_x   = (uint32_t)page_w * 256 / s_bg_dsc_ptr->header.w;
+    uint32_t zoom_y   = (uint32_t)page_h * 256 / s_bg_dsc_ptr->header.h;
     uint32_t zoom     = (zoom_x > zoom_y) ? zoom_x : zoom_y;
-    int32_t  scaled_w = (int32_t)s_bg_dsc.header.w * (int32_t)zoom / 256;
-    int32_t  scaled_h = (int32_t)s_bg_dsc.header.h * (int32_t)zoom / 256;
+    int32_t  scaled_w = (int32_t)s_bg_dsc_ptr->header.w * (int32_t)zoom / 256;
+    int32_t  scaled_h = (int32_t)s_bg_dsc_ptr->header.h * (int32_t)zoom / 256;
     int32_t  off_x    = ((int32_t)page_w - scaled_w) / 2;
     int32_t  off_y    = ((int32_t)page_h - scaled_h) / 2;
 
     lv_obj_t *bg = lv_img_create(s_panel);
     lv_obj_move_to_index(bg, 0);
-    lv_img_set_src(bg, &s_bg_dsc);
+    lv_img_set_src(bg, s_bg_dsc_ptr);
     lv_img_set_pivot(bg, 0, 0);
     lv_obj_set_pos(bg, off_x, off_y);
     lv_obj_set_size(bg, page_w, page_h);
@@ -754,26 +810,68 @@ static void settings_lazy_bg_set(void)
     s_bg_applied = true;
 }
 
+/* Called externally (extern, no header decl -- same convention as
+ * ui_deck.c's ui_deck_lazy_bg_remove_widgets()) by ui_img_pool.c /
+ * ui_monitor_img.c when Settings' borrowed pool entry gets LRU-evicted,
+ * or when that whole pool gets torn down on a mode exit. The buffer
+ * itself is already freed by the caller (whichever pool owned it) --
+ * this only tears down the now-stale widgets and forgets the reference,
+ * so the next select decodes fresh (and re-competes for a pool slot
+ * then). Must never free anything: s_bg_owns_buf is always false
+ * whenever this can fire, since the standalone case has no pool to be
+ * evicted from. Safe to call even when Settings has nothing attached. */
+void ui_settings_bg_widget_remove(void)
+{
+    if (!s_bg_dsc_ptr) return;
+
+    lv_obj_t *bg = lv_obj_get_child(s_panel, 0);
+    if (bg) lv_obj_del(bg);
+    lv_obj_t *mask = lv_obj_get_child(s_panel, 0);   /* shifted into index 0 */
+    if (mask) lv_obj_del(mask);
+
+    s_bg_dsc_ptr  = NULL;
+    s_bg_owns_buf = false;
+    s_bg_applied  = false;   /* force re-decode next select */
+
+    lv_img_cache_invalidate_src(NULL);
+}
+
+/* Exposes the full LVGL-FS path Settings' bg currently uses, so
+ * ui_img_pool.c's LRU eviction can recognize when the pool entry it's
+ * about to evict is actually Settings' own image (which isn't one of
+ * Deck's configured page backgrounds, so the usual page-match loop
+ * won't find it). Writes "" if Settings has no bg configured. */
+void ui_settings_current_bg_path(char *out, size_t out_size)
+{
+    if (s_bg_image[0] == '\0') { out[0] = '\0'; return; }
+    snprintf(out, out_size, "S:%s/%s", UI_CONFIG_BG_PATH, s_bg_image);
+}
+
 /* Drop the currently-attached bg + mask (if any) and free the decoded
- * buffer, so the next settings_lazy_bg_set() call starts clean for a
- * different image. Only ever called while s_panel is hidden (Settings is
- * always deselected before a Deck/Monitor rebuild -- see
- * ui_settings_apply_appearance() callers), so there's no visible flicker
- * from deleting live content. */
+ * buffer *if Settings owns it*, so the next settings_lazy_bg_set() call
+ * starts clean for a different image. Only ever called while s_panel is
+ * hidden (Settings is always deselected before a Deck/Monitor rebuild --
+ * see ui_settings_apply_appearance() callers), so there's no visible
+ * flicker from deleting live content. */
 static void settings_bg_release(void)
 {
-    if (s_bg_loaded) {
+    if (s_bg_dsc_ptr) {
         lv_obj_t *bg = lv_obj_get_child(s_panel, 0);
         if (bg) lv_obj_del(bg);
         lv_obj_t *mask = lv_obj_get_child(s_panel, 0);   /* shifted into index 0 */
         if (mask) lv_obj_del(mask);
     }
-    if (s_bg_dsc.data) {
+    if (s_bg_owns_buf && s_bg_dsc.data) {
         heap_caps_free((void *)s_bg_dsc.data);
         s_bg_dsc.data = NULL;
     }
-    s_bg_loaded  = false;
-    s_bg_applied = false;
+    /* Pool-borrowed cases: don't free anything here and don't touch the
+     * pool entry either -- that pool owns its own lifecycle (LRU
+     * eviction, or a mode-exit free_all/pool_free that already calls
+     * ui_settings_bg_widget_remove() itself). Just forget our reference. */
+    s_bg_dsc_ptr  = NULL;
+    s_bg_owns_buf = false;
+    s_bg_applied  = false;
 
     /* s_bg_dsc lives at a fixed static address reused across config
      * switches -- LVGL's image cache keys decoded entries by that pointer,
