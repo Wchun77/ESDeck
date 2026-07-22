@@ -21,8 +21,8 @@ bool        fs_sd_format(void);
 void        fs_sd_scan(void);
 
 /* Create any missing app folders under FS_SD_MOUNT_POINT (config/deck,
- * config/monitor, assets/icons, assets/backgrounds, assets/fonts).
- * Never touches or removes existing files/folders. */
+ * config/monitor, assets/icons, assets/backgrounds, assets/fonts/bin/clock,
+ * assets/fonts/ttf, ...). Never touches or removes existing files/folders. */
 void        fs_sd_ensure_layout(void);
 
 void        fs_sd_usage_printf(void);
