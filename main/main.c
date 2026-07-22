@@ -10,6 +10,8 @@
 #include "nvs_manager/nvs_manager.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_log.h"
+#include "esp_heap_caps.h"
 
 void app_main(void)
 {
@@ -44,9 +46,14 @@ void app_main(void)
     ui_ota_check_and_prompt();
 
     ui_preload_wait();
+    ESP_LOGI("MAIN", "before usb/ble init - PSRAM free: %d B",
+             heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+
     usb_manager_init();   /* preload task continues in background after this */
     ble_manager_init();   /* host stack up, advertising stays off until the
                             * Settings Bluetooth switch turns it on */
+    ESP_LOGI("MAIN", "after usb/ble init - PSRAM free: %d B",
+             heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     if (lvgl_port_lock(-1)) {
         my_ui_init();

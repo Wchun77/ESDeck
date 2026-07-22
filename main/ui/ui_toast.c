@@ -5,7 +5,14 @@
 #include <stdio.h>
 
 #define TOAST_QUEUE_MAX   8
-#define TOAST_LABEL_LEN   32
+/* 32 was fine for our own short, fixed labels ("BLE Connected"); real ANCS
+ * title/message text needs real headroom -- 96 bytes covers a short CJK
+ * sentence (3 bytes/glyph in UTF-8) with room to spare. Actual display
+ * width is still capped by TOAST_W regardless -- this is the data-level
+ * cap (memory + never showing an unbounded string), separate from
+ * whatever long-mode/wrap behavior the label ends up needing once real
+ * message content is wired in. */
+#define TOAST_LABEL_LEN   96
 #define TOAST_KEY_LEN     32
 
 #define TOAST_W           360
@@ -55,6 +62,48 @@ static void toast_set_y(void *obj, int32_t v)
 /* -----------------------------------------------------------------------
  * Label text
  * ----------------------------------------------------------------------- */
+
+/* Copy src into dst (dst_size bytes total, nul included), truncating at
+ * TOAST_LABEL_LEN if needed. snprintf("%s") alone would also stay in
+ * bounds, but it can slice a multi-byte UTF-8 sequence in half at the cut
+ * point -- fine for our own ASCII labels, not fine once real ANCS text
+ * (CJK, 3 bytes/glyph) flows through here, since a chopped sequence can
+ * render as a mangled/garbage glyph. This backs off to the nearest UTF-8
+ * character boundary instead, and appends "..." so a truncated string is
+ * visibly truncated rather than silently cut off. */
+static void toast_copy_truncated(char *dst, size_t dst_size, const char *src)
+{
+    if (dst_size == 0) return;
+
+    size_t src_len = strlen(src);
+    if (src_len < dst_size) {
+        memcpy(dst, src, src_len + 1);
+        return;
+    }
+
+    static const char ellipsis[] = "...";
+    size_t ellipsis_len = sizeof(ellipsis) - 1;
+
+    if (dst_size <= ellipsis_len + 1) {
+        /* Degenerate buffer, no room for the ellipsis -- hard truncate. */
+        size_t n = dst_size - 1;
+        memcpy(dst, src, n);
+        dst[n] = '\0';
+        return;
+    }
+
+    size_t max_copy = dst_size - 1 - ellipsis_len;
+    /* UTF-8 continuation bytes are 10xxxxxx -- back off until we land on
+     * a lead byte (or ASCII byte), never mid-sequence. */
+    while (max_copy > 0 && (src[max_copy] & 0xC0) == 0x80) {
+        max_copy--;
+    }
+
+    memcpy(dst, src, max_copy);
+    memcpy(dst + max_copy, ellipsis, ellipsis_len);
+    dst[max_copy + ellipsis_len] = '\0';
+}
+
 static void toast_refresh_label(void)
 {
     char buf[TOAST_LABEL_LEN + 16];
@@ -152,7 +201,7 @@ void ui_toast_push(const char *label, int count, const char *merge_key)
 
     if (has_key) {
         if (s_showing && strcmp(s_current.merge_key, merge_key) == 0) {
-            snprintf(s_current.label, sizeof(s_current.label), "%s", label);
+            toast_copy_truncated(s_current.label, sizeof(s_current.label), label);
             s_current.count = count;
             toast_refresh_label();
             /* Restart the hold window so the update gets its own full
@@ -169,7 +218,7 @@ void ui_toast_push(const char *label, int count, const char *merge_key)
         for (int i = 0; i < s_queue_count; i++) {
             int idx = (s_queue_head + i) % TOAST_QUEUE_MAX;
             if (strcmp(s_queue[idx].merge_key, merge_key) == 0) {
-                snprintf(s_queue[idx].label, sizeof(s_queue[idx].label), "%s", label);
+                toast_copy_truncated(s_queue[idx].label, sizeof(s_queue[idx].label), label);
                 s_queue[idx].count = count;
                 return;
             }
@@ -179,7 +228,7 @@ void ui_toast_push(const char *label, int count, const char *merge_key)
     if (s_queue_count >= TOAST_QUEUE_MAX) return;   /* drop -- queue full */
 
     int idx = (s_queue_head + s_queue_count) % TOAST_QUEUE_MAX;
-    snprintf(s_queue[idx].label, sizeof(s_queue[idx].label), "%s", label);
+    toast_copy_truncated(s_queue[idx].label, sizeof(s_queue[idx].label), label);
     snprintf(s_queue[idx].merge_key, sizeof(s_queue[idx].merge_key), "%s", has_key ? merge_key : "");
     s_queue[idx].count = count;
     s_queue_count++;

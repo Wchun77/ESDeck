@@ -119,9 +119,8 @@ lv_font_conv --font Oxanium-Bold.ttf --size 270 --bpp 4 --range 0x30-0x3A --form
 ## 部署
 
 將轉換好的 `.bin` 檔透過 MSC 模式放進 SD card 的 `assets/fonts/bin/clock/` 資料夾（這層路徑對應
-firmware `app_config.h` 裡的 `SD_DIR_ASSETS_FONTS_BIN_CLOCK`；`assets/fonts/` 底下依載入機制分
-`bin/`（預先轉換好的點陣字型，clock 專用）跟 `ttf/`（執行期用 FreeType 現場渲染，給中文通知用），
-不是同一套機制，不要混放）：
+firmware `app_config.h` 裡的 `SD_DIR_ASSETS_FONTS_BIN_CLOCK`；`assets/fonts/bin/` 底下依「功能」分
+資料夾，`clock/` 是 Monitor 時鐘專用，`notify/` 是通知用的中文字，各自對應不同的字元集，不要混放）：
 
 ```
 /sdcard/assets/fonts/bin/clock/oxanium_270.bin
@@ -130,3 +129,41 @@ firmware `app_config.h` 裡的 `SD_DIR_ASSETS_FONTS_BIN_CLOCK`；`assets/fonts/`
 ```
 
 在 Monitor Select Config 選好 config 後，重新套用即生效。
+
+---
+
+## 通知用中文字體（notify.bin）
+
+BLE/ANCS 通知顯示用的中文字體，跟 Monitor 時鐘字體走同一套 `.bin` 機制，**不是**FreeType 動態渲染
+——原本想讓使用者自己丟任意 TTF 上去現場用 FreeType 解析，但 FreeType 的堆疊需求沒辦法預先框
+死（同一顆字型裡結構複雜的字，堆疊需求可能遠超預期，開機時測過的字通過了，不代表之後手機傳來的
+其他字不會讓它爆掉），所以改用跟時鐘字體一樣、先轉換好的點陣字型，只收錄常用字，不開放使用者自訂
+上傳任意字型檔。
+
+### 字元集怎麼選
+
+`lv_font_conv` 的 `--range` 只適合連續區間（像數字 `0x30-0x39`），中文常用字在 Unicode 裡是分散
+的，要用 `--symbols`（直接給一串字元）或 `--symbols-file`（給一個純文字檔，內容就是要收錄的字）：
+
+```cmd
+lv_font_conv --font NotoSansTC-Regular.ttf --size 24 --bpp 4 --symbols-file common_hanzi.txt --format bin -o notify.bin
+```
+
+`common_hanzi.txt` 建議用「常用國字標準字體表」或任何高頻字清單（例如前 2000~3000 字），字數
+越少，`.bin` 檔案越小、SD 卡佔用越少；生僻字不用收錄，畫到時 LVGL 會顯示內建的缺字佔位符，不是
+危險狀況，只是那個字剛好不在收錄範圍內。
+
+英數字元也要一併收錄（App 名稱、時間戳記等常常混著英數），例如：
+
+```cmd
+lv_font_conv --font NotoSansTC-Regular.ttf --size 24 --bpp 4 --symbols-file common_hanzi.txt -r 0x20-0x7E --format bin -o notify.bin
+```
+
+### 部署
+
+```
+/sdcard/assets/fonts/bin/notify/notify.bin
+```
+
+對應 firmware `app_config.h` 裡的 `SD_DIR_ASSETS_FONTS_BIN_NOTIFY`。檔名目前是寫死的 `notify.bin`
+（第一階段先驗證載入/渲染，之後才會加 Settings 裡的字體選擇功能）。

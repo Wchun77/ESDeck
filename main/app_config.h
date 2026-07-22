@@ -36,25 +36,30 @@
 #define SD_DIR_ASSETS_SIDE_ICON "assets/side_icons"
 #define SD_DIR_UPDATE           "update"
 
-/* assets/fonts splits by *mechanism*, not by feature -- .bin (pre-rasterized
- * via lv_font_conv, loaded with lv_font_load()) and .ttf (raw outline font,
- * rasterized on demand at runtime via FreeType) are two completely
- * different loading paths, so they get their own subtree regardless of
- * which feature ends up using either one.
+/* assets/fonts/bin/ holds pre-rasterized fonts (converted ahead of time via
+ * lv_font_conv --format bin, loaded on-device with lv_font_load()) -- this
+ * is the ONLY font mechanism this project uses. An earlier attempt used
+ * FreeType to rasterize arbitrary user-supplied .ttf files on-device at
+ * runtime instead; that was abandoned (see git history on this file)
+ * because FreeType's rasterizer has stack requirements that can't be
+ * bounded ahead of time -- crashes were reproduced even on a 6KB
+ * dedicated task stack, and there's no way to guarantee safety against a
+ * font file we don't control. Pre-rasterized .bin fonts are bitmap-blit
+ * only (no hinting bytecode interpreter, no recursive composite-glyph
+ * resolution), so that entire crash class doesn't apply, at the cost of
+ * only covering whatever glyph set was baked in ahead of time.
  *
- * assets/fonts/bin/ additionally has a per-feature leaf (clock/ today)
- * since .bin fonts are pre-converted for one specific pixel size/feature
- * and aren't reusable across features the way a .ttf is -- if something
- * else needs its own .bin fonts later, it gets its own sibling leaf here
- * (assets/fonts/bin/<feature>/), same idea as assets/boot/<name>/.
- *
- * assets/fonts/ttf/ stays flat on purpose: a .ttf is inherently general
- * purpose (FreeType rasterizes whatever glyph is asked for), so there's
- * no equivalent per-feature split to make until a second .ttf-consuming
- * feature actually shows up. */
-#define SD_DIR_ASSETS_FONTS           "assets/fonts"
-#define SD_DIR_ASSETS_FONTS_BIN_CLOCK SD_DIR_ASSETS_FONTS "/bin/clock"
-#define SD_DIR_ASSETS_FONTS_TTF       SD_DIR_ASSETS_FONTS "/ttf"
+ * Each feature gets its own leaf under bin/ since a .bin font is
+ * pre-converted for one specific pixel size/glyph-set/feature and isn't
+ * reusable across features the way a .ttf would have been --
+ * assets/fonts/bin/<feature>/, same idea as assets/boot/<name>/.
+ *   bin/clock/  -- Monitor clock digits (oxanium_*.bin)
+ *   bin/notify/ -- BLE/ANCS notification text: a curated common-Hanzi
+ *                  subset only (not the full CJK range) -- see
+ *                  doc/ESDeck_Monitor_字體轉換指南.md for how to build one. */
+#define SD_DIR_ASSETS_FONTS            "assets/fonts"
+#define SD_DIR_ASSETS_FONTS_BIN_CLOCK  SD_DIR_ASSETS_FONTS "/bin/clock"
+#define SD_DIR_ASSETS_FONTS_BIN_NOTIFY SD_DIR_ASSETS_FONTS "/bin/notify"
 
 #define SD_PATH_CONFIG_DECK     SD_MOUNT_POINT "/" SD_DIR_CONFIG_DECK
 #define SD_PATH_CONFIG_MONITOR  SD_MOUNT_POINT "/" SD_DIR_CONFIG_MONITOR
@@ -66,8 +71,8 @@
 #define SD_PATH_ASSETS_SIDE_ICON SD_MOUNT_POINT "/" SD_DIR_ASSETS_SIDE_ICON
 #define SD_PATH_UPDATE          SD_MOUNT_POINT "/" SD_DIR_UPDATE
 
-#define SD_PATH_ASSETS_FONTS_BIN_CLOCK SD_MOUNT_POINT "/" SD_DIR_ASSETS_FONTS_BIN_CLOCK
-#define SD_PATH_ASSETS_FONTS_TTF       SD_MOUNT_POINT "/" SD_DIR_ASSETS_FONTS_TTF
+#define SD_PATH_ASSETS_FONTS_BIN_CLOCK  SD_MOUNT_POINT "/" SD_DIR_ASSETS_FONTS_BIN_CLOCK
+#define SD_PATH_ASSETS_FONTS_BIN_NOTIFY SD_MOUNT_POINT "/" SD_DIR_ASSETS_FONTS_BIN_NOTIFY
 
 /* --------------------------------------------------------------------------
  * Custom boot animation

@@ -9,3 +9,19 @@ dependencies:
   esp_lcd_touch_gt911: ^1
   espressif/esp_tinyusb: "==2.1.1"
   espressif/esp_new_jpeg: ">=0.6"
+
+  # Pinned explicitly -- esp_tinyusb==2.1.1 only declares ">=0.17.0~2" as its
+  # floor, so the component manager otherwise resolves whatever the newest
+  # satisfying release is. That was 0.21.0~1 (uploaded 1 week ago, 0
+  # downloads before us) and its src/device/ tree is missing
+  # usbd_control.c entirely -- usbd.c calls usbd_control_reset() /
+  # usbd_control_set_complete_callback() / usbd_control_set_request() /
+  # usbd_control_xfer_cb() / tud_control_xfer() / tud_control_status(),
+  # none of which exist anywhere in the package, and its CMakeLists.txt
+  # doesn't reference that file either -- looks like the same kind of
+  # broken upload the registry already yanked once before for this exact
+  # component (see 0.18.0~3: "Packege corrupted with registry internal
+  # error"), just not caught yet since this one's brand new. Pinned to
+  # 0.17.0~2 -- the exact minimum esp_tinyusb's own manifest asks for, and
+  # a release with a normal download count (not a same-week upload).
+  espressif/tinyusb: "0.17.0~2"
