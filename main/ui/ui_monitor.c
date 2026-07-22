@@ -188,13 +188,18 @@ static void monitor_lazy_bg_set(int page_idx)
     lv_obj_t *page = s_pages[page_idx];
     if (!page) return;
 
-    /* Already attached (child 0 is an image) -- nothing to do. */
+    /* Always touch the page first, even if its widget is already
+     * attached below -- this is what keeps ui_monitor_img's LRU tick
+     * fresh for pages that are revisited often but only ever decoded
+     * once, so eviction doesn't mistake "visited a lot, decoded long
+     * ago" for "cold". Cheap when already loaded (just a tick bump). */
+    if (!ui_monitor_img_load_one(page_idx)) return;   /* no path, or decode failed */
+
+    /* Already attached (child 0 is an image) -- nothing more to do. */
     if (lv_obj_get_child_cnt(page) >= 1 &&
         lv_obj_check_type(lv_obj_get_child(page, 0), &lv_img_class)) {
         return;
     }
-
-    if (!ui_monitor_img_load_one(page_idx)) return;   /* no path, or decode failed */
 
     lv_img_dsc_t *bg_dsc = ui_monitor_img_get(page_idx);
     if (!bg_dsc) return;
@@ -214,6 +219,28 @@ static void monitor_lazy_bg_set(int page_idx)
 
     ESP_LOGI(TAG, "lazy bg set page %d - PSRAM free: %d B",
              page_idx, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+/* Called by ui_monitor_img.c (extern, no header decl -- same convention
+ * as ui_deck.c's ui_deck_lazy_bg_remove_widgets()) when that page's bg
+ * buffer gets LRU-evicted to make room for a different page. Removes
+ * just the bg image widget (child 0, if present) so the page stops
+ * pointing at freed PSRAM; the mask stays untouched since it's tied to
+ * "does this page have a configured bg" (see build_clock_page()/
+ * build_data_page()), not to whether the bg is currently resident.
+ * monitor_lazy_bg_set() will decode + re-attach it the next time this
+ * page is actually selected again. */
+void ui_monitor_lazy_bg_remove_widget(int page_idx)
+{
+    if (page_idx < 0 || page_idx >= s_total_pages) return;
+
+    lv_obj_t *page = s_pages[page_idx];
+    if (!page) return;
+
+    if (lv_obj_get_child_cnt(page) >= 1 &&
+        lv_obj_check_type(lv_obj_get_child(page, 0), &lv_img_class)) {
+        lv_obj_del(lv_obj_get_child(page, 0));
+    }
 }
 
 /* -----------------------------------------------------------------------
