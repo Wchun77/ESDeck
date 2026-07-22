@@ -15,6 +15,14 @@
  * real, avoidable PSRAM pressure (see ui_monitor.c's monitor_lazy_bg_set()
  * for the call site).
  *
+ * Lazy loading alone only defers WHEN a page's bg is decoded, not how
+ * many stay resident -- visiting enough distinct pages in one session
+ * would still exhaust PSRAM since nothing was ever freed until Monitor
+ * was exited entirely. ui_monitor_img_load_one() also does LRU eviction
+ * on PSRAM OOM (same pattern as ui_img_pool.c's pool for Deck): it frees
+ * the least-recently-visited *other* page's buffer and asks ui_monitor.c
+ * to remove that page's now-stale bg image widget, then retries once.
+ *
  * Image paths are configured via ui_monitor_img_set_path() up front (this
  * only records the path, it doesn't touch PSRAM); ui_monitor_img_load_one()
  * decodes a single page on demand. Unset paths are silently skipped.

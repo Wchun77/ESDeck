@@ -3,15 +3,24 @@
 #include "ui_monitor_config.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <string.h>
 #include <stddef.h>
 
 #define TAG  "MON_IMG"
 
+/* Callback into ui_monitor.c to tear down a page's bg image widget when
+ * its buffer gets LRU-evicted below -- same reasoning as ui_img_pool.c's
+ * extern into ui_deck.c: without this, the page would keep pointing an
+ * lv_img_dsc_t at a freed buffer the next time it's shown. */
+extern void ui_monitor_lazy_bg_remove_widget(int page_idx);
+
 typedef struct {
     char          path[MON_IMG_PATH_LEN];
     lv_img_dsc_t  dsc;
     bool          loaded;
+    uint32_t      last_used;
 } mon_img_entry_t;
 
 static mon_img_entry_t s_imgs[MON_TOTAL_PAGE_MAX];
@@ -100,13 +109,48 @@ void ui_monitor_img_set_path(int page_idx, const char *path)
 bool ui_monitor_img_load_one(int page_idx)
 {
     if (page_idx < 0 || page_idx >= MON_TOTAL_PAGE_MAX) return false;
-    if (s_imgs[page_idx].loaded)          return true;
+
+    if (s_imgs[page_idx].loaded) {
+        /* Touch last_used even on a cache hit -- otherwise a page that's
+         * visited often but only ever decoded once would look "cold" to
+         * the LRU scan below and get evicted ahead of pages nobody has
+         * looked at in a while. */
+        s_imgs[page_idx].last_used = xTaskGetTickCount();
+        return true;
+    }
     if (s_imgs[page_idx].path[0] == '\0') return false;
 
-    if (decode_to_psram(s_imgs[page_idx].path, &s_imgs[page_idx].dsc)) {
-        s_imgs[page_idx].loaded = true;
+    if (!decode_to_psram(s_imgs[page_idx].path, &s_imgs[page_idx].dsc)) {
+        /* Likely PSRAM OOM -- unlike Deck's shared pool, Monitor never
+         * freed anything until the whole mode was exited, so visiting
+         * enough distinct pages in one session could exhaust PSRAM even
+         * with lazy per-page loading (each page decoded once and kept
+         * forever). Evict the least-recently-used *other* loaded page
+         * and retry once. */
+        int      lru_idx  = -1;
+        uint32_t lru_tick = UINT32_MAX;
+        for (int i = 0; i < MON_TOTAL_PAGE_MAX; i++) {
+            if (i != page_idx && s_imgs[i].loaded && s_imgs[i].last_used < lru_tick) {
+                lru_tick = s_imgs[i].last_used;
+                lru_idx  = i;
+            }
+        }
+        if (lru_idx < 0) return false;   /* nothing left to evict */
+
+        ESP_LOGI(TAG, "LRU evict page %d: %s", lru_idx, s_imgs[lru_idx].path);
+        ui_monitor_lazy_bg_remove_widget(lru_idx);
+        heap_caps_free((void *)s_imgs[lru_idx].dsc.data);
+        s_imgs[lru_idx].dsc.data = NULL;
+        s_imgs[lru_idx].loaded   = false;
+
+        if (!decode_to_psram(s_imgs[page_idx].path, &s_imgs[page_idx].dsc)) {
+            return false;   /* still OOM after evicting one -- give up */
+        }
     }
-    return s_imgs[page_idx].loaded;
+
+    s_imgs[page_idx].loaded    = true;
+    s_imgs[page_idx].last_used = xTaskGetTickCount();
+    return true;
 }
 
 lv_img_dsc_t *ui_monitor_img_get(int page_idx)
