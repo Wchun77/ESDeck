@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lvgl.h"
+#include "ui_monitor_config.h"   /* MON_TOTAL_PAGE_MAX */
 #include <stdbool.h>
 
 /*
@@ -20,12 +21,19 @@
  * would still exhaust PSRAM since nothing was ever freed until Monitor
  * was exited entirely. ui_monitor_img_load_one() also does LRU eviction
  * on PSRAM OOM (same pattern as ui_img_pool.c's pool for Deck): it frees
- * the least-recently-visited *other* page's buffer and asks ui_monitor.c
- * to remove that page's now-stale bg image widget, then retries once.
+ * the least-recently-visited *other* slot's buffer and asks whoever owns
+ * that slot to remove its now-stale bg image widget, then retries once.
+ *
+ * Slot MON_IMG_SETTINGS_SLOT is reserved (beyond the real page indices
+ * 0..MON_TOTAL_PAGE_MAX-1) for ui_settings.c's own background image while
+ * Monitor mode is active -- Settings shares this same lazy+LRU pool
+ * instead of holding a separate always-resident buffer that doesn't
+ * compete/cooperate with page images for the same PSRAM budget (see
+ * ui_settings.c's settings_lazy_bg_set()).
  *
  * Image paths are configured via ui_monitor_img_set_path() up front (this
  * only records the path, it doesn't touch PSRAM); ui_monitor_img_load_one()
- * decodes a single page on demand. Unset paths are silently skipped.
+ * decodes a single slot on demand. Unset paths are silently skipped.
  *
  * Usage:
  *   ui_monitor_img_set_path(MON_PAGE_CLOCK,  "S:/sdcard/clock_bg.jpg");
@@ -38,31 +46,35 @@
  *   ui_monitor_img_free_all();
  */
 
-#define MON_IMG_PATH_LEN  128
+#define MON_IMG_PATH_LEN       128
+#define MON_IMG_SETTINGS_SLOT  MON_TOTAL_PAGE_MAX
+#define MON_IMG_SLOT_COUNT     (MON_TOTAL_PAGE_MAX + 1)
 
 /*
- * Set the background image path for a given page index.
+ * Set the background image path for a given slot (a real page index, or
+ * MON_IMG_SETTINGS_SLOT for Settings' own bg).
  * path: full LVGL FS path, e.g. "S:/sdcard/IMG_3238.jpg"
  *       Pass NULL or "" to clear.
  */
 void ui_monitor_img_set_path(int page_idx, const char *path);
 
 /*
- * Decode and load the background image for a single page into PSRAM, if
+ * Decode and load the background image for a single slot into PSRAM, if
  * it has a path set and isn't already loaded. Safe to call every time a
- * page is selected -- already-loaded pages are a no-op.
+ * page/Settings is selected -- already-loaded slots are a no-op (just
+ * refreshes the LRU timestamp).
  * Returns true if page_idx now has a loaded image (either just now or
  * already before), false if there's no path set or decoding failed.
  */
 bool ui_monitor_img_load_one(int page_idx);
 
 /*
- * Return the decoded image descriptor for page_idx, or NULL if not loaded.
+ * Return the decoded image descriptor for a slot, or NULL if not loaded.
  */
 lv_img_dsc_t *ui_monitor_img_get(int page_idx);
 
 /*
- * Free all loaded images and reset all paths.
- * Call when exiting Monitor mode.
+ * Free all loaded images (including the Settings slot, if in use) and
+ * reset all paths. Call when exiting Monitor mode.
  */
 void ui_monitor_img_free_all(void);

@@ -16,6 +16,11 @@
  * lv_img_dsc_t at a freed buffer the next time it's shown. */
 extern void ui_monitor_lazy_bg_remove_widget(int page_idx);
 
+/* Same idea, for MON_IMG_SETTINGS_SLOT specifically -- ui_settings.c owns
+ * that slot's widget (bg+mask on its own panel, not one of s_pages[]), so
+ * eviction/teardown needs a different callback for it than a real page. */
+extern void ui_settings_bg_widget_remove(void);
+
 typedef struct {
     char          path[MON_IMG_PATH_LEN];
     lv_img_dsc_t  dsc;
@@ -23,7 +28,7 @@ typedef struct {
     uint32_t      last_used;
 } mon_img_entry_t;
 
-static mon_img_entry_t s_imgs[MON_TOTAL_PAGE_MAX];
+static mon_img_entry_t s_imgs[MON_IMG_SLOT_COUNT];
 
 /* -----------------------------------------------------------------------
  * Decode one JPEG/PNG from LVGL FS into a PSRAM buffer.
@@ -97,7 +102,7 @@ static bool decode_to_psram(const char *path, lv_img_dsc_t *dsc)
  * ----------------------------------------------------------------------- */
 void ui_monitor_img_set_path(int page_idx, const char *path)
 {
-    if (page_idx < 0 || page_idx >= MON_TOTAL_PAGE_MAX) return;
+    if (page_idx < 0 || page_idx >= MON_IMG_SLOT_COUNT) return;
 
     if (!path || path[0] == '\0') {
         s_imgs[page_idx].path[0] = '\0';
@@ -108,12 +113,12 @@ void ui_monitor_img_set_path(int page_idx, const char *path)
 
 bool ui_monitor_img_load_one(int page_idx)
 {
-    if (page_idx < 0 || page_idx >= MON_TOTAL_PAGE_MAX) return false;
+    if (page_idx < 0 || page_idx >= MON_IMG_SLOT_COUNT) return false;
 
     if (s_imgs[page_idx].loaded) {
-        /* Touch last_used even on a cache hit -- otherwise a page that's
+        /* Touch last_used even on a cache hit -- otherwise a slot that's
          * visited often but only ever decoded once would look "cold" to
-         * the LRU scan below and get evicted ahead of pages nobody has
+         * the LRU scan below and get evicted ahead of slots nobody has
          * looked at in a while. */
         s_imgs[page_idx].last_used = xTaskGetTickCount();
         return true;
@@ -123,13 +128,14 @@ bool ui_monitor_img_load_one(int page_idx)
     if (!decode_to_psram(s_imgs[page_idx].path, &s_imgs[page_idx].dsc)) {
         /* Likely PSRAM OOM -- unlike Deck's shared pool, Monitor never
          * freed anything until the whole mode was exited, so visiting
-         * enough distinct pages in one session could exhaust PSRAM even
-         * with lazy per-page loading (each page decoded once and kept
-         * forever). Evict the least-recently-used *other* loaded page
+         * enough distinct pages (or Settings, which now shares this same
+         * pool via MON_IMG_SETTINGS_SLOT) in one session could exhaust
+         * PSRAM even with lazy loading (each slot decoded once and kept
+         * forever). Evict the least-recently-used *other* loaded slot
          * and retry once. */
         int      lru_idx  = -1;
         uint32_t lru_tick = UINT32_MAX;
-        for (int i = 0; i < MON_TOTAL_PAGE_MAX; i++) {
+        for (int i = 0; i < MON_IMG_SLOT_COUNT; i++) {
             if (i != page_idx && s_imgs[i].loaded && s_imgs[i].last_used < lru_tick) {
                 lru_tick = s_imgs[i].last_used;
                 lru_idx  = i;
@@ -137,8 +143,12 @@ bool ui_monitor_img_load_one(int page_idx)
         }
         if (lru_idx < 0) return false;   /* nothing left to evict */
 
-        ESP_LOGI(TAG, "LRU evict page %d: %s", lru_idx, s_imgs[lru_idx].path);
-        ui_monitor_lazy_bg_remove_widget(lru_idx);
+        ESP_LOGI(TAG, "LRU evict slot %d: %s", lru_idx, s_imgs[lru_idx].path);
+        if (lru_idx == MON_IMG_SETTINGS_SLOT) {
+            ui_settings_bg_widget_remove();
+        } else {
+            ui_monitor_lazy_bg_remove_widget(lru_idx);
+        }
         heap_caps_free((void *)s_imgs[lru_idx].dsc.data);
         s_imgs[lru_idx].dsc.data = NULL;
         s_imgs[lru_idx].loaded   = false;
@@ -155,20 +165,28 @@ bool ui_monitor_img_load_one(int page_idx)
 
 lv_img_dsc_t *ui_monitor_img_get(int page_idx)
 {
-    if (page_idx < 0 || page_idx >= MON_TOTAL_PAGE_MAX) return NULL;
-    if (!s_imgs[page_idx].loaded)                   return NULL;
+    if (page_idx < 0 || page_idx >= MON_IMG_SLOT_COUNT) return NULL;
+    if (!s_imgs[page_idx].loaded)                       return NULL;
     return &s_imgs[page_idx].dsc;
 }
 
 void ui_monitor_img_free_all(void)
 {
-    for (int i = 0; i < MON_TOTAL_PAGE_MAX; i++) {
+    for (int i = 0; i < MON_IMG_SLOT_COUNT; i++) {
         if (s_imgs[i].loaded && s_imgs[i].dsc.data) {
             heap_caps_free((void *)s_imgs[i].dsc.data);
             s_imgs[i].dsc.data = NULL;
         }
         memset(&s_imgs[i], 0, sizeof(s_imgs[i]));
     }
+
+    /* Settings may have been borrowing MON_IMG_SETTINGS_SLOT above --
+     * that buffer is now gone, so its widget/reference must go too, or
+     * it's left pointing at freed PSRAM the next time Settings opens
+     * (this can't rely on ui_settings_apply_appearance()'s path-diff
+     * check alone: the *next* config's bg_image filename could
+     * coincidentally match the old one and skip that path). */
+    ui_settings_bg_widget_remove();
 
     /* s_imgs[] is a static array -- &s_imgs[i].dsc is the SAME lv_img_dsc_t*
      * every time Monitor is (re)entered, only its contents change (new
