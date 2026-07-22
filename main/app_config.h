@@ -32,10 +32,29 @@
 #define SD_DIR_CONFIG_MEDIA     "config/media"
 #define SD_DIR_ASSETS_ICONS     "assets/icons"
 #define SD_DIR_ASSETS_BG        "assets/backgrounds"
-#define SD_DIR_ASSETS_FONTS     "assets/fonts"
 #define SD_DIR_ASSETS_BOOT      "assets/boot"
 #define SD_DIR_ASSETS_SIDE_ICON "assets/side_icons"
 #define SD_DIR_UPDATE           "update"
+
+/* assets/fonts splits by *mechanism*, not by feature -- .bin (pre-rasterized
+ * via lv_font_conv, loaded with lv_font_load()) and .ttf (raw outline font,
+ * rasterized on demand at runtime via FreeType) are two completely
+ * different loading paths, so they get their own subtree regardless of
+ * which feature ends up using either one.
+ *
+ * assets/fonts/bin/ additionally has a per-feature leaf (clock/ today)
+ * since .bin fonts are pre-converted for one specific pixel size/feature
+ * and aren't reusable across features the way a .ttf is -- if something
+ * else needs its own .bin fonts later, it gets its own sibling leaf here
+ * (assets/fonts/bin/<feature>/), same idea as assets/boot/<name>/.
+ *
+ * assets/fonts/ttf/ stays flat on purpose: a .ttf is inherently general
+ * purpose (FreeType rasterizes whatever glyph is asked for), so there's
+ * no equivalent per-feature split to make until a second .ttf-consuming
+ * feature actually shows up. */
+#define SD_DIR_ASSETS_FONTS           "assets/fonts"
+#define SD_DIR_ASSETS_FONTS_BIN_CLOCK SD_DIR_ASSETS_FONTS "/bin/clock"
+#define SD_DIR_ASSETS_FONTS_TTF       SD_DIR_ASSETS_FONTS "/ttf"
 
 #define SD_PATH_CONFIG_DECK     SD_MOUNT_POINT "/" SD_DIR_CONFIG_DECK
 #define SD_PATH_CONFIG_MONITOR  SD_MOUNT_POINT "/" SD_DIR_CONFIG_MONITOR
@@ -43,10 +62,12 @@
 
 #define SD_PATH_ASSETS_ICONS    SD_MOUNT_POINT "/" SD_DIR_ASSETS_ICONS
 #define SD_PATH_ASSETS_BG       SD_MOUNT_POINT "/" SD_DIR_ASSETS_BG
-#define SD_PATH_ASSETS_FONTS    SD_MOUNT_POINT "/" SD_DIR_ASSETS_FONTS
 #define SD_PATH_ASSETS_BOOT     SD_MOUNT_POINT "/" SD_DIR_ASSETS_BOOT
 #define SD_PATH_ASSETS_SIDE_ICON SD_MOUNT_POINT "/" SD_DIR_ASSETS_SIDE_ICON
 #define SD_PATH_UPDATE          SD_MOUNT_POINT "/" SD_DIR_UPDATE
+
+#define SD_PATH_ASSETS_FONTS_BIN_CLOCK SD_MOUNT_POINT "/" SD_DIR_ASSETS_FONTS_BIN_CLOCK
+#define SD_PATH_ASSETS_FONTS_TTF       SD_MOUNT_POINT "/" SD_DIR_ASSETS_FONTS_TTF
 
 /* --------------------------------------------------------------------------
  * Custom boot animation

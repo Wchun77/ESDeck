@@ -118,12 +118,15 @@ lv_font_conv --font Oxanium-Bold.ttf --size 270 --bpp 4 --range 0x30-0x3A --form
 
 ## 部署
 
-將轉換好的 `.bin` 檔透過 MSC 模式放進 SD card 的 `fonts/` 資料夾：
+將轉換好的 `.bin` 檔透過 MSC 模式放進 SD card 的 `assets/fonts/bin/clock/` 資料夾（這層路徑對應
+firmware `app_config.h` 裡的 `SD_DIR_ASSETS_FONTS_BIN_CLOCK`；`assets/fonts/` 底下依載入機制分
+`bin/`（預先轉換好的點陣字型，clock 專用）跟 `ttf/`（執行期用 FreeType 現場渲染，給中文通知用），
+不是同一套機制，不要混放）：
 
 ```
-/sdcard/assets/fonts/oxanium_270.bin
-/sdcard/assets/fonts/oxanium_48.bin
-/sdcard/assets/fonts/oxanium_36.bin
+/sdcard/assets/fonts/bin/clock/oxanium_270.bin
+/sdcard/assets/fonts/bin/clock/oxanium_48.bin
+/sdcard/assets/fonts/bin/clock/oxanium_36.bin
 ```
 
 在 Monitor Select Config 選好 config 後，重新套用即生效。
