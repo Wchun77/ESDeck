@@ -7,7 +7,7 @@
 #define SCREEN_H   480
 #define SIDEBAR_W   80
 
-/* Entry point — called once after ui_preload_wait(). */
+/* Entry point — called once after ui_deck_preload_wait(). */
 void my_ui_init(void);
 
 /* Show a full-screen "Switching config..." cover while image decode runs.

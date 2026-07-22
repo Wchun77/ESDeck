@@ -1,5 +1,4 @@
 #include "ui.h"
-#include "ui_img_pool.h"
 #include "ui_deck.h"
 #include "ui_settings.h"
 #include "ui_toast.h"
@@ -198,7 +197,7 @@ void my_ui_init(void)
     ESP_LOGI("UI", "before deck build - PSRAM free: %d B",
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
-    deck_cfg_t *cfg = ui_img_pool_take_preload_cfg();
+    deck_cfg_t *cfg = ui_deck_preload_take_cfg();
     ui_deck_build(s_sidebar, cfg);
 
     ESP_LOGI("UI", "init done - PSRAM free: %d B",

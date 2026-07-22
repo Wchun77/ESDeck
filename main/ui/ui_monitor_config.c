@@ -1,5 +1,4 @@
 #include "ui_monitor_config.h"
-#include "ui_config.h"
 #include "nvs_manager.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -118,13 +117,13 @@ void ui_monitor_config_load(monitor_cfg_t *cfg)
 {
     set_defaults(cfg);
 
-    char nvs_fname[MON_CFG_FNAME_LEN];
+    char nvs_fname[CFG_FNAME_LEN];
     if (!ui_monitor_config_nvs_load(nvs_fname, sizeof(nvs_fname))) {
         ESP_LOGW(TAG, "no NVS config, using defaults");
         return;
     }
 
-    char path[MON_CFG_FNAME_LEN + 24];
+    char path[CFG_FNAME_LEN + 24];
     snprintf(path, sizeof(path), "%s/%s", UI_MONITOR_PATH, nvs_fname);
 
     char *buf = read_file(path);
@@ -144,7 +143,7 @@ void ui_monitor_config_load(monitor_cfg_t *cfg)
     /* Clock section */
     cJSON *clk = cJSON_GetObjectItem(root, "clock");
     if (cJSON_IsObject(clk)) {
-        str_field(clk, "bg_image",  cfg->clock.bg_image,  MON_CFG_BG_LEN);
+        str_field(clk, "bg_image",  cfg->clock.bg_image,  CFG_BG_LEN);
         str_field(clk, "side_icon", cfg->clock.side_icon, MON_CFG_ICON_LEN);
         str_field(clk, "font_time", cfg->clock.font_time, MON_CFG_FONT_LEN);
         str_field(clk, "font_sec",  cfg->clock.font_sec,  MON_CFG_FONT_LEN);
@@ -186,7 +185,7 @@ void ui_monitor_config_load(monitor_cfg_t *cfg)
 
             mon_page_cfg_t *p = &cfg->pages[i];
             str_field(pg, "name",      p->name,      MON_PAGE_NAME_LEN);
-            str_field(pg, "bg_image",  p->bg_image,  MON_CFG_BG_LEN);
+            str_field(pg, "bg_image",  p->bg_image,  CFG_BG_LEN);
             str_field(pg, "side_icon", p->side_icon, MON_CFG_ICON_LEN);
 
             /* Default page name if absent */
@@ -262,7 +261,7 @@ mon_scan_result_t ui_monitor_config_scan(void)
         size_t len = strlen(de->d_name);
         if (len < 5) continue;
         if (strcmp(de->d_name + len - 5, ".json") != 0) continue;
-        res.names[idx] = strndup(de->d_name, MON_CFG_FNAME_LEN - 1);
+        res.names[idx] = strndup(de->d_name, CFG_FNAME_LEN - 1);
         if (!res.names[idx]) {
             res.count = idx;
             closedir(dir);
@@ -279,14 +278,10 @@ mon_scan_result_t ui_monitor_config_scan(void)
 
 void ui_monitor_config_scan_free(mon_scan_result_t *res)
 {
-    if (!res) return;
-    for (int i = 0; i < res->count; i++) {
-        free(res->names[i]);
-        res->names[i] = NULL;
-    }
-    free(res->names);
-    res->names = NULL;
-    res->count = 0;
+    /* mon_scan_result_t is just an alias of the shared cfg_scan_result_t
+     * (see app_config.h) -- kept as its own wrapper for API symmetry with
+     * ui_monitor_config_scan(). */
+    cfg_scan_result_free(res);
 }
 
 void ui_monitor_config_bg_path(const char *filename, char *out, size_t out_size)
@@ -295,7 +290,7 @@ void ui_monitor_config_bg_path(const char *filename, char *out, size_t out_size)
         out[0] = '\0';
         return;
     }
-    snprintf(out, out_size, "S:%s/%s", UI_MONITOR_BG_PATH, filename);
+    snprintf(out, out_size, "S:%s/%s", SD_PATH_ASSETS_BG, filename);
 }
 
 void ui_monitor_config_font_path(const char *filename, char *out, size_t out_size)
@@ -313,5 +308,5 @@ void ui_monitor_config_icon_path(const char *filename, char *out, size_t out_siz
         out[0] = '\0';
         return;
     }
-    snprintf(out, out_size, "S:%s/%s", UI_MONITOR_ICON_PATH, filename);
+    snprintf(out, out_size, "S:%s/%s", SD_PATH_ASSETS_SIDE_ICON, filename);
 }

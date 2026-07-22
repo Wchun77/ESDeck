@@ -1,10 +1,9 @@
 #include "ui_config_dialog.h"
-#include "ui_config.h"
+#include "ui_deck_config.h"
 #include "ui_monitor_config.h"
 #include "ui_media_config.h"
 #include "ui_settings.h"
 #include "ui_deck.h"
-#include "ui_img_pool.h"
 #include "ui.h"
 #include "lvgl.h"
 #include "esp_log.h"
@@ -21,7 +20,7 @@
 /* -----------------------------------------------------------------------
  * Dialog state
  * ----------------------------------------------------------------------- */
-static char  s_active_fname[UI_CONFIG_FNAME_LEN];
+static char  s_active_fname[CFG_FNAME_LEN];
 
 static lv_obj_t *s_dim          = NULL;
 static lv_obj_t *s_dialog       = NULL;
@@ -32,7 +31,7 @@ static lv_obj_t *s_page_lbl     = NULL;
 static lv_obj_t *s_rows[CFG_ROWS_PER_PAGE];
 static lv_obj_t *s_row_lbls[CFG_ROWS_PER_PAGE];
 
-static json_scan_result_t s_scan  = { .names = NULL, .count = 0 };
+static cfg_scan_result_t s_scan  = { .names = NULL, .count = 0 };
 static int  s_cfg_page   = 0;
 static int  s_cfg_pages  = 0;
 static int  s_sel_idx    = -1;
@@ -75,7 +74,7 @@ static void dialog_close(void)
     s_sel_idx   = -1;
     s_cfg_page  = 0;
     s_cfg_pages = 0;
-    ui_config_scan_free(&s_scan);
+    cfg_scan_result_free(&s_scan);
 }
 
 static void render_page(void)
@@ -125,7 +124,7 @@ static void on_switch_preload_done(void *arg)
 
 static void switch_preload_task(void *arg)
 {
-    ui_img_pool_load(&s_new_cfg);
+    ui_deck_preload_icons(&s_new_cfg);
     lv_async_call(on_switch_preload_done, NULL);
     vTaskDelete(NULL);
 }
@@ -166,7 +165,7 @@ static void confirm_cb(lv_event_t *e)
     }
 
     /* Deck config */
-    if (!ui_config_nvs_save(fname)) {
+    if (!ui_deck_config_nvs_save(fname)) {
         ESP_LOGE("CFG_DLG", "Failed to save deck config to NVS");
         return;
     }
@@ -178,11 +177,11 @@ static void confirm_cb(lv_event_t *e)
     ui_settings_deselect();
     ui_deck_destroy();
 
-    bool cfg_ok = ui_config_load(&s_new_cfg);
+    bool cfg_ok = ui_deck_config_load(&s_new_cfg);
     if (!cfg_ok || s_new_cfg.page_count == 0) {
         s_new_cfg.page_count = 1;
         s_new_cfg.pages      = calloc(1, sizeof(page_cfg_t));
-        snprintf(s_new_cfg.pages[0].name, UI_CONFIG_NAME_LEN, "Main");
+        snprintf(s_new_cfg.pages[0].name, UI_DECK_CONFIG_NAME_LEN, "Main");
         s_new_cfg.pages[0].button_count = 0;
         s_new_cfg.pages[0].buttons      = NULL;
     }
@@ -268,31 +267,29 @@ static void dialog_show_internal(cfg_dialog_mode_t mode)
 {
     s_dialog_mode = mode;
 
-    const char *cfg_dir = UI_CONFIG_DECK_PATH;
+    const char *cfg_dir = UI_DECK_CONFIG_PATH;
 
+    /* deck_scan_result_t/mon_scan_result_t/media_scan_result_t are all
+     * just aliases of cfg_scan_result_t (see app_config.h), so each
+     * mode's own _scan() return value assigns into s_scan directly --
+     * no per-mode temp + manual field copy needed. */
     switch (mode) {
-    case CFG_DIALOG_MONITOR: {
-        mon_scan_result_t r = ui_monitor_config_scan();
-        s_scan.names = r.names;
-        s_scan.count = r.count;
+    case CFG_DIALOG_MONITOR:
+        s_scan  = ui_monitor_config_scan();
         cfg_dir = UI_MONITOR_PATH;
         break;
-    }
-    case CFG_DIALOG_MEDIA: {
-        media_scan_result_t r = ui_media_config_scan();
-        s_scan.names = r.names;
-        s_scan.count = r.count;
+    case CFG_DIALOG_MEDIA:
+        s_scan  = ui_media_config_scan();
         cfg_dir = SD_PATH_CONFIG_MEDIA;
         break;
-    }
     default:
-        s_scan = ui_config_scan();
+        s_scan = ui_deck_config_scan();
         break;
     }
 
     if (s_scan.count == -1) {
         /* Directory does not exist */
-        ui_config_scan_free(&s_scan);
+        cfg_scan_result_free(&s_scan);
         ESP_LOGE("CFG_DLG", "Config directory not found: %s", cfg_dir);
 
         lv_obj_t *scr = lv_scr_act();
@@ -327,7 +324,7 @@ static void dialog_show_internal(cfg_dialog_mode_t mode)
     }
 
     if (s_scan.count == 0) {
-        ui_config_scan_free(&s_scan);
+        cfg_scan_result_free(&s_scan);
         ESP_LOGW("CFG_DLG", "No JSON files found in %s", cfg_dir);
         return;
     }
@@ -500,7 +497,7 @@ static void dialog_show_internal(cfg_dialog_mode_t mode)
     else if (s_dialog_mode == CFG_DIALOG_MEDIA)
         ui_media_config_nvs_load(s_active_fname, sizeof(s_active_fname));
     else
-        ui_config_nvs_load(s_active_fname, sizeof(s_active_fname));
+        ui_deck_config_nvs_load(s_active_fname, sizeof(s_active_fname));
     for (int i = 0; i < s_scan.count; i++) {
         if (strcmp(s_scan.names[i], s_active_fname) == 0) {
             s_sel_idx  = i;

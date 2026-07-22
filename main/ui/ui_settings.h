@@ -9,7 +9,7 @@ typedef enum {
 } ui_mode_t;
 
 /* Settings page appearance -- bg_image + side_icon, same filename-only
- * convention as a normal Deck/Monitor page (ui_config.h / ui_monitor_config.h).
+ * convention as a normal Deck/Monitor page (ui_deck_config.h / ui_monitor_config.h).
  * Lives embedded in deck_cfg_t / monitor_cfg_t (one "settings" object per
  * config file, sibling to "pages" / "clock") instead of its own standalone
  * file, so Settings' look follows whichever Deck or Monitor config is

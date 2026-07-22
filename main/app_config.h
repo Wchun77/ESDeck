@@ -1,12 +1,14 @@
 #pragma once
 
+#include <stdlib.h>
+
 /*
  * app_config.h
  *
  * Central place for project-wide identifiers and SD-card path layout.
  * Anything that used to be a hardcoded "/sdcard/..." string scattered
- * across ui_config.h / ui_monitor_config.h / fs_sd.c now lives here so
- * there is exactly one place to change it.
+ * across ui_deck_config.h / ui_monitor_config.h / fs_sd.c now lives here
+ * so there is exactly one place to change it.
  *
  * Must match the CMake project() name in the top-level CMakeLists.txt --
  * used to validate OTA update filenames (see ota_manager).
@@ -115,3 +117,63 @@
  * -------------------------------------------------------------------------- */
 
 #define FW_UPDATE_EXTENSION  ".bin"
+
+/* --------------------------------------------------------------------------
+ * NVS keys -- "which config file is currently selected" per mode.
+ *
+ * Lives here (not in any one mode's config module) because it's read/
+ * written by all of them: ui_deck_config.c, ui_monitor_config.c,
+ * ui_media_config.c, and boot_anim.c all share this same namespace. It
+ * used to live in ui_config.h (Deck's own config module) purely because
+ * Deck was written first -- Monitor/Media/boot_anim including "Deck's"
+ * header just to get their own NVS key was exactly the kind of
+ * misleading-name problem this file exists to avoid.
+ * -------------------------------------------------------------------------- */
+#define CFG_NVS_NAMESPACE     "esdeck"
+#define CFG_NVS_KEY_DECK      "deck_cfg"
+#define CFG_NVS_KEY_MONITOR   "mon_cfg"
+#define CFG_NVS_KEY_MEDIA     "media_cfg"
+#define CFG_NVS_KEY_BOOT_ANIM "boot_anim"
+
+/* --------------------------------------------------------------------------
+ * Config file list/select -- shared shape across all three modes' config
+ * pickers (ui_deck_config.c/deck_scan_result_t, ui_monitor_config.c/
+ * mon_scan_result_t, ui_media_config.c/media_scan_result_t are all just
+ * aliases of cfg_scan_result_t below) and the one dialog that lists and
+ * switches between them (ui_config_dialog.c -- despite the filename, it
+ * isn't Deck-only: it shows Deck's, Monitor's, and Media's config lists
+ * from the same dialog UI, picked via its own cfg_dialog_mode_t). Lives
+ * here for the same reason CFG_NVS_* above does: read/used by all three
+ * modes' config code plus the shared dialog, not owned by any single one.
+ *
+ * CFG_BG_LEN is the same story, one level down: every mode's own config
+ * struct has a bg_image[CFG_BG_LEN] field (filename only, resolved against
+ * SD_PATH_ASSETS_BG), and the shared image pool's own cache-entry struct
+ * (ui_img_pool.c's psram_img_t) sizes its path-key buffer off it too, so
+ * it belongs here rather than under any one mode's name.
+ * -------------------------------------------------------------------------- */
+#define CFG_FNAME_LEN  64
+#define CFG_BG_LEN     64
+
+typedef struct {
+    char **names;
+    int    count;
+} cfg_scan_result_t;
+
+/* Free all memory allocated by any mode's *_config_scan(). Each mode keeps
+ * its own scan_free() wrapper (ui_deck_config_scan_free(),
+ * ui_monitor_config_scan_free(), ui_media_config_scan_free()) for API
+ * symmetry with its own _scan() -- all three just delegate to this one
+ * implementation. ui_config_dialog.c, which isn't tied to any single
+ * mode, calls this directly instead of borrowing one mode's wrapper. */
+static inline void cfg_scan_result_free(cfg_scan_result_t *res)
+{
+    if (!res) return;
+    for (int i = 0; i < res->count; i++) {
+        free(res->names[i]);
+        res->names[i] = NULL;
+    }
+    free(res->names);
+    res->names = NULL;
+    res->count = 0;
+}

@@ -6,12 +6,12 @@
  * Monitor mode: clock page (fixed) + up to MON_PAGE_MAX data pages.
  *
  * Entry:
- *   1. ui_deck_destroy()         -- caller frees deck img pool
- *   2. ui_monitor_enter(sidebar) -- builds monitor sidebar + pages
+ *   1. Caller tears down whatever mode was previously active.
+ *   2. ui_monitor_enter(sidebar) -- builds monitor sidebar + pages.
  *
  * Exit:
- *   1. ui_monitor_exit()         -- tears down monitor widgets + timers
- *   2. ui_deck_build(...)        -- caller rebuilds deck
+ *   1. ui_monitor_exit()         -- tears down monitor widgets + timers.
+ *   2. Caller builds whatever mode comes next.
  */
 
 /* -----------------------------------------------------------------------

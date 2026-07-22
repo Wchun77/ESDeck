@@ -7,8 +7,8 @@
 /*
  * Media mode.
  *
- * Layout mirrors Deck/Monitor's "own sidebar sub-region + own content
- * area" split, but with different content:
+ * Layout is its own "own sidebar sub-region + own content area" split,
+ * with content specific to Media:
  *   - sidebar sub-region (80 x SCREEN_H-80): a single vertical level-meter
  *     bar, no page buttons.
  *   - content area (SCREEN_W-80 x SCREEN_H): a Now Playing player card
@@ -35,7 +35,7 @@
  * not-yet-designed work.
  *
  * Entry:
- *   1. destroy whatever mode was active (ui_deck_destroy() / ui_monitor_exit())
+ *   1. caller tears down whatever mode was previously active
  *   2. ui_media_enter(sidebar)
  *
  * Exit:
@@ -52,9 +52,8 @@ void ui_media_enter(lv_obj_t *sidebar);
 void ui_media_exit(void);
 
 /* Hide the player card (content area) without touching the sidebar bar,
- * which is left running underneath -- same idea as
- * ui_deck_deselect_current() / ui_monitor_deselect_current(). Called by
- * ui_settings_select() when the gear button takes over the content area. */
+ * which is left running underneath. Called by ui_settings_select() when
+ * the gear button takes over the content area. */
 void ui_media_deselect_current(void);
 
 /* Counterpart to ui_media_deselect_current(): re-show the player card.

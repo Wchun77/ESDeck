@@ -9,7 +9,6 @@
 #include "app_config.h"
 #include "fs_manager/fs_sd.h"
 #include "nvs_manager/nvs_manager.h"
-#include "ui_config.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_jpeg_dec.h"

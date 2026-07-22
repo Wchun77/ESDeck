@@ -1,6 +1,6 @@
 #include "ui_monitor.h"
 #include "ui_clock_widget.h"
-#include "ui_monitor_img.h"
+#include "ui_img_pool.h"
 #include "ui_monitor_config.h"
 #include "ui_settings.h"
 #include "ui.h"
@@ -50,6 +50,26 @@ static monitor_cfg_t s_mon_cfg;
 /* Data page cell widgets [page_idx][cell_idx] (page_idx=0 unused, clock is separate) */
 static lv_obj_t  *s_cell_lbl[MON_TOTAL_PAGE_MAX][MON_PAGE_CELLS];
 static lv_obj_t  *s_cell_bar[MON_TOTAL_PAGE_MAX][MON_PAGE_CELLS];
+
+/* -----------------------------------------------------------------------
+ * LRU eviction accessors, called by ui_img_pool's eviction match loop so
+ * it can recognize a Monitor page and tear down its stale bg widget.
+ * page_idx 0 is the fixed Clock page (s_mon_cfg.clock), 1..s_total_pages-1
+ * are data pages (s_mon_cfg.pages[page_idx-1]) -- same indexing
+ * monitor_lazy_bg_set()/ui_monitor_lazy_bg_remove_widget() use.
+ * ----------------------------------------------------------------------- */
+int ui_monitor_page_count(void)
+{
+    return s_total_pages;
+}
+
+const char *ui_monitor_page_bg_image(int page_idx)
+{
+    if (page_idx < 0 || page_idx >= s_total_pages) return NULL;
+    return (page_idx == MON_PAGE_IDX_CLOCK)
+           ? s_mon_cfg.clock.bg_image
+           : s_mon_cfg.pages[page_idx - 1].bg_image;
+}
 
 /* -----------------------------------------------------------------------
  * Queues — written from TinyUSB task, read from LVGL timer (safe).
@@ -175,10 +195,10 @@ static lv_obj_t *make_page(lv_obj_t *parent)
 /* -----------------------------------------------------------------------
  * Lazy background attach -- decode + insert page_idx's bg image the
  * first time that page is actually shown, instead of every page eagerly
- * on Monitor entry (ui_monitor_img_load_one() is the per-page decode;
- * see its header comment). Same shape as ui_deck.c's
- * ui_deck_lazy_bg_set(): insert at child index 0 so it sits behind
- * whatever mask/content already exists from build_clock_page()/
+ * on Monitor entry. Calls the shared pool directly (ui_img_pool_find()/
+ * decode()/mark_bg()) so PSRAM budget and LRU eviction are shared with
+ * whatever else is using the pool -- insert at child index 0 so it sits
+ * behind whatever mask/content already exists from build_clock_page()/
  * build_data_page(), and skip re-inserting if it's already there.
  * ----------------------------------------------------------------------- */
 static void monitor_lazy_bg_set(int page_idx)
@@ -188,31 +208,38 @@ static void monitor_lazy_bg_set(int page_idx)
     lv_obj_t *page = s_pages[page_idx];
     if (!page) return;
 
-    /* Always touch the page first, even if its widget is already
-     * attached below -- this is what keeps ui_monitor_img's LRU tick
-     * fresh for pages that are revisited often but only ever decoded
-     * once, so eviction doesn't mistake "visited a lot, decoded long
-     * ago" for "cold". Cheap when already loaded (just a tick bump). */
-    if (!ui_monitor_img_load_one(page_idx)) return;   /* no path, or decode failed */
+    const char *bg_image = ui_monitor_page_bg_image(page_idx);
+    if (!bg_image || !bg_image[0]) return;
 
-    /* Already attached (child 0 is an image) -- nothing more to do. */
+    char bg_path[CFG_BG_LEN + 16];
+    ui_monitor_config_bg_path(bg_image, bg_path, sizeof(bg_path));
+
+    /* If bg widget already exists, just refresh last_used and return. */
     if (lv_obj_get_child_cnt(page) >= 1 &&
         lv_obj_check_type(lv_obj_get_child(page, 0), &lv_img_class)) {
+        ui_img_pool_find(bg_path);
         return;
     }
 
-    lv_img_dsc_t *bg_dsc = ui_monitor_img_get(page_idx);
-    if (!bg_dsc) return;
+    lv_img_dsc_t *cached = ui_img_pool_find(bg_path);
+    if (!cached) {
+        cached = ui_img_pool_decode(bg_path);
+        if (!cached) {
+            ESP_LOGW(TAG, "lazy bg decode failed: %s", bg_path);
+            return;
+        }
+        ui_img_pool_mark_bg(bg_path);
+    }
 
-    uint32_t zoom_x   = (uint32_t)CONTENT_W * 256 / bg_dsc->header.w;
-    uint32_t zoom_y   = (uint32_t)CONTENT_H * 256 / bg_dsc->header.h;
+    uint32_t zoom_x   = (uint32_t)CONTENT_W * 256 / cached->header.w;
+    uint32_t zoom_y   = (uint32_t)CONTENT_H * 256 / cached->header.h;
     uint32_t zoom     = (zoom_x > zoom_y) ? zoom_x : zoom_y;
-    int32_t  scaled_w = (int32_t)bg_dsc->header.w * (int32_t)zoom / 256;
+    int32_t  scaled_w = (int32_t)cached->header.w * (int32_t)zoom / 256;
     int32_t  offset_x = (CONTENT_W - scaled_w) / 2;
 
     lv_obj_t *bg = lv_img_create(page);
     lv_obj_move_to_index(bg, 0);
-    lv_img_set_src(bg, bg_dsc);
+    lv_img_set_src(bg, cached);
     lv_img_set_pivot(bg, 0, 0);
     lv_img_set_zoom(bg, (uint16_t)zoom);
     lv_obj_set_pos(bg, offset_x, 0);
@@ -221,12 +248,11 @@ static void monitor_lazy_bg_set(int page_idx)
              page_idx, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }
 
-/* Called by ui_monitor_img.c (extern, no header decl -- same convention
- * as ui_deck.c's ui_deck_lazy_bg_remove_widgets()) when that page's bg
- * buffer gets LRU-evicted to make room for a different page. Removes
- * just the bg image widget (child 0, if present) so the page stops
- * pointing at freed PSRAM; the mask stays untouched since it's tied to
- * "does this page have a configured bg" (see build_clock_page()/
+/* Called by ui_img_pool.c (extern, no header decl) when that
+ * page's bg buffer gets LRU-evicted to make room for a different page.
+ * Removes just the bg image widget (child 0, if present) so the page
+ * stops pointing at freed PSRAM; the mask stays untouched since it's
+ * tied to "does this page have a configured bg" (see build_clock_page()/
  * build_data_page()), not to whether the bg is currently resident.
  * monitor_lazy_bg_set() will decode + re-attach it the next time this
  * page is actually selected again. */
@@ -257,12 +283,12 @@ static void build_clock_page(lv_obj_t *parent)
      * and this runs for every page at Monitor-entry time. It's added
      * later, lazily, by monitor_lazy_bg_set() the first time this page is
      * actually shown (see call sites in ui_monitor_enter()/
-     * sidebar_btn_cb()), same shape as ui_deck.c's ui_deck_lazy_bg_set().
-     * The mask below stays unconditional either way -- it's cheap (a
-     * plain color overlay, no decode) and monitor_lazy_bg_set() inserts
-     * the bg behind it via lv_obj_move_to_index() once it's ready. */
+     * sidebar_btn_cb()). The mask below stays unconditional either way --
+     * it's cheap (a plain color overlay, no decode) and
+     * monitor_lazy_bg_set() inserts the bg behind it via
+     * lv_obj_move_to_index() once it's ready. */
 
-    /* Semi-transparent overlay -- same opacity as deck pages */
+    /* Semi-transparent overlay */
     lv_obj_t *mask = lv_obj_create(parent);
     lv_obj_set_size(mask, CONTENT_W, CONTENT_H);
     lv_obj_set_pos(mask, 0, 0);
@@ -713,20 +739,22 @@ void ui_monitor_enter(lv_obj_t *sidebar)
                                   lv_color_hex(0x0055cc), 0);
     }
 
-    /* Load background images */
-    char bg_path[MON_CFG_BG_LEN + 16];
-    ui_monitor_config_bg_path(s_mon_cfg.clock.bg_image, bg_path, sizeof(bg_path));
-    ui_monitor_img_set_path(MON_PAGE_IDX_CLOCK, bg_path);
-
+    /* Reserve shared pool capacity: one slot per page (incl. Clock) that
+     * has a configured bg image, +1 for Settings' own bg image, which
+     * shares this same pool while Monitor mode is active (see
+     * ui_settings.c's settings_lazy_bg_set()). No eager decode here --
+     * Monitor has no icons or backgrounds to preload up front, everything
+     * decodes lazily on demand via monitor_lazy_bg_set() below. */
+    int bg_count = s_mon_cfg.clock.bg_image[0] ? 1 : 0;
     for (int i = 0; i < s_mon_cfg.page_count; i++) {
-        ui_monitor_config_bg_path(s_mon_cfg.pages[i].bg_image, bg_path, sizeof(bg_path));
-        ui_monitor_img_set_path(i + 1, bg_path);
+        if (s_mon_cfg.pages[i].bg_image[0]) bg_count++;
     }
+    ui_img_pool_reserve(bg_count + 1);
 
-    /* Content pages -- bg images are NOT decoded here, only the paths
-     * above were recorded. monitor_lazy_bg_set() decodes+attaches one
-     * page's bg at a time, only for pages actually shown (see below for
-     * the initial page, and sidebar_btn_cb() for every switch after). */
+    /* Content pages -- bg images are NOT decoded here, only the pool
+     * capacity above was reserved. monitor_lazy_bg_set() decodes+attaches
+     * one page's bg at a time, only for pages actually shown (see below
+     * for the initial page, and sidebar_btn_cb() for every switch after). */
     for (int i = 0; i < s_total_pages; i++) {
         s_pages[i] = make_page(scr);
         if (i != MON_PAGE_IDX_CLOCK)
@@ -792,8 +820,10 @@ void ui_monitor_exit(void)
     }
 
     /* Free background image buffers after all LVGL objects are deleted.
-     * Must come after lv_obj_del so no lv_img is still referencing the buffer. */
-    ui_monitor_img_free_all();
+     * Must come after lv_obj_del so no lv_img is still referencing the
+     * buffer. Also releases Settings' borrowed slot if it had one (see
+     * ui_img_pool_free()). */
+    ui_img_pool_free();
 
     memset(s_cell_lbl, 0, sizeof(s_cell_lbl));
     memset(s_cell_bar, 0, sizeof(s_cell_bar));

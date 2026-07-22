@@ -1,4 +1,4 @@
-#include "ui_config.h"
+#include "ui_deck_config.h"
 
 #include "nvs_manager.h"
 
@@ -9,7 +9,7 @@
 #include "esp_heap_caps.h"
 #include "cJSON.h"
 
-#define TAG  "[UI_CFG]"
+#define TAG  "[DECK_CFG]"
 
 #define STARTUP_TXT_PATH  "/sdcard/config/deck/startup.txt"
 
@@ -21,7 +21,7 @@ static bool apply_startup_txt(void)
     FILE *f = fopen(STARTUP_TXT_PATH, "r");
     if (!f) return false;
 
-    char fname[UI_CONFIG_FNAME_LEN];
+    char fname[CFG_FNAME_LEN];
     memset(fname, 0, sizeof(fname));
 
     size_t n = fread(fname, 1, sizeof(fname) - 1, f);
@@ -94,28 +94,28 @@ static char *read_file(const char *path)
 /* --------------------------------------------------------------------------
  * Public API
  * -------------------------------------------------------------------------- */
-bool ui_config_nvs_save(const char *filename)
+bool ui_deck_config_nvs_save(const char *filename)
 {
     return nvs_manager_set_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_DECK, filename);
 }
 
-bool ui_config_nvs_load(char *out, size_t out_size)
+bool ui_deck_config_nvs_load(char *out, size_t out_size)
 {
     return nvs_manager_get_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_DECK, out, out_size);
 }
 
-bool ui_config_load(deck_cfg_t *cfg)
+bool ui_deck_config_load(deck_cfg_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
 
     apply_startup_txt();
 
-    char json_path[sizeof(UI_CONFIG_DECK_PATH) + 1 + UI_CONFIG_FNAME_LEN];
-    char nvs_fname[UI_CONFIG_FNAME_LEN];
+    char json_path[sizeof(UI_DECK_CONFIG_PATH) + 1 + CFG_FNAME_LEN];
+    char nvs_fname[CFG_FNAME_LEN];
 
-    if (ui_config_nvs_load(nvs_fname, sizeof(nvs_fname))) {
+    if (ui_deck_config_nvs_load(nvs_fname, sizeof(nvs_fname))) {
         snprintf(json_path, sizeof(json_path), "%s/%s",
-                 UI_CONFIG_DECK_PATH, nvs_fname);
+                 UI_DECK_CONFIG_PATH, nvs_fname);
         ESP_LOGI(TAG, "Using NVS config: %s", json_path);
     } else {
         ESP_LOGW(TAG, "No NVS config, skipping load");
@@ -172,17 +172,17 @@ bool ui_config_load(deck_cfg_t *cfg)
 
         cJSON *name = cJSON_GetObjectItem(page_obj, "name");
         if (cJSON_IsString(name) && name->valuestring)
-            snprintf(page->name, UI_CONFIG_NAME_LEN, "%s", name->valuestring);
+            snprintf(page->name, UI_DECK_CONFIG_NAME_LEN, "%s", name->valuestring);
         else
-            snprintf(page->name, UI_CONFIG_NAME_LEN, "P%d", pi + 1);
+            snprintf(page->name, UI_DECK_CONFIG_NAME_LEN, "P%d", pi + 1);
 
         cJSON *bg = cJSON_GetObjectItem(page_obj, "bg_image");
         if (cJSON_IsString(bg) && bg->valuestring)
-            snprintf(page->bg_image, UI_CONFIG_BG_LEN, "%s", bg->valuestring);
+            snprintf(page->bg_image, CFG_BG_LEN, "%s", bg->valuestring);
 
         cJSON *side_icon = cJSON_GetObjectItem(page_obj, "side_icon");
         if (cJSON_IsString(side_icon) && side_icon->valuestring)
-            snprintf(page->side_icon, UI_CONFIG_SIDE_ICON_LEN, "%s", side_icon->valuestring);
+            snprintf(page->side_icon, UI_DECK_CONFIG_SIDE_ICON_LEN, "%s", side_icon->valuestring);
 
         cJSON *btns_arr = cJSON_GetObjectItem(page_obj, "buttons");
         if (!cJSON_IsArray(btns_arr)) {
@@ -196,7 +196,7 @@ bool ui_config_load(deck_cfg_t *cfg)
         page->buttons = calloc((size_t)btn_count, sizeof(btn_cfg_t));
         if (!page->buttons) {
             ESP_LOGE(TAG, "OOM allocating buttons for page %d", pi);
-            ui_config_free(cfg);
+            ui_deck_config_free(cfg);
             cJSON_Delete(root);
             return false;
         }
@@ -208,13 +208,13 @@ bool ui_config_load(deck_cfg_t *cfg)
 
             cJSON *label = cJSON_GetObjectItem(btn_obj, "label");
             if (cJSON_IsString(label) && label->valuestring)
-                snprintf(btn->label, UI_CONFIG_LABEL_LEN, "%s", label->valuestring);
+                snprintf(btn->label, UI_DECK_CONFIG_LABEL_LEN, "%s", label->valuestring);
             else
-                snprintf(btn->label, UI_CONFIG_LABEL_LEN, "%d", bi + 1);
+                snprintf(btn->label, UI_DECK_CONFIG_LABEL_LEN, "%d", bi + 1);
 
             cJSON *icon = cJSON_GetObjectItem(btn_obj, "icon");
             if (cJSON_IsString(icon) && icon->valuestring)
-                snprintf(btn->icon, UI_CONFIG_ICON_LEN, "%s", icon->valuestring);
+                snprintf(btn->icon, UI_DECK_CONFIG_ICON_LEN, "%s", icon->valuestring);
         }
     }
 
@@ -223,7 +223,7 @@ bool ui_config_load(deck_cfg_t *cfg)
     return true;
 }
 
-void ui_config_free(deck_cfg_t *cfg)
+void ui_deck_config_free(deck_cfg_t *cfg)
 {
     if (!cfg) return;
     if (cfg->pages) {
@@ -239,13 +239,13 @@ void ui_config_free(deck_cfg_t *cfg)
     cfg->page_count = 0;
 }
 
-json_scan_result_t ui_config_scan(void)
+deck_scan_result_t ui_deck_config_scan(void)
 {
-    json_scan_result_t res = { .names = NULL, .count = 0 };
+    deck_scan_result_t res = { .names = NULL, .count = 0 };
 
-    DIR *dir = opendir(UI_CONFIG_DECK_PATH);
+    DIR *dir = opendir(UI_DECK_CONFIG_PATH);
     if (!dir) {
-        ESP_LOGE(TAG, "Deck config directory not found: %s", UI_CONFIG_DECK_PATH);
+        ESP_LOGE(TAG, "Deck config directory not found: %s", UI_DECK_CONFIG_PATH);
         res.count = -1;
         return res;
     }
@@ -282,7 +282,7 @@ json_scan_result_t ui_config_scan(void)
         if (len < 5) continue;
         if (strcmp(de->d_name + len - 5, ".json") != 0) continue;
 
-        res.names[idx] = strndup(de->d_name, UI_CONFIG_FNAME_LEN - 1);
+        res.names[idx] = strndup(de->d_name, CFG_FNAME_LEN - 1);
         if (!res.names[idx]) {
             ESP_LOGE(TAG, "OOM copying filename");
             res.count = idx;
@@ -294,18 +294,14 @@ json_scan_result_t ui_config_scan(void)
 
     closedir(dir);
     res.count = idx;
-    ESP_LOGI(TAG, "Scan found %d JSON file(s) in %s", res.count, UI_CONFIG_DECK_PATH);
+    ESP_LOGI(TAG, "Scan found %d JSON file(s) in %s", res.count, UI_DECK_CONFIG_PATH);
     return res;
 }
 
-void ui_config_scan_free(json_scan_result_t *res)
+void ui_deck_config_scan_free(deck_scan_result_t *res)
 {
-    if (!res) return;
-    for (int i = 0; i < res->count; i++) {
-        free(res->names[i]);
-        res->names[i] = NULL;
-    }
-    free(res->names);
-    res->names = NULL;
-    res->count = 0;
+    /* deck_scan_result_t is just an alias of the shared cfg_scan_result_t
+     * (see app_config.h) -- kept as its own wrapper for API symmetry with
+     * ui_deck_config_scan(), same as Monitor's/Media's own scan_free(). */
+    cfg_scan_result_free(res);
 }
