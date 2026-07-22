@@ -97,16 +97,16 @@ void ui_monitor_img_set_path(int page_idx, const char *path)
     }
 }
 
-void ui_monitor_img_load_all(void)
+bool ui_monitor_img_load_one(int page_idx)
 {
-    for (int i = 0; i < MON_TOTAL_PAGE_MAX; i++) {
-        if (s_imgs[i].path[0] == '\0') continue;
-        if (s_imgs[i].loaded)          continue;
+    if (page_idx < 0 || page_idx >= MON_TOTAL_PAGE_MAX) return false;
+    if (s_imgs[page_idx].loaded)          return true;
+    if (s_imgs[page_idx].path[0] == '\0') return false;
 
-        if (decode_to_psram(s_imgs[i].path, &s_imgs[i].dsc)) {
-            s_imgs[i].loaded = true;
-        }
+    if (decode_to_psram(s_imgs[page_idx].path, &s_imgs[page_idx].dsc)) {
+        s_imgs[page_idx].loaded = true;
     }
+    return s_imgs[page_idx].loaded;
 }
 
 lv_img_dsc_t *ui_monitor_img_get(int page_idx)

@@ -6,6 +6,7 @@
 #include "ui.h"
 #include "usb/usb_hid.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -85,6 +86,7 @@ static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
                                    uint8_t ssd_life);
 static void ui_monitor_on_hid_time(uint8_t hour, uint8_t min, uint8_t sec,
                                    uint8_t month, uint8_t day, uint8_t wday);
+static void monitor_lazy_bg_set(int page_idx);
 
 /* -----------------------------------------------------------------------
  * Sidebar page switching
@@ -122,6 +124,7 @@ static void sidebar_btn_cb(lv_event_t *e)
         lv_obj_set_style_bg_color(s_sidebar_btns[s_cur_page],
                                   lv_color_hex(0x0055cc), 0);
     }
+    monitor_lazy_bg_set(s_cur_page);
     lv_obj_clear_flag(s_pages[s_cur_page], LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -170,6 +173,50 @@ static lv_obj_t *make_page(lv_obj_t *parent)
 }
 
 /* -----------------------------------------------------------------------
+ * Lazy background attach -- decode + insert page_idx's bg image the
+ * first time that page is actually shown, instead of every page eagerly
+ * on Monitor entry (ui_monitor_img_load_one() is the per-page decode;
+ * see its header comment). Same shape as ui_deck.c's
+ * ui_deck_lazy_bg_set(): insert at child index 0 so it sits behind
+ * whatever mask/content already exists from build_clock_page()/
+ * build_data_page(), and skip re-inserting if it's already there.
+ * ----------------------------------------------------------------------- */
+static void monitor_lazy_bg_set(int page_idx)
+{
+    if (page_idx < 0 || page_idx >= s_total_pages) return;
+
+    lv_obj_t *page = s_pages[page_idx];
+    if (!page) return;
+
+    /* Already attached (child 0 is an image) -- nothing to do. */
+    if (lv_obj_get_child_cnt(page) >= 1 &&
+        lv_obj_check_type(lv_obj_get_child(page, 0), &lv_img_class)) {
+        return;
+    }
+
+    if (!ui_monitor_img_load_one(page_idx)) return;   /* no path, or decode failed */
+
+    lv_img_dsc_t *bg_dsc = ui_monitor_img_get(page_idx);
+    if (!bg_dsc) return;
+
+    uint32_t zoom_x   = (uint32_t)CONTENT_W * 256 / bg_dsc->header.w;
+    uint32_t zoom_y   = (uint32_t)CONTENT_H * 256 / bg_dsc->header.h;
+    uint32_t zoom     = (zoom_x > zoom_y) ? zoom_x : zoom_y;
+    int32_t  scaled_w = (int32_t)bg_dsc->header.w * (int32_t)zoom / 256;
+    int32_t  offset_x = (CONTENT_W - scaled_w) / 2;
+
+    lv_obj_t *bg = lv_img_create(page);
+    lv_obj_move_to_index(bg, 0);
+    lv_img_set_src(bg, bg_dsc);
+    lv_img_set_pivot(bg, 0, 0);
+    lv_img_set_zoom(bg, (uint16_t)zoom);
+    lv_obj_set_pos(bg, offset_x, 0);
+
+    ESP_LOGI(TAG, "lazy bg set page %d - PSRAM free: %d B",
+             page_idx, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+/* -----------------------------------------------------------------------
  * Clock page
  *
  * Layout (content area 720x480):
@@ -179,23 +226,14 @@ static lv_obj_t *make_page(lv_obj_t *parent)
  * ----------------------------------------------------------------------- */
 static void build_clock_page(lv_obj_t *parent)
 {
-    /* Background image from monitor img manager */
-    lv_img_dsc_t *bg_dsc = ui_monitor_img_get(MON_PAGE_IDX_CLOCK);
-    if (bg_dsc) {
-        int      page_w   = CONTENT_W;
-        int      page_h   = CONTENT_H;
-        uint32_t zoom_x   = (uint32_t)page_w * 256 / bg_dsc->header.w;
-        uint32_t zoom_y   = (uint32_t)page_h * 256 / bg_dsc->header.h;
-        uint32_t zoom     = (zoom_x > zoom_y) ? zoom_x : zoom_y;
-        int32_t  scaled_w = (int32_t)bg_dsc->header.w * (int32_t)zoom / 256;
-        int32_t  offset_x = (page_w - scaled_w) / 2;
-
-        lv_obj_t *bg = lv_img_create(parent);
-        lv_img_set_src(bg, bg_dsc);
-        lv_img_set_pivot(bg, 0, 0);
-        lv_img_set_zoom(bg, (uint16_t)zoom);
-        lv_obj_set_pos(bg, offset_x, 0);
-    }
+    /* Background image is NOT attached here -- decoding it is slow SD I/O
+     * and this runs for every page at Monitor-entry time. It's added
+     * later, lazily, by monitor_lazy_bg_set() the first time this page is
+     * actually shown (see call sites in ui_monitor_enter()/
+     * sidebar_btn_cb()), same shape as ui_deck.c's ui_deck_lazy_bg_set().
+     * The mask below stays unconditional either way -- it's cheap (a
+     * plain color overlay, no decode) and monitor_lazy_bg_set() inserts
+     * the bg behind it via lv_obj_move_to_index() once it's ready. */
 
     /* Semi-transparent overlay -- same opacity as deck pages */
     lv_obj_t *mask = lv_obj_create(parent);
@@ -356,23 +394,18 @@ static void build_data_page(lv_obj_t *parent, int page_idx)
 {
     const mon_page_cfg_t *pg = &s_mon_cfg.pages[page_idx - 1]; /* page_idx 1-based for data */
 
-    /* Background image */
-    lv_img_dsc_t *bg_dsc = ui_monitor_img_get(page_idx);
-    if (bg_dsc) {
-        int      page_w   = CONTENT_W;
-        int      page_h   = CONTENT_H;
-        uint32_t zoom_x   = (uint32_t)page_w * 256 / bg_dsc->header.w;
-        uint32_t zoom_y   = (uint32_t)page_h * 256 / bg_dsc->header.h;
-        uint32_t zoom     = (zoom_x > zoom_y) ? zoom_x : zoom_y;
-        int32_t  scaled_w = (int32_t)bg_dsc->header.w * (int32_t)zoom / 256;
-        int32_t  offset_x = (page_w - scaled_w) / 2;
-
-        lv_obj_t *bg = lv_img_create(parent);
-        lv_img_set_src(bg, bg_dsc);
-        lv_img_set_pivot(bg, 0, 0);
-        lv_img_set_zoom(bg, (uint16_t)zoom);
-        lv_obj_set_pos(bg, offset_x, 0);
-
+    /* Background image is NOT decoded/attached here -- same reasoning as
+     * build_clock_page(): it's slow SD I/O and this runs for every data
+     * page at Monitor-entry time regardless of whether the user ever
+     * visits it. monitor_lazy_bg_set() adds it later, only for the page
+     * actually being shown.
+     *
+     * The mask, however, is keyed off whether a bg is *configured*
+     * (pg->bg_image non-empty), not off whether it decoded successfully
+     * -- that mirrors the original behavior (mask only when there's a
+     * photo to dim) without depending on decode timing, which now
+     * happens well after this function returns. */
+    if (pg->bg_image[0] != '\0') {
         lv_obj_t *mask = lv_obj_create(parent);
         lv_obj_set_size(mask, CONTENT_W, CONTENT_H);
         lv_obj_set_pos(mask, 0, 0);
@@ -663,9 +696,10 @@ void ui_monitor_enter(lv_obj_t *sidebar)
         ui_monitor_img_set_path(i + 1, bg_path);
     }
 
-    ui_monitor_img_load_all();
-
-    /* Content pages */
+    /* Content pages -- bg images are NOT decoded here, only the paths
+     * above were recorded. monitor_lazy_bg_set() decodes+attaches one
+     * page's bg at a time, only for pages actually shown (see below for
+     * the initial page, and sidebar_btn_cb() for every switch after). */
     for (int i = 0; i < s_total_pages; i++) {
         s_pages[i] = make_page(scr);
         if (i != MON_PAGE_IDX_CLOCK)
@@ -686,6 +720,7 @@ void ui_monitor_enter(lv_obj_t *sidebar)
     lv_timer_ready(s_clock_timer);
 
     s_cur_page = MON_PAGE_IDX_CLOCK;
+    monitor_lazy_bg_set(s_cur_page);   /* only the page that's actually visible on entry */
 
     /* Register HID callbacks and notify PC to start sending data */
     usb_hid_set_monitor_cb(ui_monitor_on_hid_data);
