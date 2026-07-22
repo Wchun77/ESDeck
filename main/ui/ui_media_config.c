@@ -1,5 +1,4 @@
 #include "ui_media_config.h"
-#include "ui_config.h"
 #include "app_config.h"
 #include "nvs_manager.h"
 
@@ -60,13 +59,13 @@ bool ui_media_config_load(ui_media_config_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
 
-    char nvs_fname[UI_MEDIA_CFG_FNAME_LEN];
+    char nvs_fname[CFG_FNAME_LEN];
     if (!ui_media_config_nvs_load(nvs_fname, sizeof(nvs_fname))) {
         ESP_LOGW(TAG, "no NVS config, treating as no config");
         return false;
     }
 
-    char path[UI_MEDIA_CFG_FNAME_LEN + 24];
+    char path[CFG_FNAME_LEN + 24];
     snprintf(path, sizeof(path), "%s/%s", SD_PATH_CONFIG_MEDIA, nvs_fname);
 
     char *buf = read_file(path);
@@ -140,7 +139,7 @@ media_scan_result_t ui_media_config_scan(void)
         size_t len = strlen(de->d_name);
         if (len < 5) continue;
         if (strcmp(de->d_name + len - 5, ".json") != 0) continue;
-        res.names[idx] = strndup(de->d_name, UI_MEDIA_CFG_FNAME_LEN - 1);
+        res.names[idx] = strndup(de->d_name, CFG_FNAME_LEN - 1);
         if (!res.names[idx]) {
             ESP_LOGE(TAG, "OOM copying filename");
             res.count = idx;
@@ -158,12 +157,8 @@ media_scan_result_t ui_media_config_scan(void)
 
 void ui_media_config_scan_free(media_scan_result_t *res)
 {
-    if (!res) return;
-    for (int i = 0; i < res->count; i++) {
-        free(res->names[i]);
-        res->names[i] = NULL;
-    }
-    free(res->names);
-    res->names = NULL;
-    res->count = 0;
+    /* media_scan_result_t is just an alias of the shared cfg_scan_result_t
+     * (see app_config.h) -- kept as its own wrapper for API symmetry with
+     * ui_media_config_scan(). */
+    cfg_scan_result_free(res);
 }

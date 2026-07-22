@@ -1,7 +1,7 @@
 #include "waveshare_rgb_lcd_port.h"
 #include "usb_hid.h"
 #include "ui.h"
-#include "ui_img_pool.h"
+#include "ui_deck.h"
 #include "ui_ota_dialog.h"
 #include "fs_manager/fs_sd.h"
 #include "usb/usb_manager.h"
@@ -23,7 +23,7 @@ void app_main(void)
     nvs_manager_init();
     fs_sd_init();
 
-    ui_preload_start();   /* load config, kick off background preload task */
+    ui_deck_preload_start();   /* load config, kick off background preload task */
 
     /* icon背景預載的task優先權是3,如果跟boot_anim同時跑,會搶走main
      * task的CPU,讓JPEG開機動畫的解碼被拖慢(實測從~200ms/幀拖到
@@ -42,7 +42,7 @@ void app_main(void)
      * device on success and never returns. */
     ui_ota_check_and_prompt();
 
-    ui_preload_wait();
+    ui_deck_preload_wait();
     usb_manager_init();   /* preload task continues in background after this */
 
     if (lvgl_port_lock(-1)) {

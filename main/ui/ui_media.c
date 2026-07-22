@@ -2,7 +2,7 @@
 #include "ui.h"
 #include "ui_settings.h"
 #include "ui_media_config.h"
-#include "ui_config.h"
+#include "app_config.h"     /* SD_PATH_ASSETS_BG -- shared assets/backgrounds folder every mode uses */
 #include "usb/usb_hid.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -305,9 +305,8 @@ static void next_cb(lv_event_t *e)
 
 /* Tapping the sidebar bar is how the user leaves the Settings page and
  * comes back to the player card -- Media has no per-page sidebar buttons
- * for this like Deck/Monitor do, so the bar itself doubles as the "go
- * back to Media" tap target. Mirrors sidebar_btn_cb() in ui_deck.c /
- * ui_monitor.c. */
+ * for this, so the bar itself doubles as the "go back to Media" tap
+ * target. */
 static void sidebar_bar_click_cb(lv_event_t *e)
 {
     ui_settings_deselect();
@@ -467,7 +466,7 @@ static void media_timer_cb(lv_timer_t *timer)
 }
 
 /* -----------------------------------------------------------------------
- * Sidebar level bar (replaces the page-button column Deck/Monitor use)
+ * Sidebar level bar (Media has no per-page button column, just this)
  * ----------------------------------------------------------------------- */
 static void build_sidebar_bar(lv_obj_t *sidebar)
 {
@@ -499,12 +498,12 @@ static void build_sidebar_bar(lv_obj_t *sidebar)
 
 /* -----------------------------------------------------------------------
  * Background image -- decodes s_media_cfg.bg_image (if set) straight into
- * a PSRAM buffer, same shape as ui_monitor_img.c's decode_to_psram() (own
- * small copy rather than a shared one, matching how ui_config.c/
- * ui_monitor_config.c already each keep their own read_file()/str_field()
- * rather than sharing). Runs on the LVGL thread already (called from
- * ui_media_enter(), itself reached via a Settings menu item click), so
- * unlike usb_hid.c's PNG decode this needs no lvgl_port_lock().
+ * a PSRAM buffer. Own small copy of the decode logic rather than sharing
+ * any other module's pool, because Media has no lazy/LRU pool of its own
+ * to join -- see ui_settings.c's settings_lazy_bg_set() comment for why.
+ * Runs on the LVGL thread already (called from ui_media_enter(), itself
+ * reached via a Settings menu item click), so unlike usb_hid.c's PNG
+ * decode this needs no lvgl_port_lock().
  * ----------------------------------------------------------------------- */
 static bool decode_bg_to_psram(const char *path, lv_img_dsc_t *dsc)
 {
@@ -522,7 +521,7 @@ static bool decode_bg_to_psram(const char *path, lv_img_dsc_t *dsc)
     uint8_t     px = lv_img_cf_get_px_size(cf) / 8;
 
     /* JPEG reports px_size == 0 -- fix up to TRUE_COLOR, same as
-     * ui_monitor_img.c's decode_to_psram(). */
+     * ui_img_pool.c's decode logic. */
     if (px == 0) {
         cf = LV_IMG_CF_TRUE_COLOR;
         px = sizeof(lv_color_t);
@@ -564,17 +563,17 @@ static bool decode_bg_to_psram(const char *path, lv_img_dsc_t *dsc)
     return true;
 }
 
-/* Builds the bg(child0)+mask(child1) pair on top of s_page, same
- * cover-fit zoom/center math as ui_deck.c's ui_deck_lazy_bg_set() (see
- * there for the reasoning behind each line). No-op if bg_image is empty
- * -- s_page's flat 0x222222 fallback (set in build_player_card()) is
- * left showing as-is, matching Deck/Monitor's own "no bg selected" look. */
+/* Builds the bg(child0)+mask(child1) pair on top of s_page, using a
+ * standard cover-fit zoom/center: the image is scaled up just enough to
+ * cover the whole content area on whichever axis needs more scale, then
+ * centered on the other axis. No-op if bg_image is empty -- s_page's flat
+ * 0x222222 fallback (set in build_player_card()) is left showing as-is. */
 static void build_bg(void)
 {
     if (!s_media_cfg.bg_image[0]) return;
 
-    char path[sizeof("S:") + sizeof(UI_CONFIG_BG_PATH) + 1 + UI_MEDIA_CFG_BG_LEN];
-    snprintf(path, sizeof(path), "S:%s/%s", UI_CONFIG_BG_PATH, s_media_cfg.bg_image);
+    char path[sizeof("S:") + sizeof(SD_PATH_ASSETS_BG) + 1 + CFG_BG_LEN];
+    snprintf(path, sizeof(path), "S:%s/%s", SD_PATH_ASSETS_BG, s_media_cfg.bg_image);
 
     if (!decode_bg_to_psram(path, &s_bg_dsc)) return;
     s_bg_data = (uint8_t *)s_bg_dsc.data;
@@ -617,7 +616,7 @@ static void build_player_card(lv_obj_t *scr)
     s_page = lv_obj_create(scr);
     lv_obj_set_size(s_page, CONTENT_W, CONTENT_H);
     lv_obj_set_pos(s_page, SIDEBAR_W, 0);
-    lv_obj_set_style_bg_color(s_page, lv_color_hex(0x222222), 0);   /* same fallback as ui_deck.c/ui_monitor.c's "no bg selected" flat color */
+    lv_obj_set_style_bg_color(s_page, lv_color_hex(0x222222), 0);   /* flat fallback color used whenever no bg image is selected */
     lv_obj_set_style_border_width(s_page, 0, 0);
     lv_obj_set_style_radius(s_page, 0, 0);
     lv_obj_set_style_pad_all(s_page, 0, 0);
@@ -776,9 +775,9 @@ void ui_media_enter(lv_obj_t *sidebar)
     s_img_queue      = xQueueCreate(4, sizeof(media_img_msg_t));
 
     /* Loads whichever config/media/<name>.json is currently selected in
-     * NVS (see ui_media_config.h) -- same multi-config picker Deck/Monitor
-     * use. No selection yet, or the selected file missing/invalid, just
-     * means "no config": ui_media_config_load() leaves s_media_cfg all-
+     * NVS (see ui_media_config.h). No selection yet, or the selected file
+     * missing/invalid, just means "no config": ui_media_config_load()
+     * leaves s_media_cfg all-
      * zeroed, so build_bg() below no-ops (empty bg_image) and
      * s_media_cfg.settings is already the same all-empty struct
      * ui_settings_apply_appearance(NULL) substitutes internally -- no
@@ -859,8 +858,9 @@ void ui_media_exit(void)
      * source pointer (&s_bg_dsc), which is a static -- the SAME address
      * every time Media is re-entered, only its .data changes to a fresh
      * buffer -- so without this a stale cache hit could serve the just-
-     * freed buffer above on next entry. Same issue ui_monitor_img.c's
-     * ui_monitor_img_free_all() already documents/handles for Monitor. */
+     * freed buffer above on next entry. Same issue ui_settings.c's
+     * settings_bg_release() already documents/handles for its own
+     * standalone-mode static buffer (s_bg_dsc). */
     lv_img_cache_invalidate_src(NULL);
 
     if (s_page) {

@@ -1,4 +1,5 @@
 #include "ui_img_pool.h"
+#include "app_config.h"   /* CFG_BG_LEN, SD_PATH_ASSETS_BG -- generic, not any one mode's */
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
@@ -7,17 +8,26 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-/* Callbacks into ui_deck for LRU eviction.
- * Defined as weak so the linker won't complain if ui_deck is not present
- * during unit testing, but in production both TUs are always linked. */
+#define TAG  "IMG"
+
+/* Eviction-match accessor callbacks, defined as weak-by-convention externs
+ * (no header decl) so this file never has to #include any mode's own
+ * header just to check whether an evicted entry belongs to it. In
+ * production all TUs are always linked; each mode's own accessors return
+ * count 0 / empty paths whenever that mode isn't the one currently active,
+ * so at most one of the two page loops below ever actually matches. */
 extern void        ui_deck_lazy_bg_remove_widgets(int page_idx);
 extern int         ui_deck_page_count(void);
 extern const char *ui_deck_page_bg_image(int page_idx);
 
-/* Settings' own bg image shares this same pool while Deck mode is active
- * (see ui_settings.c's settings_lazy_bg_set()) -- it isn't one of Deck's
- * configured page backgrounds, so the eviction match loop below needs a
- * separate check + removal callback for it specifically. */
+extern void        ui_monitor_lazy_bg_remove_widget(int page_idx);
+extern int         ui_monitor_page_count(void);
+extern const char *ui_monitor_page_bg_image(int page_idx);
+
+/* Settings' own bg image shares this same pool while Deck or Monitor mode
+ * is active (see ui_settings.c's settings_lazy_bg_set()) -- it isn't one
+ * of either mode's own configured page backgrounds, so the eviction match
+ * loop below needs a separate check + removal callback for it. */
 extern void ui_settings_bg_widget_remove(void);
 extern void ui_settings_current_bg_path(char *out, size_t out_size);
 
@@ -25,7 +35,7 @@ extern void ui_settings_current_bg_path(char *out, size_t out_size);
  * Pool entry
  * ----------------------------------------------------------------------- */
 typedef struct {
-    char         key[UI_CONFIG_BG_LEN + 16];
+    char         key[CFG_BG_LEN + 16];
     lv_img_dsc_t dsc;
     bool         valid;
     bool         is_bg;
@@ -35,12 +45,6 @@ typedef struct {
 static psram_img_t *s_pool     = NULL;
 static int          s_pool_cap = 0;
 static int          s_pool_n   = 0;
-
-static volatile bool s_preload_done    = false;
-static volatile bool s_preload_started = false;
-static TaskHandle_t  s_preload_caller  = NULL;
-
-static deck_cfg_t s_preload_cfg;
 
 /* -----------------------------------------------------------------------
  * Pool operations
@@ -68,7 +72,7 @@ lv_img_dsc_t *ui_img_pool_decode(const char *path)
     }
     if (slot < 0) {
         if (s_pool_n >= s_pool_cap) {
-            ESP_LOGW("IMG", "pool full, skipping %s", path);
+            ESP_LOGW(TAG, "pool full, skipping %s", path);
             return NULL;
         }
         slot = s_pool_n;
@@ -77,7 +81,7 @@ lv_img_dsc_t *ui_img_pool_decode(const char *path)
     lv_img_decoder_dsc_t dec;
     memset(&dec, 0, sizeof(dec));
     if (lv_img_decoder_open(&dec, path, lv_color_white(), 0) != LV_RES_OK) {
-        ESP_LOGW("IMG", "open failed: %s", path);
+        ESP_LOGW(TAG, "open failed: %s", path);
         return NULL;
     }
 
@@ -108,24 +112,46 @@ lv_img_dsc_t *ui_img_pool_decode(const char *path)
             }
         }
         if (lru_idx >= 0) {
-            ESP_LOGI("IMG", "LRU evict: %s", s_pool[lru_idx].key);
-            int  n       = ui_deck_page_count();
+            ESP_LOGI(TAG, "LRU evict: %s", s_pool[lru_idx].key);
             bool matched = false;
-            for (int p = 0; p < n; p++) {
+
+            /* Is it one of Deck's own page backgrounds? */
+            int deck_n = ui_deck_page_count();
+            for (int p = 0; p < deck_n && !matched; p++) {
                 const char *bg = ui_deck_page_bg_image(p);
                 if (!bg || !bg[0]) continue;
-                char chk[sizeof("S:") + sizeof(UI_CONFIG_BG_PATH) + 1 + UI_CONFIG_BG_LEN];
-                snprintf(chk, sizeof(chk), "S:%s/%s", UI_CONFIG_BG_PATH, bg);
+                char chk[sizeof("S:") + sizeof(SD_PATH_ASSETS_BG) + 1 + CFG_BG_LEN];
+                snprintf(chk, sizeof(chk), "S:%s/%s", SD_PATH_ASSETS_BG, bg);
                 if (strcmp(chk, s_pool[lru_idx].key) == 0) {
                     ui_deck_lazy_bg_remove_widgets(p);
                     matched = true;
-                    break;
                 }
             }
+
+            /* Not a Deck page -- is it one of Monitor's own page
+             * backgrounds instead? (Deck and Monitor are never both
+             * active at once, so at most one of these two loops ever
+             * actually iterates over anything -- the inactive mode's
+             * accessor just returns count 0 / empty paths.) */
             if (!matched) {
-                /* Not one of Deck's own pages -- check whether it's
-                 * Settings' bg instead (it shares this pool too). */
-                char settings_path[sizeof("S:") + sizeof(UI_CONFIG_BG_PATH) + 1 + UI_CONFIG_BG_LEN];
+                int mon_n = ui_monitor_page_count();
+                for (int p = 0; p < mon_n && !matched; p++) {
+                    const char *bg = ui_monitor_page_bg_image(p);
+                    if (!bg || !bg[0]) continue;
+                    char chk[sizeof("S:") + sizeof(SD_PATH_ASSETS_BG) + 1 + CFG_BG_LEN];
+                    snprintf(chk, sizeof(chk), "S:%s/%s", SD_PATH_ASSETS_BG, bg);
+                    if (strcmp(chk, s_pool[lru_idx].key) == 0) {
+                        ui_monitor_lazy_bg_remove_widget(p);
+                        matched = true;
+                    }
+                }
+            }
+
+            if (!matched) {
+                /* Not one of Deck's or Monitor's own pages -- check
+                 * whether it's Settings' bg instead (it shares this pool
+                 * too, whichever mode is active). */
+                char settings_path[sizeof("S:") + sizeof(SD_PATH_ASSETS_BG) + 1 + CFG_BG_LEN];
                 ui_settings_current_bg_path(settings_path, sizeof(settings_path));
                 if (settings_path[0] && strcmp(settings_path, s_pool[lru_idx].key) == 0) {
                     ui_settings_bg_widget_remove();
@@ -139,7 +165,7 @@ lv_img_dsc_t *ui_img_pool_decode(const char *path)
     }
 
     if (!buf) {
-        ESP_LOGE("IMG", "PSRAM OOM %u KB: %s", (unsigned)(sz / 1024), path);
+        ESP_LOGE(TAG, "PSRAM OOM %u KB: %s", (unsigned)(sz / 1024), path);
         lv_img_decoder_close(&dec);
         return NULL;
     }
@@ -152,7 +178,7 @@ lv_img_dsc_t *ui_img_pool_decode(const char *path)
         for (lv_coord_t y = 0; y < (lv_coord_t)h && ok; y++) {
             if (lv_img_decoder_read_line(&dec, 0, y, (lv_coord_t)w,
                                          buf + (size_t)y * stride) != LV_RES_OK) {
-                ESP_LOGE("IMG", "read_line failed row %d: %s", y, path);
+                ESP_LOGE(TAG, "read_line failed row %d: %s", y, path);
                 ok = false;
             }
         }
@@ -179,7 +205,7 @@ lv_img_dsc_t *ui_img_pool_decode(const char *path)
     e->is_bg                  = false;
     e->last_used              = xTaskGetTickCount();
 
-    ESP_LOGI("IMG", "cached %s [%ux%u %u KB]",
+    ESP_LOGI(TAG, "cached %s [%ux%u %u KB]",
              path, (unsigned)w, (unsigned)h, (unsigned)(sz / 1024));
     return &e->dsc;
 }
@@ -210,98 +236,18 @@ void ui_img_pool_free(void)
     /* Settings may have been borrowing a slot in this pool -- that
      * buffer is now gone, so its widget/reference must go too, or it's
      * left pointing at freed PSRAM the next time Settings opens (same
-     * reasoning as ui_monitor_img_free_all()'s call to this). */
+     * reasoning applies whether the pool being freed was backing Deck or
+     * Monitor). */
     ui_settings_bg_widget_remove();
 }
 
-void ui_img_pool_load(const deck_cfg_t *cfg)
+void ui_img_pool_reserve(int cap)
 {
-    /* Pool capacity: icons + sidebar icons (both decoded eagerly) + bg slots
-     * (lazy, LRU managed). Reserve one slot per page that has a bg image so
-     * LRU eviction has room to operate without permanently losing a slot to
-     * a freed entry. */
-    int icon_count = 0;
-    int bg_count   = 0;
-    for (int p = 0; p < cfg->page_count; p++) {
-        if (cfg->pages[p].bg_image[0]) bg_count++;
-        if (cfg->pages[p].side_icon[0]) icon_count++;
-        icon_count += cfg->pages[p].button_count;
-    }
-
-    /* +1 reserves a slot for Settings' own bg image, which shares this
-     * same pool while Deck mode is active (see ui_settings.c's
-     * settings_lazy_bg_set()) instead of holding a separate buffer. */
-    int cap = icon_count + bg_count + 1;
-    if (cap == 0) return;
-
+    if (cap <= 0) return;
     s_pool     = calloc((size_t)cap, sizeof(psram_img_t));
     s_pool_cap = cap;
+    s_pool_n   = 0;
 
-    /* Decode icons only — bg images are decoded lazily in ui_deck_lazy_bg_set. */
-    for (int p = 0; p < cfg->page_count; p++) {
-        for (int b = 0; b < cfg->pages[p].button_count; b++) {
-            if (!cfg->pages[p].buttons[b].icon[0]) continue;
-            char path[sizeof("S:") + sizeof(UI_CONFIG_ICON_PATH) + 1 + UI_CONFIG_ICON_LEN];
-            snprintf(path, sizeof(path), "S:%s/%s",
-                     UI_CONFIG_ICON_PATH, cfg->pages[p].buttons[b].icon);
-            FILE *f = fopen(path + 2, "r");
-            if (!f) continue;
-            fclose(f);
-            ui_img_pool_decode(path);
-        }
-
-        if (cfg->pages[p].side_icon[0]) {
-            char path[sizeof("S:") + sizeof(UI_CONFIG_SIDE_ICON_PATH) + 1 + UI_CONFIG_SIDE_ICON_LEN];
-            snprintf(path, sizeof(path), "S:%s/%s",
-                     UI_CONFIG_SIDE_ICON_PATH, cfg->pages[p].side_icon);
-            FILE *f = fopen(path + 2, "r");
-            if (f) {
-                fclose(f);
-                ui_img_pool_decode(path);
-            }
-        }
-    }
-
-    ESP_LOGI("IMG", "pool loaded - %d icons, %d bg slots, PSRAM free: %d B",
-             s_pool_n, bg_count, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-}
-
-/* -----------------------------------------------------------------------
- * Boot preload
- * ----------------------------------------------------------------------- */
-static void preload_task_fn(void *arg)
-{
-    ui_img_pool_load(&s_preload_cfg);
-    ESP_LOGI("IMG", "preload done - %d cached, PSRAM free: %d B",
-             s_pool_n, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-    s_preload_done = true;
-    if (s_preload_caller) xTaskNotifyGive(s_preload_caller);
-    vTaskDelete(NULL);
-}
-
-void ui_preload_start(void)
-{
-    if (s_preload_started) return;
-    s_preload_started = true;
-
-    bool cfg_ok = ui_config_load(&s_preload_cfg);
-    if (!cfg_ok || s_preload_cfg.page_count == 0) {
-        s_preload_cfg.page_count = 1;
-        s_preload_cfg.pages      = calloc(1, sizeof(page_cfg_t));
-        snprintf(s_preload_cfg.pages[0].name, UI_CONFIG_NAME_LEN, "Main");
-    }
-
-    s_preload_caller = xTaskGetCurrentTaskHandle();
-    xTaskCreate(preload_task_fn, "img_preload", 8192, NULL, 3, NULL);
-}
-
-void ui_preload_wait(void)
-{
-    if (s_preload_started && !s_preload_done)
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-}
-
-deck_cfg_t *ui_img_pool_take_preload_cfg(void)
-{
-    return &s_preload_cfg;
+    ESP_LOGI(TAG, "pool reserved - %d slot(s), PSRAM free: %d B",
+             cap, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }

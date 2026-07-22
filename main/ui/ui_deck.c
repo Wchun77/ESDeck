@@ -5,6 +5,8 @@
 #include "usb/usb_hid.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -72,9 +74,9 @@ void ui_deck_lazy_bg_set(int page_idx)
     int page_w = SCREEN_W - SIDEBAR_W;
     int page_h = SCREEN_H;
 
-    char bg_path[sizeof("S:") + sizeof(UI_CONFIG_BG_PATH) + 1 + UI_CONFIG_BG_LEN];
+    char bg_path[sizeof("S:") + sizeof(SD_PATH_ASSETS_BG) + 1 + CFG_BG_LEN];
     snprintf(bg_path, sizeof(bg_path), "S:%s/%s",
-             UI_CONFIG_BG_PATH, page_cfg->bg_image);
+             SD_PATH_ASSETS_BG, page_cfg->bg_image);
 
     /* If bg widget already exists, just refresh last_used and return. */
     if (lv_obj_get_child_cnt(page) >= 1 &&
@@ -248,9 +250,9 @@ static void create_buttons(lv_obj_t *btn_cont, int page_idx,
         bool has_icon = false;
 
         if (bcfg->icon[0] != '\0') {
-            char icon_path[sizeof("S:") + sizeof(UI_CONFIG_ICON_PATH) + 1 + UI_CONFIG_ICON_LEN];
+            char icon_path[sizeof("S:") + sizeof(SD_PATH_ASSETS_ICONS) + 1 + UI_DECK_CONFIG_ICON_LEN];
             snprintf(icon_path, sizeof(icon_path), "S:%s/%s",
-                     UI_CONFIG_ICON_PATH, bcfg->icon);
+                     SD_PATH_ASSETS_ICONS, bcfg->icon);
 
             lv_img_dsc_t *cached = ui_img_pool_find(icon_path);
             bool usable = (cached != NULL);
@@ -351,18 +353,18 @@ void ui_deck_build(lv_obj_t *sidebar, deck_cfg_t *cfg)
 
         /* Custom icon replaces the text label entirely when present and the
          * file actually exists on SD -- see side_icon field comment in
-         * ui_config.h. Falls back to the page name text otherwise.
+         * ui_deck_config.h. Falls back to the page name text otherwise.
          *
-         * Same pool as button icons (ui_img_pool_load eagerly decodes these
-         * too), so this is normally a cache hit here — falls back to a raw
+         * Same pool as button icons (ui_deck_preload_icons() eagerly decodes
+         * these too), so this is normally a cache hit here — falls back to a raw
          * streaming decode (no PSRAM residency, no "cached" log) only if the
          * pool missed it (e.g. pool was full at preload time). */
         bool has_icon = false;
         const char *side_icon = s_cfg.pages[i].side_icon;
         if (side_icon[0] != '\0') {
-            char icon_path[sizeof("S:") + sizeof(UI_CONFIG_SIDE_ICON_PATH) + 1 + UI_CONFIG_SIDE_ICON_LEN];
+            char icon_path[sizeof("S:") + sizeof(SD_PATH_ASSETS_SIDE_ICON) + 1 + UI_DECK_CONFIG_SIDE_ICON_LEN];
             snprintf(icon_path, sizeof(icon_path), "S:%s/%s",
-                     UI_CONFIG_SIDE_ICON_PATH, side_icon);
+                     SD_PATH_ASSETS_SIDE_ICON, side_icon);
 
             lv_img_dsc_t *cached = ui_img_pool_find(icon_path);
             bool usable = (cached != NULL);
@@ -441,8 +443,116 @@ void ui_deck_destroy(void)
     }
 
     ui_img_pool_free();
-    ui_config_free(&s_cfg);
+    ui_deck_config_free(&s_cfg);
 
     ESP_LOGI("DECK", "destroyed - PSRAM free: %d B",
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+/* -----------------------------------------------------------------------
+ * Icon preload -- Deck-only feature (Monitor/Media have no eager preload
+ * step, only lazy backgrounds). Reserves ui_img_pool capacity for cfg
+ * and eagerly decodes every button/side icon it references; bg images
+ * stay lazy either way, decoded on demand by ui_deck_lazy_bg_set(). Used
+ * both by the boot preload sequence below and by a plain Deck config
+ * switch (see ui_config_dialog.c's switch_preload_task()).
+ * ----------------------------------------------------------------------- */
+void ui_deck_preload_icons(const deck_cfg_t *cfg)
+{
+    /* Pool capacity: icons + sidebar icons (both decoded eagerly) + bg slots
+     * (lazy, LRU managed). Reserve one slot per page that has a bg image so
+     * LRU eviction has room to operate without permanently losing a slot to
+     * a freed entry. */
+    int icon_count = 0;
+    int bg_count   = 0;
+    for (int p = 0; p < cfg->page_count; p++) {
+        if (cfg->pages[p].bg_image[0]) bg_count++;
+        if (cfg->pages[p].side_icon[0]) icon_count++;
+        icon_count += cfg->pages[p].button_count;
+    }
+
+    /* +1 reserves a slot for Settings' own bg image, which shares this
+     * same pool while Deck mode is active (see ui_settings.c's
+     * settings_lazy_bg_set()) instead of holding a separate buffer. */
+    int cap = icon_count + bg_count + 1;
+    if (cap == 0) return;
+
+    ui_img_pool_reserve(cap);
+
+    /* Decode icons only — bg images are decoded lazily in ui_deck_lazy_bg_set. */
+    for (int p = 0; p < cfg->page_count; p++) {
+        for (int b = 0; b < cfg->pages[p].button_count; b++) {
+            if (!cfg->pages[p].buttons[b].icon[0]) continue;
+            char path[sizeof("S:") + sizeof(SD_PATH_ASSETS_ICONS) + 1 + UI_DECK_CONFIG_ICON_LEN];
+            snprintf(path, sizeof(path), "S:%s/%s",
+                     SD_PATH_ASSETS_ICONS, cfg->pages[p].buttons[b].icon);
+            FILE *f = fopen(path + 2, "r");
+            if (!f) continue;
+            fclose(f);
+            ui_img_pool_decode(path);
+        }
+
+        if (cfg->pages[p].side_icon[0]) {
+            char path[sizeof("S:") + sizeof(SD_PATH_ASSETS_SIDE_ICON) + 1 + UI_DECK_CONFIG_SIDE_ICON_LEN];
+            snprintf(path, sizeof(path), "S:%s/%s",
+                     SD_PATH_ASSETS_SIDE_ICON, cfg->pages[p].side_icon);
+            FILE *f = fopen(path + 2, "r");
+            if (f) {
+                fclose(f);
+                ui_img_pool_decode(path);
+            }
+        }
+    }
+
+    ESP_LOGI("DECK", "icons preloaded - %d bg slots reserved, PSRAM free: %d B",
+             bg_count, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+/* -----------------------------------------------------------------------
+ * Boot preload -- runs on a background task started early in app_main(),
+ * before the LVGL UI itself is built, so Deck's config is loaded and its
+ * icons are already resident in ui_img_pool by the time ui_deck_build()
+ * actually runs (see ui.c's my_ui_init()).
+ * ----------------------------------------------------------------------- */
+static volatile bool s_preload_done    = false;
+static volatile bool s_preload_started = false;
+static TaskHandle_t  s_preload_caller  = NULL;
+
+static deck_cfg_t s_preload_cfg;
+
+static void preload_task_fn(void *arg)
+{
+    ui_deck_preload_icons(&s_preload_cfg);
+    ESP_LOGI("DECK", "boot preload done - PSRAM free: %d B",
+             heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    s_preload_done = true;
+    if (s_preload_caller) xTaskNotifyGive(s_preload_caller);
+    vTaskDelete(NULL);
+}
+
+void ui_deck_preload_start(void)
+{
+    if (s_preload_started) return;
+    s_preload_started = true;
+
+    bool cfg_ok = ui_deck_config_load(&s_preload_cfg);
+    if (!cfg_ok || s_preload_cfg.page_count == 0) {
+        s_preload_cfg.page_count = 1;
+        s_preload_cfg.pages      = calloc(1, sizeof(page_cfg_t));
+        snprintf(s_preload_cfg.pages[0].name, UI_DECK_CONFIG_NAME_LEN, "Main");
+    }
+
+    s_preload_caller = xTaskGetCurrentTaskHandle();
+    xTaskCreate(preload_task_fn, "deck_preload", 8192, NULL, 3, NULL);
+}
+
+void ui_deck_preload_wait(void)
+{
+    if (s_preload_started && !s_preload_done)
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+}
+
+deck_cfg_t *ui_deck_preload_take_cfg(void)
+{
+    return &s_preload_cfg;
 }

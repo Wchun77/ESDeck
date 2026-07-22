@@ -6,13 +6,18 @@
 #include "app_config.h"
 #include "ui_settings.h"
 
+/* UI_MONITOR_PATH (config/monitor JSON directory) and UI_MONITOR_FONT_PATH
+ * (the clock-specific pre-rasterized .bin font folder) are genuinely
+ * Monitor's own. There is deliberately no UI_MONITOR_BG_PATH/ICON_PATH or
+ * a Monitor-specific bg length here (there used to be, as plain aliases/
+ * copies of app_config.h's SD_PATH_ASSETS_BG/SIDE_ICON and CFG_BG_LEN with
+ * no added meaning) -- those asset folders and that length aren't
+ * Monitor's, every mode's images live there and are the same length
+ * limit, so code building a path into them uses SD_PATH_ASSETS_* and
+ * CFG_BG_LEN directly. */
 #define UI_MONITOR_PATH        SD_PATH_CONFIG_MONITOR
-#define UI_MONITOR_BG_PATH     SD_PATH_ASSETS_BG
 #define UI_MONITOR_FONT_PATH   SD_PATH_ASSETS_FONTS_BIN_CLOCK
-#define UI_MONITOR_ICON_PATH   SD_PATH_ASSETS_SIDE_ICON
 
-#define MON_CFG_FNAME_LEN   64
-#define MON_CFG_BG_LEN      64
 #define MON_CFG_FONT_LEN    64
 #define MON_CFG_ICON_LEN    32
 
@@ -26,8 +31,8 @@
 #define MON_CFG_DEF_SEP_WIDTH   1
 
 typedef struct {
-    char     bg_image[MON_CFG_BG_LEN];    /* filename only, e.g. "IMG_3238.jpg" */
-    char     side_icon[MON_CFG_ICON_LEN]; /* filename only, under UI_MONITOR_ICON_PATH; empty = show "Clock" text on sidebar button */
+    char     bg_image[CFG_BG_LEN];        /* filename only, under SD_PATH_ASSETS_BG, e.g. "IMG_3238.jpg" */
+    char     side_icon[MON_CFG_ICON_LEN]; /* filename only, under SD_PATH_ASSETS_SIDE_ICON; empty = show "Clock" text on sidebar button */
     char     font_time[MON_CFG_FONT_LEN]; /* filename only, e.g. "oxanium_270.bin" */
     char     font_sec[MON_CFG_FONT_LEN];
     char     font_date[MON_CFG_FONT_LEN];
@@ -80,8 +85,8 @@ typedef enum {
 
 typedef struct {
     char         name[MON_PAGE_NAME_LEN];
-    char         bg_image[MON_CFG_BG_LEN];
-    char         side_icon[MON_CFG_ICON_LEN];  /* filename only, under UI_MONITOR_ICON_PATH; empty = show name text on sidebar button */
+    char         bg_image[CFG_BG_LEN];         /* filename only, under SD_PATH_ASSETS_BG */
+    char         side_icon[MON_CFG_ICON_LEN];  /* filename only, under SD_PATH_ASSETS_SIDE_ICON; empty = show name text on sidebar button */
     mon_cell_id_t cells[MON_PAGE_CELLS];  /* MON_CELL_NONE = empty slot */
 } mon_page_cfg_t;
 
@@ -116,17 +121,18 @@ bool ui_monitor_config_nvs_load(char *out, size_t out_size);
  * Returns count = -1 if the directory does not exist.
  * Caller must free with ui_monitor_config_scan_free().
  */
-typedef struct {
-    char **names;
-    int    count;
-} mon_scan_result_t;
+
+/* Alias of the shared cfg_scan_result_t / CFG_FNAME_LEN (see app_config.h)
+ * -- kept as its own type name for API clarity within this module's own
+ * functions. */
+typedef cfg_scan_result_t mon_scan_result_t;
 
 mon_scan_result_t  ui_monitor_config_scan(void);
 void               ui_monitor_config_scan_free(mon_scan_result_t *res);
 
 /*
  * Build full LVGL FS path for a monitor background image.
- * out must be at least MON_CFG_BG_LEN + 16 bytes.
+ * out must be at least CFG_BG_LEN + 16 bytes.
  */
 void ui_monitor_config_bg_path(const char *filename, char *out, size_t out_size);
 
