@@ -41,6 +41,8 @@
 #define MAX_LINES           2000               /* defensive cap; STORE_CAPACITY runs out first in practice */
 #define MAX_UNBROKEN_LINE   1024                /* force a synthetic line break past this many bytes with
                                                    * no real '\n' -- see append_raw()'s comment */
+#define LABEL_CONTENT_W     (SCREEN_W - 24 - 8)  /* must match s_label's set width, see ui_log_view_show() --
+                                                   * used to clip lines to one visual row, see render_window() */
 
 static lv_obj_t         *s_screen        = NULL;
 static lv_obj_t         *s_cont          = NULL;
@@ -108,7 +110,25 @@ static void close_cb(lv_event_t *e)
  * spam for as long as the offending characters stay on screen. Replacing
  * each non-ASCII codepoint with a single '?' before it ever reaches the
  * store avoids LVGL ever attempting to draw an unsupported glyph. Safe to
- * do in place: output position never overtakes input position. */
+ * do in place: output position never overtakes input position.
+ *
+ * A claimed multi-byte sequence is only consumed as a whole (one '?' for
+ * the whole codepoint) after checking it actually has that many bytes
+ * available AND they look like real continuation bytes (0x80-0xBF).
+ * Without that check, a lead byte with no valid continuation -- which
+ * does happen in practice: sys_log.c's log_vprintf() formats each
+ * ESP_LOG call into a fixed-size stack buffer, and a single call whose
+ * output is longer than that (e.g. tusb_desc's box-drawing descriptor
+ * table dump, one ESP_LOGI call for the whole multi-line table) gets cut
+ * off wherever that limit lands, sometimes mid-codepoint -- would blindly
+ * skip ahead into whatever comes next in the stream and eat it as if it
+ * were part of that sequence. That "whatever comes next" is frequently
+ * the very next, unrelated ESP_LOG line's leading bytes (including its
+ * '\n' if the cut lands right before one), which is exactly what
+ * produced lines that failed to break and showed up in the wrong color
+ * -- real content was being silently swallowed as bogus continuation
+ * bytes. An invalid/incomplete sequence now only ever costs its own
+ * single lead byte, leaving every byte after it untouched. */
 static size_t sanitize_ascii_inplace(char *buf, size_t len)
 {
     size_t oi = 0;
@@ -119,11 +139,18 @@ static size_t sanitize_ascii_inplace(char *buf, size_t len)
             i++;
             continue;
         }
-        size_t seq_len = 1;
+
+        size_t seq_len;
         if      ((c & 0xE0) == 0xC0) seq_len = 2;
         else if ((c & 0xF0) == 0xE0) seq_len = 3;
         else if ((c & 0xF8) == 0xF0) seq_len = 4;
-        i += seq_len;
+        else                          seq_len = 1;   /* stray/invalid lead byte */
+
+        bool valid = (i + seq_len <= len);
+        for (size_t k = 1; valid && k < seq_len; k++)
+            if (((unsigned char)buf[i + k] & 0xC0) != 0x80) valid = false;
+
+        i += valid ? seq_len : 1;
         buf[oi++] = '?';
     }
     buf[oi] = '\0';
@@ -218,6 +245,27 @@ static const char *level_color(const char *line, size_t len)
     }
 }
 
+/* Largest prefix of txt[0..len) (in characters) whose rendered pixel
+ * width is <= max_w, found by binary search over lv_txt_get_width() --
+ * a handful of measurements per call, only for lines that need it (the
+ * common case of a short line that already fits skips straight past). */
+static size_t clamp_to_width(const char *txt, size_t len, lv_coord_t max_w)
+{
+    if (max_w <= 0) return 0;
+    if (lv_txt_get_width(txt, (uint32_t)len, &lv_font_montserrat_14, 0, LV_TEXT_FLAG_NONE) <= max_w)
+        return len;
+
+    size_t lo = 0, hi = len;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo + 1) / 2;
+        if (lv_txt_get_width(txt, (uint32_t)mid, &lv_font_montserrat_14, 0, LV_TEXT_FLAG_NONE) <= max_w)
+            lo = mid;
+        else
+            hi = mid - 1;
+    }
+    return lo;
+}
+
 /* Rebuilds the single on-screen label from lines [s_top_line,
  * s_top_line + s_visible_lines) -- always a small, bounded slice
  * regardless of how much history exists in s_store. Each line is wrapped
@@ -234,7 +282,16 @@ static const char *level_color(const char *line, size_t len)
  * across the line break and parsing breaks for every tag after the
  * first (this is exactly what was happening). Each line's tag is closed
  * right after its visible content; the '\n' itself is emitted plain,
- * outside any tag, so the next line starts a fresh one. */
+ * outside any tag, so the next line starts a fresh one.
+ *
+ * That same "single line only" restriction also applies to an *implicit*
+ * line break -- s_label is LV_LABEL_LONG_WRAP, so a stored line wider
+ * than LABEL_CONTENT_W auto-wraps onto a second visual row on screen, and
+ * LVGL's recolor breaks there exactly the same way (this is what produced
+ * a long log line whose tail showed up as literal unparsed "#RRGGBB ..."
+ * text instead of being colored). Each line is measured against
+ * LABEL_CONTENT_W and clamped via clamp_to_width() before its tag is
+ * built, so no stored line can ever reach LVGL wide enough to wrap. */
 static void render_window(void)
 {
     if (s_line_count == 0) {
@@ -259,13 +316,22 @@ static void render_window(void)
         bool has_nl = (line_len > 0 && s_store[line_start + line_len - 1] == '\n');
         size_t content_len = has_nl ? line_len - 1 : line_len;
 
+        static const char *ellipsis = "...";
+        lv_coord_t ellipsis_w = lv_txt_get_width(ellipsis, 3, &lv_font_montserrat_14, 0, LV_TEXT_FLAG_NONE);
+        size_t disp_len = content_len;
+        bool clipped = false;
+        if (lv_txt_get_width(s_store + line_start, (uint32_t)content_len, &lv_font_montserrat_14, 0, LV_TEXT_FLAG_NONE) > LABEL_CONTENT_W) {
+            disp_len = clamp_to_width(s_store + line_start, content_len, LABEL_CONTENT_W - ellipsis_w);
+            clipped = true;
+        }
+
         if (out_pos + 16 >= sizeof(win_buf)) break;   /* room for "#RRGGBB " + closing "#" */
         int written = snprintf(win_buf + out_pos, sizeof(win_buf) - out_pos,
                                 "#%s ", level_color(s_store + line_start, content_len));
         if (written < 0) break;
         out_pos += (size_t)written;
 
-        for (size_t k = 0; k < content_len; k++) {
+        for (size_t k = 0; k < disp_len; k++) {
             char c = s_store[line_start + k];
             if (c == '#') {
                 if (out_pos + 3 >= sizeof(win_buf)) goto done;
@@ -275,6 +341,12 @@ static void render_window(void)
                 if (out_pos + 2 >= sizeof(win_buf)) goto done;
                 win_buf[out_pos++] = c;
             }
+        }
+        if (clipped) {
+            if (out_pos + 3 >= sizeof(win_buf)) goto done;
+            win_buf[out_pos++] = '.';
+            win_buf[out_pos++] = '.';
+            win_buf[out_pos++] = '.';
         }
         win_buf[out_pos++] = '#';   /* close this line's color tag -- before the newline */
         if (has_nl) {

@@ -46,7 +46,18 @@ static int log_vprintf(const char *fmt, va_list args)
 
     if (n > 0 && s_buf) {
         size_t len = (size_t)n;
-        if (len >= sizeof(line)) len = sizeof(line) - 1;   /* vsnprintf truncated it */
+        bool   truncated = (len >= sizeof(line));
+        if (truncated) {
+            len = sizeof(line) - 1;
+            /* vsnprintf cut this call off partway through -- possibly
+             * mid-UTF-8-codepoint (e.g. a long box-drawing table dump
+             * from a single ESP_LOG call, see ui_log_view.c's
+             * sanitize_ascii_inplace() for the full story). Force the
+             * last byte to '\n' so this call always ends its own line in
+             * the ring buffer, rather than silently fusing with whatever
+             * the next, unrelated ESP_LOG call writes right after it. */
+            line[len - 1] = '\n';
+        }
 
         portENTER_CRITICAL(&s_lock);
         ring_write_locked(line, len);
