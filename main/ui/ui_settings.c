@@ -7,6 +7,7 @@
 #include "ui_deck.h"
 #include "ui_media.h"
 #include "ui_img_pool.h"
+#include "ui_log_view.h"
 #include "ui.h"
 #include "lvgl.h"
 #include "freertos/FreeRTOS.h"
@@ -344,6 +345,43 @@ static void info_dismiss_cb(lv_event_t *e)
     lv_obj_del(lv_event_get_target(e));
 }
 
+/* -----------------------------------------------------------------------
+ * Hidden log viewer entry point -- press and hold the "ESDeck"/project
+ * name label in the Info dialog for 5 seconds to open ui_log_view.c.
+ * Deliberately not a normal LV_EVENT_LONG_PRESSED (that's a global
+ * indev setting, shared by every clickable widget in the app, and its
+ * default threshold is much shorter than the 5s wanted here) -- instead
+ * a one-shot lv_timer is started on PRESSED and cancelled on RELEASED/
+ * PRESS_LOST, so only this one label gets the long hold behavior.
+ * ----------------------------------------------------------------------- */
+static lv_timer_t *s_log_hold_timer = NULL;
+
+static void info_log_hold_cb(lv_timer_t *t)
+{
+    lv_obj_t *info_root = (lv_obj_t *)t->user_data;
+    s_log_hold_timer = NULL;   /* one-shot: LVGL deletes it after this call returns */
+
+    lv_obj_del(info_root);     /* close the Info dialog underneath */
+    ui_log_view_show();
+}
+
+static void info_name_press_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t *info_root = (lv_obj_t *)lv_event_get_user_data(e);
+
+    if (code == LV_EVENT_PRESSED) {
+        s_log_hold_timer = lv_timer_create(info_log_hold_cb, 5000, info_root);
+        lv_timer_set_repeat_count(s_log_hold_timer, 1);
+    } else {
+        /* RELEASED or PRESS_LOST -- released early, cancel the hold */
+        if (s_log_hold_timer) {
+            lv_timer_del(s_log_hold_timer);
+            s_log_hold_timer = NULL;
+        }
+    }
+}
+
 static void item_info_cb(lv_event_t *e)
 {
     esp_app_desc_t desc;
@@ -378,6 +416,15 @@ static void item_info_cb(lv_event_t *e)
     lv_label_set_text(name_lbl, ok ? desc.project_name : "ESDeck");
     lv_obj_set_style_text_color(name_lbl, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_text_font(name_lbl, &lv_font_montserrat_24, 0);
+
+    /* Hidden log viewer entry point -- see info_name_press_cb() above.
+     * Labels aren't clickable by default, need it explicitly for PRESSED/
+     * RELEASED to fire at all. user_data is this dialog's root so the
+     * 5s-hold callback can close it before opening the log viewer. */
+    lv_obj_add_flag(name_lbl, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(name_lbl, info_name_press_cb, LV_EVENT_PRESSED, root);
+    lv_obj_add_event_cb(name_lbl, info_name_press_cb, LV_EVENT_RELEASED, root);
+    lv_obj_add_event_cb(name_lbl, info_name_press_cb, LV_EVENT_PRESS_LOST, root);
 
     char ver_buf[64];
     char built_buf[64];
