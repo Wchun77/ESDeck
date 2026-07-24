@@ -8,6 +8,8 @@
 #include "ui_media.h"
 #include "ui_img_pool.h"
 #include "ui_log_view.h"
+#include "usb/usb_hid.h"
+#include "ui_toast.h"
 #include "ui.h"
 #include "lvgl.h"
 #include "freertos/FreeRTOS.h"
@@ -450,6 +452,34 @@ static void item_info_cb(lv_event_t *e)
 }
 
 /* -----------------------------------------------------------------------
+ * HID Status row (System submenu) -- toggles the real USB state instead
+ * of a single "reconnect" action: tap while Connected calls
+ * usb_hid_force_disconnect() and stays disconnected (lets you manually
+ * verify the PC side notices), tap again while Disconnected calls
+ * usb_hid_force_connect(). The row's label/color is redrawn via
+ * hid_conn_cb() -> render_current_level() whenever usb_hid.c's tracked
+ * connection state changes (see the s_conn_state comment in usb_hid.c for
+ * why it's tracked in software instead of read from tud_mounted()).
+ * Disconnect updates that state immediately (nothing to wait for), so its
+ * toast/log/label all land in the same frame as the tap. Connect only
+ * re-enables the pull-up -- the label stays Disconnected until the real
+ * TINYUSB_EVENT_ATTACHED lands (host actually finishes re-enumerating,
+ * ~1-3s later), so the toast below is deliberately worded as pending. */
+static void item_hid_status_cb(lv_event_t *e)
+{
+    (void)e;
+    if (usb_hid_is_connected()) {
+        ESP_LOGI("SETTINGS", "HID Status: user forced disconnect");
+        usb_hid_force_disconnect();
+        ui_toast_push("HID: Disconnected", 1, NULL);
+    } else {
+        ESP_LOGI("SETTINGS", "HID Status: user forced connect");
+        usb_hid_force_connect();
+        ui_toast_push("HID: Connecting...", 1, NULL);
+    }
+}
+
+/* -----------------------------------------------------------------------
  * Boot animation picker
  *
  * Each animation set lives in its own subfolder under SD_PATH_ASSETS_BOOT
@@ -570,11 +600,12 @@ static void item_boot_anim_cb(lv_event_t *e)
 static const setting_node_t s_system_menu[] = {
     { "Select Config", SETTING_ACTION, SETMASK_ALL, item_config_cb, NULL, 0 },
     { "MSC Mode",       SETTING_ACTION, SETMASK_ALL,  item_msc_cb,    NULL, 0 },
+    { "HID Status",     SETTING_ACTION, SETMASK_ALL,  item_hid_status_cb, NULL, 0 },
     { "Info",            SETTING_ACTION, SETMASK_ALL,  item_info_cb,  NULL, 0 },
 };
 
 static const setting_node_t s_root_menu[] = {
-    { "System",          SETTING_SUBMENU, SETMASK_ALL,    NULL,              s_system_menu,  3 },
+    { "System",          SETTING_SUBMENU, SETMASK_ALL,    NULL,              s_system_menu,  4 },
     { "Boot Animation", SETTING_ACTION, SETMASK_ALL,     item_boot_anim_cb, NULL,           0 },
     { "Keyboard Mode", SETTING_ACTION, SETMASK_DECK,    item_keyboard_cb,  NULL,           0 },
     { "Monitor Mode",  SETTING_ACTION, SETMASK_DECK,    item_mode_cb,      NULL,           0 },
@@ -588,6 +619,18 @@ static const setting_node_t s_root_menu[] = {
  * Menu navigation / rendering
  * ----------------------------------------------------------------------- */
 static void render_current_level(void);
+
+/* usb_hid_conn_cb_t -- fires once TinyUSB's own ATTACHED/DETACHED event
+ * lands (already hopped onto the LVGL task, see usb_hid.c), i.e. this is
+ * the real confirmation a forced disconnect/connect actually took effect,
+ * not just that the HID Status row was tapped. Only worth a redraw while
+ * that row is actually the level on screen. */
+static void hid_conn_cb(bool connected)
+{
+    (void)connected;
+    if (s_stack_depth >= 0 && s_menu_stack[s_stack_depth] == s_system_menu)
+        render_current_level();
+}
 
 static void generic_item_cb(lv_event_t *e)
 {
@@ -659,9 +702,16 @@ static void render_current_level(void)
         lv_obj_add_event_cb(item, generic_item_cb, LV_EVENT_CLICKED, (void *)node);
 
         lv_obj_t *lbl = lv_label_create(item);
-        lv_label_set_text(lbl, node->label);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
+
+        if (node->action_cb == item_hid_status_cb) {
+            bool connected = usb_hid_is_connected();
+            lv_label_set_text_fmt(lbl, "HID Status: %s", connected ? "Connected" : "Disconnected");
+            lv_obj_set_style_text_color(lbl, lv_color_hex(connected ? 0x33cc33 : 0xcc3333), 0);
+        } else {
+            lv_label_set_text(lbl, node->label);
+        }
 
         if (node->type == SETTING_SUBMENU) {
             lv_obj_t *chevron = lv_label_create(item);
@@ -1022,6 +1072,11 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
     lv_obj_set_style_text_color(s_breadcrumb_lbl, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_text_font(s_breadcrumb_lbl, &lv_font_montserrat_20, 0);
     lv_obj_align(s_breadcrumb_lbl, LV_ALIGN_CENTER, 0, 0);
+
+    /* HID status lives as a System > HID Status row instead (see
+     * s_system_menu[] / item_hid_status_cb) -- just register the redraw
+     * hook here so that row's color/text stays live while visible. */
+    usb_hid_set_conn_cb(hid_conn_cb);
 
     /* Scrollable item list -- grows to fill remaining page height */
     s_list = lv_obj_create(s_content);
