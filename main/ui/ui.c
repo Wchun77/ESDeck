@@ -2,6 +2,7 @@
 #include "ui_deck.h"
 #include "ui_settings.h"
 #include "ui_toast.h"
+#include "sys_clock.h"
 #include "usb/usb_hid.h"
 #include "lvgl.h"
 #include "esp_log.h"
@@ -126,6 +127,12 @@ static void ui_build_static(void)
 void my_ui_init(void)
 {
     usb_hid_set_mode_query_cb(mode_query_cb);
+
+    /* Registered once here, not per UI mode -- the PC may send CMD_TIME
+     * while any mode is active, and the clock keeps ticking on its own
+     * across mode switches. See sys_clock.h. */
+    sys_clock_init();
+    usb_hid_set_time_cb(sys_clock_push_hid_time);
 
     ui_build_static();
     ui_toast_init();

@@ -129,10 +129,15 @@ void usb_hid_set_monitor_cb(void (*cb)(uint8_t cpu_usage, uint8_t cpu_temp,
                                        uint8_t cpu_power, uint8_t gpu_power,
                                        uint8_t ssd_life));
 
-/* Register callback invoked when PC sends CMD_TIME.
- * Pass NULL to unregister. Called from the TinyUSB task context. */
-void usb_hid_set_time_cb(void (*cb)(uint8_t hour, uint8_t min, uint8_t sec,
-                                    uint8_t month, uint8_t day, uint8_t wday));
+/* Register callback invoked when PC sends CMD_TIME. Pass NULL to
+ * unregister. Called from the TinyUSB task context -- raw field pass-
+ * through only, no calendar math here (year/month/day/hour/min/sec as
+ * sent by the PC; see sys_clock.c for lag compensation, drift correction
+ * and wday derivation). Unlike usb_hid_set_monitor_cb(), this is
+ * typically registered once at boot (my_ui_init() -> sys_clock_init()),
+ * not per UI mode -- the PC may send CMD_TIME while any mode is active. */
+void usb_hid_set_time_cb(void (*cb)(uint16_t year, uint8_t month, uint8_t day,
+                                    uint8_t hour, uint8_t min, uint8_t sec));
 
 /* Register callback invoked when PC sends CMD_QUERY.
  * Must return the current UI mode: 0=deck, 1=monitor, 2=media. */

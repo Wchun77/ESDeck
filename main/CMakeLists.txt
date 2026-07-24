@@ -15,6 +15,7 @@ file(GLOB_RECURSE ota_manager   "ota_manager/*.c")
 
 set(COMPONENT_SRCS
     "main.c"
+    "sys_clock.c"
     "lvgl_port.c"
     "waveshare_rgb_lcd_port.c"
 

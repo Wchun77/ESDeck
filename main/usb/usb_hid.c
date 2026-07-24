@@ -5,8 +5,6 @@
 #include "class/hid/hid_device.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include <time.h>
-#include <sys/time.h>
 #include "esp_heap_caps.h"
 #include "esp_jpeg_dec.h"
 #include "lvgl.h"
@@ -98,8 +96,8 @@ static void (*s_monitor_data_cb)(uint8_t cpu_usage, uint8_t cpu_temp,
                                  uint8_t ssd_life) = NULL;
 
 /* Called when PC sends CMD_TIME */
-static void (*s_time_cb)(uint8_t hour, uint8_t min, uint8_t sec,
-                         uint8_t month, uint8_t day, uint8_t wday) = NULL;
+static void (*s_time_cb)(uint16_t year, uint8_t month, uint8_t day,
+                         uint8_t hour, uint8_t min, uint8_t sec) = NULL;
 
 /* Called when PC sends CMD_QUERY; returns true if currently in monitor mode */
 static uint8_t (*s_mode_query_cb)(void) = NULL;
@@ -410,7 +408,7 @@ void usb_hid_set_monitor_cb(void (*cb)(uint8_t, uint8_t, uint8_t, uint8_t,
     s_monitor_data_cb = cb;
 }
 
-void usb_hid_set_time_cb(void (*cb)(uint8_t, uint8_t, uint8_t,
+void usb_hid_set_time_cb(void (*cb)(uint16_t, uint8_t, uint8_t,
                                     uint8_t, uint8_t, uint8_t))
 {
     s_time_cb = cb;
@@ -653,29 +651,12 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                               buffer[13]);
     }
     else if (cmd == HID_MON_CMD_TIME && bufsize >= 7) {
-        if (s_time_cb) {
-            struct tm t = {
-                .tm_year  = (buffer[1] + 2000) - 1900,
-                .tm_mon   = buffer[2] - 1,
-                .tm_mday  = buffer[3],
-                .tm_hour  = buffer[4],
-                .tm_min   = buffer[5],
-                .tm_sec   = buffer[6],
-                .tm_isdst = -1,
-            };
-            mktime(&t);
-
-            /* Add 1 second to compensate for the one-tick display lag */
-            uint8_t sec_adj  = buffer[6] + 1;
-            uint8_t min_adj  = buffer[5];
-            uint8_t hour_adj = buffer[4];
-            if (sec_adj  >= 60) { sec_adj  = 0; min_adj++;  }
-            if (min_adj  >= 60) { min_adj  = 0; hour_adj++; }
-            if (hour_adj >= 24) { hour_adj = 0; }
-
-            s_time_cb(hour_adj, min_adj, sec_adj,
-                    buffer[2], buffer[3], (uint8_t)t.tm_wday);
-        }
+        /* Raw field pass-through only -- no calendar math here (lag
+         * compensation, drift correction, wday derivation all live in
+         * sys_clock.c, the only place that owns the running clock). */
+        if (s_time_cb)
+            s_time_cb((uint16_t)(buffer[1] + 2000), buffer[2], buffer[3],
+                      buffer[4], buffer[5], buffer[6]);
     }
     else if (cmd == HID_MON_CMD_QUERY) {
         uint8_t mode = s_mode_query_cb ? s_mode_query_cb() : 0;
