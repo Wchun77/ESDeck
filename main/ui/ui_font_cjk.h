@@ -29,5 +29,31 @@
  * one thing that can't be assumed ASCII-safe). A character outside the
  * curated common set falls back to LVGL's own configured missing-glyph
  * placeholder -- predictable and ours, never a phone-rendered tofu box.
+ *
+ * ui_font_cjk_get() is BLOCKING (the ~13s SD-card load happens inline)
+ * and must only ever be called from the dedicated background preload
+ * task (see cjk_font_preload_task() in ui.c) -- never from the LVGL task
+ * or any other caller that can't afford to stall for that long. Every
+ * other caller must use ui_font_cjk_try_get() instead, which never
+ * blocks and never triggers the load itself; it only reports whatever
+ * the preload task has gotten to so far. Calling ui_font_cjk_get() from
+ * two different tasks concurrently, or from anywhere other than the
+ * preload task, is undefined behavior -- there used to be exactly this
+ * bug: a lazy "s_tried" flag got set *before* the load finished, so a
+ * second caller racing the preload task could observe "already tried"
+ * and read back a still-NULL s_font mid-load, instead of either the
+ * genuinely finished font or a value it could tell was still pending.
  * ----------------------------------------------------------------------- */
 const lv_font_t *ui_font_cjk_get(void);
+
+typedef enum {
+    UI_FONT_CJK_LOADING,      /* preload task hasn't finished yet -- retry later */
+    UI_FONT_CJK_READY,        /* *out_font is valid */
+    UI_FONT_CJK_UNAVAILABLE,  /* no file on SD / load failed -- no point retrying */
+} ui_font_cjk_status_t;
+
+/* Non-blocking, safe to call from any task at any time. *out_font is only
+ * written when the return value is UI_FONT_CJK_READY (left untouched
+ * otherwise, so callers can pre-initialize it to NULL and use it either
+ * way without checking the return value twice). */
+ui_font_cjk_status_t ui_font_cjk_try_get(const lv_font_t **out_font);

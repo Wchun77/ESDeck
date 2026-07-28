@@ -1,5 +1,7 @@
 #pragma once
 
+#include "lvgl.h"
+
 /* -----------------------------------------------------------------------
  * Generic top-level notification banner.
  *
@@ -32,8 +34,18 @@ void ui_toast_init(void);
  * pointer alive past the call). count < 1 is treated as 1; count == 1
  * hides the "xN" suffix, count > 1 shows it (e.g. "LINE  x3").
  *
+ * font selects which font renders this banner's label -- pass NULL for
+ * the default (montserrat_20, ASCII-only, used by our own fixed labels
+ * like "BLE Connected"). Real ANCS notification text needs a CJK-capable
+ * font instead (see ui_font_cjk_get()) since montserrat_20 has no Hanzi
+ * glyphs and would just show missing-glyph placeholders. Each queued
+ * banner remembers its own font, so an ASCII system toast and a CJK
+ * notification toast can be queued back to back without one clobbering
+ * the other's font.
+ *
  * Must be called from LVGL context -- same rule as every other ui_* call
  * in this codebase. If the caller is a FreeRTOS task outside the LVGL
- * thread (e.g. a future ANCS/BLE task), wrap the call in lv_async_call()
+ * thread (e.g. the ANCS/BLE host task), wrap the call in lv_async_call()
  * like ui_settings.c's enter_monitor_task() does for its own callbacks. */
-void ui_toast_push(const char *label, int count, const char *merge_key);
+void ui_toast_push(const char *label, int count, const char *merge_key,
+                    const lv_font_t *font);

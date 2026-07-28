@@ -526,13 +526,13 @@ static void set_conn_state(bool connected)
 static void toast_hid_connected_cb(void *arg)
 {
     (void)arg;
-    ui_toast_push("HID Connected", 1, NULL);
+    ui_toast_push("HID Connected", 1, NULL, NULL);
     set_conn_state(true);
 }
 static void toast_hid_disconnected_cb(void *arg)
 {
     (void)arg;
-    ui_toast_push("HID Disconnected", 1, NULL);
+    ui_toast_push("HID Disconnected", 1, NULL, NULL);
     set_conn_state(false);
 }
 

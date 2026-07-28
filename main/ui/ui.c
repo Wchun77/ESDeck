@@ -125,14 +125,13 @@ static void ui_build_static(void)
 }
 
 /* -----------------------------------------------------------------------
- * Temporary standalone test for the CJK notification font pipeline --
- * deliberately independent of toast/ANCS (verify SD-card loading +
- * on-device rendering works on its own before wiring it into anything
- * real). Shows a fixed test string top-center if a curated common-Hanzi
- * .bin font is present at SD_PATH_ASSETS_FONTS_BIN_NOTIFY; if it isn't,
- * ui_font_cjk_get() just logs a warning and this is a no-op.
- * Remove once real ANCS notification text is wired through ui_toast
- * instead.
+ * CJK notification font preload -- warms ui_font_cjk_get()'s cache on a
+ * background task at boot, so the *first* real ANCS notification doesn't
+ * stall the LVGL task waiting on a synchronous font load inside
+ * ancs_toast_push_cb() (see ble_manager.c). ui_font_cjk_get() caches the
+ * loaded font after its first call (s_font/s_tried in ui_font_cjk.c), so
+ * every call after this one -- including the real one from
+ * ble_manager.c -- is effectively free.
  *
  * No stack-depth risk here (unlike the earlier FreeType attempt --
  * lv_font_load() just parses LVGL's own pre-converted bitmap font
@@ -141,40 +140,16 @@ static void ui_build_static(void)
  * lv_font_load() does two full passes over every glyph (metadata, then
  * bitmap data), each doing an lv_fs_seek() + several small reads, and
  * SD random-access seeks are the expensive part -- this is roughly
- * linear in glyph count, not file size. Running this inline in
- * my_ui_init() blocked reaching the main screen for that entire ~13s,
- * so the SD I/O now runs on its own background task instead (same
- * shape as ui_settings.c's mon_reload/media_reload tasks): the task
- * does the slow part off the LVGL task, then lv_async_call() hands
- * back to the LVGL task to actually create the label. This also fixes
- * the label being invisible before: ui_deck_build() (called later in
- * my_ui_init(), below) creates a full-screen s_deck_root on top of
- * lv_scr_act() -- a label created earlier just sits underneath it in
- * z-order. Deferring this past that point means the label is now the
- * most-recently-added child on the screen, i.e. on top. */
-static void cjk_test_show_cb(void *arg)
-{
-    (void)arg;
-
-    const lv_font_t *cjk_test_font = ui_font_cjk_get();
-    if (!cjk_test_font) return;
-
-    lv_obj_t *cjk_test_lbl = lv_label_create(lv_scr_act());
-    lv_label_set_text(cjk_test_lbl, "測試中文字型顯示 1234 ABC");
-    lv_obj_set_style_text_font(cjk_test_lbl, cjk_test_font, 0);
-    lv_obj_set_style_text_color(cjk_test_lbl, lv_color_hex(0xffffff), 0);
-    lv_obj_set_style_bg_color(cjk_test_lbl, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(cjk_test_lbl, LV_OPA_80, 0);
-    lv_obj_set_style_pad_all(cjk_test_lbl, 6, 0);
-    lv_obj_align(cjk_test_lbl, LV_ALIGN_TOP_MID, 0, 4);
-    lv_obj_move_foreground(cjk_test_lbl);
-}
-
+ * linear in glyph count, not file size. Runs on its own task rather than
+ * inline in my_ui_init() purely so it doesn't block reaching the main
+ * screen for that same ~13s -- no LVGL tree access needed here at all
+ * (unlike the earlier version of this task, back when it also drew a
+ * visible on-screen test string -- removed now that real ANCS text
+ * exercises this same path end to end, see ble_manager.c). */
 static void cjk_font_preload_task(void *arg)
 {
     (void)arg;
-    ui_font_cjk_get();                     /* slow part: SD I/O only, no LVGL tree access */
-    lv_async_call(cjk_test_show_cb, NULL); /* hand back to the LVGL task to actually draw it */
+    ui_font_cjk_get();
     vTaskDelete(NULL);
 }
 

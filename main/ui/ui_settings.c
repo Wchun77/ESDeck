@@ -475,11 +475,11 @@ static void item_hid_status_cb(lv_event_t *e)
     if (usb_hid_is_connected()) {
         ESP_LOGI("SETTINGS", "HID Status: user forced disconnect");
         usb_hid_force_disconnect();
-        ui_toast_push("HID: Disconnected", 1, NULL);
+        ui_toast_push("HID: Disconnected", 1, NULL, NULL);
     } else {
         ESP_LOGI("SETTINGS", "HID Status: user forced connect");
         usb_hid_force_connect();
-        ui_toast_push("HID: Connecting...", 1, NULL);
+        ui_toast_push("HID: Connecting...", 1, NULL, NULL);
     }
 }
 

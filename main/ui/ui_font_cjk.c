@@ -1,6 +1,7 @@
 #include "ui_font_cjk.h"
 #include "app_config.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
 #include <stdbool.h>
 
 static const char *TAG = "FONT_CJK";
@@ -17,23 +18,54 @@ static const char *TAG = "FONT_CJK";
  * convention already used by ui_clock_widget.c's load_font(). */
 #define CJK_FONT_FILE   "S:" SD_PATH_ASSETS_FONTS_BIN_NOTIFY "/notify.bin"
 
-static lv_font_t *s_font  = NULL;
-static bool       s_tried = false;
+typedef enum { CJK_NOT_STARTED, CJK_LOADING, CJK_READY, CJK_FAILED } cjk_state_t;
+
+static lv_font_t   *s_font  = NULL;
+static cjk_state_t   s_state = CJK_NOT_STARTED;
+/* Guards only the two variables above -- never held across the actual
+ * lv_font_load() call (see ui_font_cjk_get()), so this is safe as a
+ * plain critical section even though it's used from multiple tasks. */
+static portMUX_TYPE  s_lock = portMUX_INITIALIZER_UNLOCKED;
 
 const lv_font_t *ui_font_cjk_get(void)
 {
-    if (s_tried) return s_font;
-    s_tried = true;
+    portENTER_CRITICAL(&s_lock);
+    s_state = CJK_LOADING;
+    portEXIT_CRITICAL(&s_lock);
 
     /* lv_font_load() already returns NULL cleanly if the file is missing
      * or malformed -- no separate existence check needed (and a plain
-     * fopen() wouldn't understand the "S:" LVGL-virtual path anyway). */
-    s_font = lv_font_load(CJK_FONT_FILE);
-    if (!s_font) {
-        ESP_LOGW(TAG, "no CJK font at %s -- notification text stays ASCII-only", CJK_FONT_FILE);
-        return NULL;
-    }
+     * fopen() wouldn't understand the "S:" LVGL-virtual path anyway).
+     * Deliberately outside the lock -- this is the ~13s blocking part,
+     * and s_lock must never be held across it. */
+    lv_font_t *f = lv_font_load(CJK_FONT_FILE);
 
-    ESP_LOGI(TAG, "CJK font loaded: %s", CJK_FONT_FILE);
-    return s_font;
+    portENTER_CRITICAL(&s_lock);
+    s_font  = f;
+    s_state = f ? CJK_READY : CJK_FAILED;
+    portEXIT_CRITICAL(&s_lock);
+
+    if (!f) {
+        ESP_LOGW(TAG, "no CJK font at %s -- notification text stays ASCII-only", CJK_FONT_FILE);
+    } else {
+        ESP_LOGI(TAG, "CJK font loaded: %s", CJK_FONT_FILE);
+    }
+    return f;
+}
+
+ui_font_cjk_status_t ui_font_cjk_try_get(const lv_font_t **out_font)
+{
+    portENTER_CRITICAL(&s_lock);
+    cjk_state_t state = s_state;
+    lv_font_t  *font  = s_font;
+    portEXIT_CRITICAL(&s_lock);
+
+    if (state == CJK_READY) {
+        if (out_font) *out_font = font;
+        return UI_FONT_CJK_READY;
+    }
+    if (state == CJK_FAILED) {
+        return UI_FONT_CJK_UNAVAILABLE;
+    }
+    return UI_FONT_CJK_LOADING;   /* CJK_NOT_STARTED or CJK_LOADING */
 }
