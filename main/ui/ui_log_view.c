@@ -41,12 +41,12 @@
 #define MAX_LINES           2000               /* defensive cap; STORE_CAPACITY runs out first in practice */
 #define MAX_UNBROKEN_LINE   1024                /* force a synthetic line break past this many bytes with
                                                    * no real '\n' -- see append_raw()'s comment */
-#define LABEL_CONTENT_W     (SCREEN_W - 24 - 8)  /* must match s_label's set width, see ui_log_view_show() --
+#define LABEL_CONTENT_W     (SCREEN_W - 24 - 8)  /* must match s_spangroup's set width, see ui_log_view_show() --
                                                    * used to clip lines to one visual row, see render_window() */
 
 static lv_obj_t         *s_screen        = NULL;
 static lv_obj_t         *s_cont          = NULL;
-static lv_obj_t         *s_label         = NULL;
+static lv_obj_t         *s_spangroup     = NULL;   /* one lv_span_t child per visible log line, see render_window() */
 static lv_timer_t       *s_refresh_timer = NULL;
 static sys_log_cursor_t  s_cursor;
 
@@ -73,10 +73,10 @@ static void log_view_close(void)
         s_refresh_timer = NULL;
     }
     if (s_screen) {
-        lv_obj_del(s_screen);
-        s_screen = NULL;
-        s_cont   = NULL;
-        s_label  = NULL;
+        lv_obj_del(s_screen);   /* deletes s_cont/s_spangroup too, they're children of it */
+        s_screen    = NULL;
+        s_cont      = NULL;
+        s_spangroup = NULL;
     }
     if (s_store)  { heap_caps_free(s_store);  s_store  = NULL; }
     if (s_lines)  { heap_caps_free(s_lines);  s_lines  = NULL; }
@@ -219,9 +219,35 @@ static void append_raw(const char *data, size_t len)
     }
 }
 
+/* Content length of line li, not counting its trailing '\n' (if any).
+ * Zero means the line is blank -- skipped entirely on screen, see
+ * render_window() and follow_to_bottom(). Some log sources (NimBLE's port
+ * layer, notably) print a genuine empty line after many of their
+ * messages; those are real content, not a rendering bug, but they're not
+ * worth a wasted row in a screen that only fits ~24 lines. */
+static size_t line_content_len(size_t li)
+{
+    size_t line_start = s_lines[li];
+    size_t line_end    = (li + 1 < s_line_count) ? s_lines[li + 1] : s_cur_line_start;
+    size_t line_len    = line_end - line_start;
+    bool has_nl = (line_len > 0 && s_store[line_start + line_len - 1] == '\n');
+    return has_nl ? line_len - 1 : line_len;
+}
+
+/* Picks s_top_line so the *visible* (non-blank) lines ending at the
+ * bottom of the backlog fill the screen, walking backward from the
+ * newest line and skipping blanks -- a plain "s_line_count -
+ * s_visible_lines" would under-fill the screen whenever blank lines fall
+ * within that range. */
 static void follow_to_bottom(void)
 {
-    s_top_line = (s_line_count > (size_t)s_visible_lines) ? (s_line_count - s_visible_lines) : 0;
+    size_t shown = 0;
+    size_t li = s_line_count;
+    while (li > 0 && shown < (size_t)s_visible_lines) {
+        li--;
+        if (line_content_len(li) > 0) shown++;
+    }
+    s_top_line = li;
 }
 
 /* ESP_LOG's default (color-disabled) format is "E (timestamp) tag: msg\n"
@@ -231,17 +257,22 @@ static void follow_to_bottom(void)
  * normal serial monitor already expects. Anything that doesn't start
  * with a recognized level letter (box-drawing dumps, the "[...dropped]"
  * marker, plain printf output with no ESP_LOG prefix) falls back to a
- * dim neutral gray rather than guessing. */
-static const char *level_color(const char *line, size_t len)
+ * dim neutral gray rather than guessing.
+ *
+ * Returns a real lv_color_t (was a "RRGGBB" hex string, back when this
+ * got spliced into a #RRGGBB recolor tag -- see render_window()'s
+ * comment for why that whole approach was replaced with per-line spans,
+ * each with a real style color instead of a parsed one). */
+static lv_color_t level_color(const char *line, size_t len)
 {
-    if (len == 0) return "999999";
+    if (len == 0) return lv_color_hex(0x999999);
     switch (line[0]) {
-        case 'E': return "ff5555";   /* error */
-        case 'W': return "ffcc00";   /* warn */
-        case 'I': return "55ff55";   /* info */
-        case 'D': return "55ffff";   /* debug */
-        case 'V': return "999999";   /* verbose */
-        default:  return "999999";
+        case 'E': return lv_color_hex(0xff5555);   /* error */
+        case 'W': return lv_color_hex(0xffcc00);   /* warn */
+        case 'I': return lv_color_hex(0x55ff55);   /* info */
+        case 'D': return lv_color_hex(0x55ffff);   /* debug */
+        case 'V': return lv_color_hex(0x999999);   /* verbose */
+        default:  return lv_color_hex(0x999999);
     }
 }
 
@@ -266,55 +297,93 @@ static size_t clamp_to_width(const char *txt, size_t len, lv_coord_t max_w)
     return lo;
 }
 
-/* Rebuilds the single on-screen label from lines [s_top_line,
- * s_top_line + s_visible_lines) -- always a small, bounded slice
- * regardless of how much history exists in s_store. Each line is wrapped
- * in an LVGL recolor tag (#RRGGBB text#) per level_color() above --
- * requires lv_label_set_recolor() enabled on s_label (see
- * ui_log_view_show()). A literal '#' inside log content would otherwise
- * be misread as a tag delimiter, so it's escaped to '##' (LVGL recolor's
- * own escape convention) while copying each line.
+/* Rebuilds the visible span list from lines [s_top_line, s_top_line +
+ * s_visible_lines) -- always a small, bounded slice regardless of how
+ * much history exists in s_store. One lv_span_t per log line, colored
+ * via a real style property (lv_style_set_text_color on the span's own
+ * style) instead of an earlier design that built one giant string for a
+ * single recolor-enabled label with hand-rolled #RRGGBB...# tags spliced
+ * around each line.
  *
- * LVGL's recolor only works within a single line -- "recoloring is only
- * supported when the text wrapped with #color ... # syntax is in one
- * line" (see docs/widgets/core/label.md). The trailing '\n' each stored
- * line ends with must NOT be inside the tag, or the color span spans
- * across the line break and parsing breaks for every tag after the
- * first (this is exactly what was happening). Each line's tag is closed
- * right after its visible content; the '\n' itself is emitted plain,
- * outside any tag, so the next line starts a fresh one.
+ * That earlier approach had a whole class of bugs baked into its
+ * premise: a literal '#' in log content can't be represented at all once
+ * label recolor is on (lv_draw_label.c's per-letter command-state parser
+ * consumes every '#' as a delimiter in every state, so there's no way to
+ * escape one), and hand-assembling one big buffer with careful
+ * open/close/escape byte-accounting for every tag left room for a real
+ * one-byte out-of-bounds write. Spans sidestep all of that -- color is a
+ * real lv_style_t property per span, never parsed out of the text, so
+ * there's no tag syntax to build, close, or escape.
  *
- * That same "single line only" restriction also applies to an *implicit*
- * line break -- s_label is LV_LABEL_LONG_WRAP, so a stored line wider
- * than LABEL_CONTENT_W auto-wraps onto a second visual row on screen, and
- * LVGL's recolor breaks there exactly the same way (this is what produced
- * a long log line whose tail showed up as literal unparsed "#RRGGBB ..."
- * text instead of being colored). Each line is measured against
- * LABEL_CONTENT_W and clamped via clamp_to_width() before its tag is
- * built, so no stored line can ever reach LVGL wide enough to wrap. */
+ * Line separation between spans needs its own explanation, since it's
+ * *not* simply "put '\n' at the end of each span's text" -- a span
+ * ending in "...content\n" with nothing after it is exactly the case
+ * lv_span.c's own line-assembly can't distinguish from "this span's text
+ * just ran out, go pull more from the next span to finish this same
+ * visual line": internally it checks whether the byte right after the
+ * detected line-break is this span's own NUL terminator, and if so
+ * (which it always is here, since the '\n' is the very last thing before
+ * it) treats it as *not* a definitive end-of-line, keeps scanning into
+ * the next span, and concatenates it onto the same row instead of
+ * starting a new one -- exactly the "text never breaks, everything
+ * piles onto the same lines" symptom this replaced. The fix is to
+ * prefix each span *after* the first with '\n' instead of suffixing the
+ * previous one: the '\n' then has real content (this span's own line)
+ * following it within the *same* span's string, so the NUL-adjacency
+ * check no longer misfires, and the line-break is recognized as
+ * definitive.
+ *
+ * Each line is still measured against LABEL_CONTENT_W and clamped via
+ * clamp_to_width() before becoming a span -- not to protect a tag parser
+ * anymore, just so one of our own stored "lines" always maps to exactly
+ * one visual row, which is what s_visible_lines/s_top_line's line-count
+ * scroll math assumes. */
 static void render_window(void)
 {
     if (s_line_count == 0) {
-        lv_label_set_text(s_label, "");
+        while (lv_spangroup_get_child_cnt(s_spangroup) > 0) {
+            lv_spangroup_del_span(s_spangroup, lv_spangroup_get_child(s_spangroup, 0));
+        }
+        lv_spangroup_refr_mode(s_spangroup);
         return;
     }
 
     size_t max_top = (s_line_count > (size_t)s_visible_lines) ? (s_line_count - s_visible_lines) : 0;
     if (s_top_line > max_top) s_top_line = max_top;
 
-    size_t end = s_top_line + s_visible_lines;
-    if (end > s_line_count) end = s_line_count;
+    /* Delete every existing child and rebuild the window from scratch on
+     * every call, rather than trying to reuse/patch the previous span
+     * list by index. The reuse approach that used to live here (matching
+     * spans up by index and only adding/removing the difference) was the
+     * source of an intermittent blank-region-at-the-bottom bug: it's easy
+     * for the reused-vs-recreated bookkeeping to drift out of sync with
+     * what's actually in the spangroup after enough add/remove churn
+     * across refresh ticks and drag steps, silently leaving fewer visible
+     * rows than s_visible_lines calls for. A handful of spans (at most
+     * s_visible_lines, ~24-30) is cheap enough to delete and recreate
+     * every 300ms/drag-step that the correctness win is worth the extra
+     * alloc/free -- there's no perceptible cost at this scale. */
+    while (lv_spangroup_get_child_cnt(s_spangroup) > 0) {
+        lv_spangroup_del_span(s_spangroup, lv_spangroup_get_child(s_spangroup, 0));
+    }
 
-    static char win_buf[8192];
-    size_t out_pos = 0;
+    /* One line's worth of scratch space -- leading '\n' (1) + clamped
+     * content + "..." (3) + NUL (1). lv_span_set_text() copies this into
+     * its own heap allocation, so reusing the same buffer every
+     * iteration is safe. */
+    static char line_buf[256];
 
-    for (size_t li = s_top_line; li < end; li++) {
+    /* Walk forward from s_top_line, skipping blank lines entirely (see
+     * line_content_len()'s comment) rather than giving each one its own
+     * empty row -- shown counts actual rendered rows, li is the raw line
+     * index (blank or not); the loop stops once the screen is full or the
+     * backlog runs out, whichever comes first. */
+    size_t shown = 0;
+    for (size_t li = s_top_line; li < s_line_count && shown < (size_t)s_visible_lines; li++) {
+        size_t content_len = line_content_len(li);
+        if (content_len == 0) continue;   /* blank line -- skip, no row spent on it */
+
         size_t line_start = s_lines[li];
-        size_t line_end    = (li + 1 < s_line_count) ? s_lines[li + 1] : s_cur_line_start;
-        size_t line_len    = line_end - line_start;
-
-        bool has_nl = (line_len > 0 && s_store[line_start + line_len - 1] == '\n');
-        size_t content_len = has_nl ? line_len - 1 : line_len;
 
         static const char *ellipsis = "...";
         lv_coord_t ellipsis_w = lv_txt_get_width(ellipsis, 3, &lv_font_montserrat_14, 0, LV_TEXT_FLAG_NONE);
@@ -325,39 +394,27 @@ static void render_window(void)
             clipped = true;
         }
 
-        if (out_pos + 16 >= sizeof(win_buf)) break;   /* room for "#RRGGBB " + closing "#" */
-        int written = snprintf(win_buf + out_pos, sizeof(win_buf) - out_pos,
-                                "#%s ", level_color(s_store + line_start, content_len));
-        if (written < 0) break;
-        out_pos += (size_t)written;
+        size_t max_disp = sizeof(line_buf) - 5;   /* leading '\n' + "..." + NUL */
+        if (disp_len > max_disp) disp_len = max_disp;   /* defensive; LABEL_CONTENT_W-fitting content is always far under this */
 
-        for (size_t k = 0; k < disp_len; k++) {
-            char c = s_store[line_start + k];
-            if (c == '#') {
-                if (out_pos + 3 >= sizeof(win_buf)) goto done;
-                win_buf[out_pos++] = '#';
-                win_buf[out_pos++] = '#';
-            } else {
-                if (out_pos + 2 >= sizeof(win_buf)) goto done;
-                win_buf[out_pos++] = c;
-            }
-        }
+        size_t out_pos = 0;
+        if (shown > 0) line_buf[out_pos++] = '\n';   /* see the function comment above -- ends the *previous* span's line */
+        memcpy(line_buf + out_pos, s_store + line_start, disp_len);
+        out_pos += disp_len;
         if (clipped) {
-            if (out_pos + 3 >= sizeof(win_buf)) goto done;
-            win_buf[out_pos++] = '.';
-            win_buf[out_pos++] = '.';
-            win_buf[out_pos++] = '.';
+            line_buf[out_pos++] = '.';
+            line_buf[out_pos++] = '.';
+            line_buf[out_pos++] = '.';
         }
-        win_buf[out_pos++] = '#';   /* close this line's color tag -- before the newline */
-        if (has_nl) {
-            if (out_pos + 1 >= sizeof(win_buf)) goto done;
-            win_buf[out_pos++] = '\n';   /* plain, outside any tag */
-        }
-    }
-done:
-    win_buf[out_pos] = '\0';
+        line_buf[out_pos] = '\0';
 
-    lv_label_set_text(s_label, win_buf);
+        lv_span_t *span = lv_spangroup_new_span(s_spangroup);
+        lv_span_set_text(span, line_buf);
+        lv_style_set_text_color(&span->style, level_color(s_store + line_start, content_len));
+        shown++;
+    }
+
+    lv_spangroup_refr_mode(s_spangroup);
 }
 
 /* Drag-to-scroll, entirely manual -- see file header comment for why this
@@ -483,18 +540,32 @@ void ui_log_view_show(void)
     lv_obj_clear_flag(s_cont, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_cont, cont_pressing_cb, LV_EVENT_PRESSING, NULL);
 
-    s_label = lv_label_create(s_cont);
-    lv_obj_set_width(s_label, SCREEN_W - 24 - 8);
-    lv_label_set_long_mode(s_label, LV_LABEL_LONG_WRAP);
-    lv_label_set_recolor(s_label, true);   /* per-line #RRGGBB tags, see render_window()/level_color() */
-    lv_obj_set_style_text_color(s_label, lv_color_hex(0xcccccc), 0);
-    lv_obj_set_style_text_font(s_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_pad_all(s_label, 0, 0);
-    lv_label_set_text(s_label, "");
+    s_spangroup = lv_spangroup_create(s_cont);
+    lv_coord_t spangroup_h = SCREEN_H - TITLEBAR_H - 24 - 8;
+    lv_obj_set_size(s_spangroup, SCREEN_W - 24 - 8, spangroup_h);
+    /* FIXED, not BREAK -- we do our own line wrapping/clipping
+     * (clamp_to_width() in render_window()) and hand it exactly
+     * s_visible_lines spans, so the spangroup itself doesn't need to
+     * (and shouldn't) do any wrapping of its own; it just draws within
+     * this fixed box. */
+    lv_spangroup_set_mode(s_spangroup, LV_SPAN_MODE_FIXED);
+    lv_spangroup_set_overflow(s_spangroup, LV_SPAN_OVERFLOW_CLIP);
+    lv_spangroup_set_align(s_spangroup, LV_TEXT_ALIGN_LEFT);
+    lv_obj_set_style_text_color(s_spangroup, lv_color_hex(0xcccccc), 0);   /* base/fallback -- every span sets its own color anyway */
+    lv_obj_set_style_text_font(s_spangroup, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_pad_all(s_spangroup, 0, 0);
+    /* lv_spangroup, unlike lv_label, does not clear LV_OBJ_FLAG_CLICKABLE
+     * in its constructor -- it inherits the plain lv_obj default of
+     * clickable-by-default (see lv_obj_create's obj->flags init). Left
+     * alone, that makes it the deepest clickable hit under the touch
+     * point, so indev delivers PRESSING straight to the spangroup and
+     * cont_pressing_cb (registered on s_cont, its parent) never fires --
+     * this, not span churn, was why drag-scrolling stopped working after
+     * switching from a label. */
+    lv_obj_clear_flag(s_spangroup, LV_OBJ_FLAG_CLICKABLE);
 
     s_line_height   = lv_font_get_line_height(&lv_font_montserrat_14);
-    lv_coord_t area_h = SCREEN_H - TITLEBAR_H - 24 - 8;
-    s_visible_lines = (int)(area_h / (s_line_height > 0 ? s_line_height : 18));
+    s_visible_lines = (int)(spangroup_h / (s_line_height > 0 ? s_line_height : 18));
     if (s_visible_lines < 1) s_visible_lines = 1;
 
     s_cursor = sys_log_cursor_start();
