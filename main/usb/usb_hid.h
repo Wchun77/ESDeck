@@ -95,6 +95,35 @@ void usb_hid_driver_install(void);
 void usb_hid_activate(void);
 void usb_hid_deactivate(void);
 
+/* True if the device is currently attached/mounted. Tracked in software
+ * (not read from tud_mounted()) -- see the s_conn_state comment in
+ * usb_hid.c: on this port, tud_mounted() only clears on a real VBUS
+ * session-end interrupt, so it never notices a self-initiated soft
+ * disconnect (usb_hid_force_disconnect() below). Safe to call from
+ * anywhere including the LVGL task. */
+bool usb_hid_is_connected(void);
+
+/* Force a soft USB disconnect / reconnect (toggles the pull-up) without
+ * physically unplugging the cable. Two separate one-shot actions rather
+ * than a combined "reconnect" so a UI toggle (Settings page's HID Status
+ * row) can call whichever one matches the current state -- disconnect
+ * stays disconnected until connect is called explicitly, useful for
+ * manually testing the PC side's disconnect handling. Both are
+ * non-blocking, safe to call from the LVGL task. usb_hid_is_connected()
+ * reflects usb_hid_force_disconnect() immediately; after
+ * usb_hid_force_connect() it stays false until the host actually
+ * finishes re-enumerating (real TINYUSB_EVENT_ATTACHED, ~1-3s later). */
+void usb_hid_force_disconnect(void);
+void usb_hid_force_connect(void);
+
+/* Register callback invoked whenever the device attaches/detaches (see
+ * TINYUSB_EVENT_ATTACHED/DETACHED below). Pass NULL to unregister.
+ * Already hopped onto the LVGL task via lv_async_call() before this
+ * fires, same as the connect/disconnect toast it's called alongside --
+ * safe to touch LVGL objects directly. */
+typedef void (*usb_hid_conn_cb_t)(bool connected);
+void usb_hid_set_conn_cb(usb_hid_conn_cb_t cb);
+
 /* Send button press IN report */
 void usb_hid_send(uint8_t page, uint8_t btn);
 void usb_hid_release(void);
@@ -129,10 +158,15 @@ void usb_hid_set_monitor_cb(void (*cb)(uint8_t cpu_usage, uint8_t cpu_temp,
                                        uint8_t cpu_power, uint8_t gpu_power,
                                        uint8_t ssd_life));
 
-/* Register callback invoked when PC sends CMD_TIME.
- * Pass NULL to unregister. Called from the TinyUSB task context. */
-void usb_hid_set_time_cb(void (*cb)(uint8_t hour, uint8_t min, uint8_t sec,
-                                    uint8_t month, uint8_t day, uint8_t wday));
+/* Register callback invoked when PC sends CMD_TIME. Pass NULL to
+ * unregister. Called from the TinyUSB task context -- raw field pass-
+ * through only, no calendar math here (year/month/day/hour/min/sec as
+ * sent by the PC; see sys_clock.c for lag compensation, drift correction
+ * and wday derivation). Unlike usb_hid_set_monitor_cb(), this is
+ * typically registered once at boot (my_ui_init() -> sys_clock_init()),
+ * not per UI mode -- the PC may send CMD_TIME while any mode is active. */
+void usb_hid_set_time_cb(void (*cb)(uint16_t year, uint8_t month, uint8_t day,
+                                    uint8_t hour, uint8_t min, uint8_t sec));
 
 /* Register callback invoked when PC sends CMD_QUERY.
  * Must return the current UI mode: 0=deck, 1=monitor, 2=media. */

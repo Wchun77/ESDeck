@@ -5,8 +5,6 @@
 #include "class/hid/hid_device.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include <time.h>
-#include <sys/time.h>
 #include "esp_heap_caps.h"
 #include "esp_jpeg_dec.h"
 #include "lvgl.h"
@@ -22,6 +20,11 @@ static bool s_active = false;
 /* Forward decl -- defined near the bottom alongside the toast hookup it
  * exists for, but tusb_cfg (below) needs to reference it by name. */
 static void usb_hid_event_cb(tinyusb_event_t *event, void *arg);
+
+/* Settings page's live HID status indicator (see ui_settings.c). Fired
+ * from the same lv_async_call() hop as the connect/disconnect toast, so
+ * it's already safe to touch LVGL objects from here. */
+static usb_hid_conn_cb_t s_conn_cb = NULL;
 
 /*
  * HID report descriptor — Vendor-defined (Usage Page 0xFF00).
@@ -98,8 +101,8 @@ static void (*s_monitor_data_cb)(uint8_t cpu_usage, uint8_t cpu_temp,
                                  uint8_t ssd_life) = NULL;
 
 /* Called when PC sends CMD_TIME */
-static void (*s_time_cb)(uint8_t hour, uint8_t min, uint8_t sec,
-                         uint8_t month, uint8_t day, uint8_t wday) = NULL;
+static void (*s_time_cb)(uint16_t year, uint8_t month, uint8_t day,
+                         uint8_t hour, uint8_t min, uint8_t sec) = NULL;
 
 /* Called when PC sends CMD_QUERY; returns true if currently in monitor mode */
 static uint8_t (*s_mode_query_cb)(void) = NULL;
@@ -410,7 +413,7 @@ void usb_hid_set_monitor_cb(void (*cb)(uint8_t, uint8_t, uint8_t, uint8_t,
     s_monitor_data_cb = cb;
 }
 
-void usb_hid_set_time_cb(void (*cb)(uint8_t, uint8_t, uint8_t,
+void usb_hid_set_time_cb(void (*cb)(uint16_t, uint8_t, uint8_t,
                                     uint8_t, uint8_t, uint8_t))
 {
     s_time_cb = cb;
@@ -483,6 +486,33 @@ void usb_hid_activate(void)   { s_active = true;  ESP_LOGI(TAG, "HID activated")
 void usb_hid_deactivate(void) { s_active = false; ESP_LOGI(TAG, "HID deactivated"); }
 
 /* -----------------------------------------------------------------------
+ * Connection state -- self-tracked, NOT read from tud_mounted().
+ *
+ * tud_mounted() (managed_components/espressif__tinyusb/src/device/usbd.c)
+ * actually just checks cfg_num != 0, which is only cleared on
+ * DCD_EVENT_UNPLUGGED -- and on this port (DWC2, dcd_dwc2.c) that event
+ * fires solely on a GOTGINT_SEDET "VBUS session end" interrupt, i.e. a
+ * real physical unplug. usb_hid_force_disconnect()'s tud_disconnect()
+ * only toggles the D+/D- pull resistors (dcd_disconnect() -- confirmed a
+ * real, working implementation, not a stub); VBUS from the host cable
+ * never drops, so no DCD_EVENT_UNPLUGGED is ever raised and tud_mounted()
+ * stays stuck true forever after a self-initiated soft disconnect. There
+ * is no TinyUSB callback for a software-initiated soft-disconnect on this
+ * port -- so the state has to be tracked here instead, updated from two
+ * places: the real attach/detach event below (actual cable plug/unplug),
+ * and directly inside usb_hid_force_disconnect()/force_connect() (since
+ * those are self-inflicted and no corresponding hardware event will ever
+ * follow to confirm them).
+ * ----------------------------------------------------------------------- */
+static bool s_conn_state = false;
+
+static void set_conn_state(bool connected)
+{
+    s_conn_state = connected;
+    if (s_conn_cb) s_conn_cb(connected);
+}
+
+/* -----------------------------------------------------------------------
  * TinyUSB attach/detach event -- via the esp_tinyusb wrapper's event_cb,
  * not raw tud_mount_cb/tud_umount_cb.
  *
@@ -492,15 +522,19 @@ void usb_hid_deactivate(void) { s_active = false; ESP_LOGI(TAG, "HID deactivated
  * would be (and was) a duplicate-symbol link error. The wrapper's own
  * event_cb hook is the intended extension point instead; wired below via
  * tusb_cfg.event_cb.
- *
- * Right now this is purely a stand-in "device connected/disconnected"
- * signal to exercise ui_toast's queue/animation/dismiss behavior
- * end-to-end (plug/unplug the USB cable) before real BLE notifications
- * exist -- see ui_toast.h. Once BLE lands, its own connect/disconnect
- * events push through the same ui_toast_push() call.
  * ----------------------------------------------------------------------- */
-static void toast_hid_connected_cb(void *arg)    { (void)arg; ui_toast_push("HID Connected", 1, NULL); }
-static void toast_hid_disconnected_cb(void *arg) { (void)arg; ui_toast_push("HID Disconnected", 1, NULL); }
+static void toast_hid_connected_cb(void *arg)
+{
+    (void)arg;
+    ui_toast_push("HID Connected", 1, NULL);
+    set_conn_state(true);
+}
+static void toast_hid_disconnected_cb(void *arg)
+{
+    (void)arg;
+    ui_toast_push("HID Disconnected", 1, NULL);
+    set_conn_state(false);
+}
 
 static void usb_hid_event_cb(tinyusb_event_t *event, void *arg)
 {
@@ -519,6 +553,35 @@ static void usb_hid_event_cb(tinyusb_event_t *event, void *arg)
         break;
     }
 }
+
+void usb_hid_set_conn_cb(usb_hid_conn_cb_t cb) { s_conn_cb = cb; }
+
+bool usb_hid_is_connected(void) { return s_conn_state; }
+
+/* Soft USB disconnect / reconnect (toggles the pull-up) -- exposed as two
+ * separate one-shot actions rather than a single "reconnect" that does
+ * both, so the Settings page's HID Status row can be a real toggle: tap
+ * while Connected -> disconnect only (and stay disconnected -- this also
+ * makes the PC side see it drop, e.g. to manually test that path), tap
+ * again while Disconnected -> connect only. Both are plain TinyUSB calls,
+ * safe to call directly from the LVGL task (unlike the boot-time pair in
+ * usb_hid_driver_install(), neither blocks).
+ *
+ * Asymmetric on purpose:
+ * - Disconnect: set_conn_state(false) is called directly, immediately.
+ *   No real hardware event will ever confirm this on this port (see the
+ *   comment above s_conn_state) -- it's genuinely already true the moment
+ *   dcd_disconnect() asserts the soft-disconnect bit, so there's nothing
+ *   to wait for.
+ * - Connect: state is NOT flipped here. Unlike disconnect, mount
+ *   detection isn't broken -- tud_mount_cb() (-> TINYUSB_EVENT_ATTACHED
+ *   -> toast_hid_connected_cb() -> set_conn_state(true) above) fires on
+ *   genuine SET_CONFIGURATION success, independent of the VBUS-only
+ *   DCD_EVENT_UNPLUGGED issue, so it's left to actually confirm the host
+ *   finished re-enumerating (typically 1-3s later) instead of claiming
+ *   Connected before that's true. */
+void usb_hid_force_disconnect(void) { tud_disconnect(); set_conn_state(false); }
+void usb_hid_force_connect(void)    { tud_connect(); }
 
 const tusb_desc_device_t *usb_hid_get_device_desc(void) { return &s_device_desc; }
 const uint8_t            *usb_hid_get_config_desc(void) { return s_config_desc;  }
@@ -653,29 +716,12 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                               buffer[13]);
     }
     else if (cmd == HID_MON_CMD_TIME && bufsize >= 7) {
-        if (s_time_cb) {
-            struct tm t = {
-                .tm_year  = (buffer[1] + 2000) - 1900,
-                .tm_mon   = buffer[2] - 1,
-                .tm_mday  = buffer[3],
-                .tm_hour  = buffer[4],
-                .tm_min   = buffer[5],
-                .tm_sec   = buffer[6],
-                .tm_isdst = -1,
-            };
-            mktime(&t);
-
-            /* Add 1 second to compensate for the one-tick display lag */
-            uint8_t sec_adj  = buffer[6] + 1;
-            uint8_t min_adj  = buffer[5];
-            uint8_t hour_adj = buffer[4];
-            if (sec_adj  >= 60) { sec_adj  = 0; min_adj++;  }
-            if (min_adj  >= 60) { min_adj  = 0; hour_adj++; }
-            if (hour_adj >= 24) { hour_adj = 0; }
-
-            s_time_cb(hour_adj, min_adj, sec_adj,
-                    buffer[2], buffer[3], (uint8_t)t.tm_wday);
-        }
+        /* Raw field pass-through only -- no calendar math here (lag
+         * compensation, drift correction, wday derivation all live in
+         * sys_clock.c, the only place that owns the running clock). */
+        if (s_time_cb)
+            s_time_cb((uint16_t)(buffer[1] + 2000), buffer[2], buffer[3],
+                      buffer[4], buffer[5], buffer[6]);
     }
     else if (cmd == HID_MON_CMD_QUERY) {
         uint8_t mode = s_mode_query_cb ? s_mode_query_cb() : 0;

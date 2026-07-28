@@ -8,6 +8,7 @@
 #include "ble/ble_manager.h"
 #include "boot_anim.h"
 #include "nvs_manager/nvs_manager.h"
+#include "sys_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -15,6 +16,11 @@
 
 void app_main(void)
 {
+    /* First thing, before anything else has a chance to log -- so the
+     * ring buffer already holds the full boot log by the time the
+     * on-device log viewer (see ui_log_view.c) is ever opened. */
+    sys_log_init();
+
     heap_caps_malloc_extmem_enable(4096);
     waveshare_esp32_s3_rgb_lcd_init();   /* CH422G 在這裡初始化，EXIO4 拉高 */
 

@@ -7,6 +7,9 @@
 #include "ui_deck.h"
 #include "ui_media.h"
 #include "ui_img_pool.h"
+#include "ui_log_view.h"
+#include "usb/usb_hid.h"
+#include "ui_toast.h"
 #include "ui.h"
 #include "ble/ble_manager.h"
 #include "lvgl.h"
@@ -348,6 +351,43 @@ static void info_dismiss_cb(lv_event_t *e)
     lv_obj_del(lv_event_get_target(e));
 }
 
+/* -----------------------------------------------------------------------
+ * Hidden log viewer entry point -- press and hold the "ESDeck"/project
+ * name label in the Info dialog for 5 seconds to open ui_log_view.c.
+ * Deliberately not a normal LV_EVENT_LONG_PRESSED (that's a global
+ * indev setting, shared by every clickable widget in the app, and its
+ * default threshold is much shorter than the 5s wanted here) -- instead
+ * a one-shot lv_timer is started on PRESSED and cancelled on RELEASED/
+ * PRESS_LOST, so only this one label gets the long hold behavior.
+ * ----------------------------------------------------------------------- */
+static lv_timer_t *s_log_hold_timer = NULL;
+
+static void info_log_hold_cb(lv_timer_t *t)
+{
+    lv_obj_t *info_root = (lv_obj_t *)t->user_data;
+    s_log_hold_timer = NULL;   /* one-shot: LVGL deletes it after this call returns */
+
+    lv_obj_del(info_root);     /* close the Info dialog underneath */
+    ui_log_view_show();
+}
+
+static void info_name_press_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t *info_root = (lv_obj_t *)lv_event_get_user_data(e);
+
+    if (code == LV_EVENT_PRESSED) {
+        s_log_hold_timer = lv_timer_create(info_log_hold_cb, 5000, info_root);
+        lv_timer_set_repeat_count(s_log_hold_timer, 1);
+    } else {
+        /* RELEASED or PRESS_LOST -- released early, cancel the hold */
+        if (s_log_hold_timer) {
+            lv_timer_del(s_log_hold_timer);
+            s_log_hold_timer = NULL;
+        }
+    }
+}
+
 static void item_info_cb(lv_event_t *e)
 {
     esp_app_desc_t desc;
@@ -383,6 +423,15 @@ static void item_info_cb(lv_event_t *e)
     lv_obj_set_style_text_color(name_lbl, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_text_font(name_lbl, &lv_font_montserrat_24, 0);
 
+    /* Hidden log viewer entry point -- see info_name_press_cb() above.
+     * Labels aren't clickable by default, need it explicitly for PRESSED/
+     * RELEASED to fire at all. user_data is this dialog's root so the
+     * 5s-hold callback can close it before opening the log viewer. */
+    lv_obj_add_flag(name_lbl, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(name_lbl, info_name_press_cb, LV_EVENT_PRESSED, root);
+    lv_obj_add_event_cb(name_lbl, info_name_press_cb, LV_EVENT_RELEASED, root);
+    lv_obj_add_event_cb(name_lbl, info_name_press_cb, LV_EVENT_PRESS_LOST, root);
+
     char ver_buf[64];
     char built_buf[64];
     if (ok) {
@@ -403,6 +452,34 @@ static void item_info_cb(lv_event_t *e)
         lv_label_set_text(built_lbl, built_buf);
         lv_obj_set_style_text_color(built_lbl, lv_color_hex(0x888888), 0);
         lv_obj_set_style_text_font(built_lbl, &lv_font_montserrat_16, 0);
+    }
+}
+
+/* -----------------------------------------------------------------------
+ * HID Status row (System submenu) -- toggles the real USB state instead
+ * of a single "reconnect" action: tap while Connected calls
+ * usb_hid_force_disconnect() and stays disconnected (lets you manually
+ * verify the PC side notices), tap again while Disconnected calls
+ * usb_hid_force_connect(). The row's label/color is redrawn via
+ * hid_conn_cb() -> render_current_level() whenever usb_hid.c's tracked
+ * connection state changes (see the s_conn_state comment in usb_hid.c for
+ * why it's tracked in software instead of read from tud_mounted()).
+ * Disconnect updates that state immediately (nothing to wait for), so its
+ * toast/log/label all land in the same frame as the tap. Connect only
+ * re-enables the pull-up -- the label stays Disconnected until the real
+ * TINYUSB_EVENT_ATTACHED lands (host actually finishes re-enumerating,
+ * ~1-3s later), so the toast below is deliberately worded as pending. */
+static void item_hid_status_cb(lv_event_t *e)
+{
+    (void)e;
+    if (usb_hid_is_connected()) {
+        ESP_LOGI("SETTINGS", "HID Status: user forced disconnect");
+        usb_hid_force_disconnect();
+        ui_toast_push("HID: Disconnected", 1, NULL);
+    } else {
+        ESP_LOGI("SETTINGS", "HID Status: user forced connect");
+        usb_hid_force_connect();
+        ui_toast_push("HID: Connecting...", 1, NULL);
     }
 }
 
@@ -525,10 +602,11 @@ static void item_boot_anim_cb(lv_event_t *e)
  * growing this pattern.
  * ----------------------------------------------------------------------- */
 static const setting_node_t s_system_menu[] = {
-    { "Select Config", SETTING_ACTION, SETMASK_ALL, item_config_cb, NULL, 0, NULL, NULL },
+    { "Select Config", SETTING_ACTION, SETMASK_ALL, item_config_cb, NULL, 0 },
     { "Bluetooth",      SETTING_TOGGLE, SETMASK_ALL, NULL,           NULL, 0, ble_manager_is_enabled, ble_manager_set_enabled },
-    { "MSC Mode",       SETTING_ACTION, SETMASK_ALL,  item_msc_cb,    NULL, 0, NULL, NULL },
-    { "Info",            SETTING_ACTION, SETMASK_ALL,  item_info_cb,  NULL, 0, NULL, NULL },
+    { "MSC Mode",       SETTING_ACTION, SETMASK_ALL,  item_msc_cb,    NULL, 0 },
+    { "HID Status",     SETTING_ACTION, SETMASK_ALL,  item_hid_status_cb, NULL, 0 },
+    { "Info",            SETTING_ACTION, SETMASK_ALL,  item_info_cb,  NULL, 0 },
 };
 
 static const setting_node_t s_root_menu[] = {
@@ -546,6 +624,18 @@ static const setting_node_t s_root_menu[] = {
  * Menu navigation / rendering
  * ----------------------------------------------------------------------- */
 static void render_current_level(void);
+
+/* usb_hid_conn_cb_t -- fires once TinyUSB's own ATTACHED/DETACHED event
+ * lands (already hopped onto the LVGL task, see usb_hid.c), i.e. this is
+ * the real confirmation a forced disconnect/connect actually took effect,
+ * not just that the HID Status row was tapped. Only worth a redraw while
+ * that row is actually the level on screen. */
+static void hid_conn_cb(bool connected)
+{
+    (void)connected;
+    if (s_stack_depth >= 0 && s_menu_stack[s_stack_depth] == s_system_menu)
+        render_current_level();
+}
 
 static void generic_item_cb(lv_event_t *e)
 {
@@ -627,9 +717,16 @@ static void render_current_level(void)
         lv_obj_clear_flag(item, LV_OBJ_FLAG_PRESS_LOCK);
 
         lv_obj_t *lbl = lv_label_create(item);
-        lv_label_set_text(lbl, node->label);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
+
+        if (node->action_cb == item_hid_status_cb) {
+            bool connected = usb_hid_is_connected();
+            lv_label_set_text_fmt(lbl, "HID Status: %s", connected ? "Connected" : "Disconnected");
+            lv_obj_set_style_text_color(lbl, lv_color_hex(connected ? 0x33cc33 : 0xcc3333), 0);
+        } else {
+            lv_label_set_text(lbl, node->label);
+        }
 
         if (node->type == SETTING_TOGGLE) {
             /* Only the switch is the click target -- the row itself isn't
@@ -1009,6 +1106,11 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
     lv_obj_set_style_text_color(s_breadcrumb_lbl, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_text_font(s_breadcrumb_lbl, &lv_font_montserrat_20, 0);
     lv_obj_align(s_breadcrumb_lbl, LV_ALIGN_CENTER, 0, 0);
+
+    /* HID status lives as a System > HID Status row instead (see
+     * s_system_menu[] / item_hid_status_cb) -- just register the redraw
+     * hook here so that row's color/text stays live while visible. */
+    usb_hid_set_conn_cb(hid_conn_cb);
 
     /* Scrollable item list -- grows to fill remaining page height */
     s_list = lv_obj_create(s_content);
