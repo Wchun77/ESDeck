@@ -610,6 +610,41 @@ static void ancs_request_timeout_cb(void *arg)
 
 static void ancs_request_app_attributes(uint16_t conn_handle, const char *app_id);
 
+/* Strips Unicode bidi/directional-formatting control characters in place
+ * (UTF-8, 3 bytes each, all in the E2 80/81 xx range). iOS wraps
+ * dynamically-inserted text (contact names, message bodies -- especially
+ * from apps like LINE when the notification carries richer content, e.g. a
+ * camera/sticker reaction) in these to keep bidirectional text rendering
+ * correct regardless of surrounding context; plain-text notifications often
+ * don't get them. They carry no visible glyph by design, but this font
+ * doesn't have (and shouldn't need) placeholder glyphs for them, hence the
+ * "glyph dsc. not found for U+2068/U+2069" warnings -- stripping them here
+ * means the toast only ever sees actual displayable text.
+ *
+ * Covers LRM/RLM (U+200E/U+200F), LRE/RLE/PDF/LRO/RLO (U+202A-U+202E), and
+ * LRI/RLI/FSI/PDI (U+2066-U+2069) -- the ones actually seen from ANCS in
+ * practice are FSI/PDI, but the whole bidi-control block shares the same
+ * "no visible glyph, safe to drop" property. */
+static void ancs_strip_bidi_controls(char *s)
+{
+    unsigned char *r = (unsigned char *)s;
+    unsigned char *w = (unsigned char *)s;
+
+    while (*r) {
+        if (r[0] == 0xE2 && r[1] == 0x80 && (r[2] == 0x8E || r[2] == 0x8F ||
+                                              (r[2] >= 0xAA && r[2] <= 0xAE))) {
+            r += 3;
+            continue;
+        }
+        if (r[0] == 0xE2 && r[1] == 0x81 && r[2] >= 0xA6 && r[2] <= 0xA9) {
+            r += 3;
+            continue;
+        }
+        *w++ = *r++;
+    }
+    *w = '\0';
+}
+
 /* Parses a Get Notification Attributes response (CommandID 0x00) from the
  * top of s_ds_buf every time new bytes arrive, rather than tracking
  * partial-attribute state across calls -- simpler, and cheap given these
@@ -654,6 +689,9 @@ static bool ancs_parse_notif_attrs_response(void)
         }
         pos += attr_len;
     }
+
+    ancs_strip_bidi_controls(title);
+    ancs_strip_bidi_controls(message);
 
     ESP_LOGI(TAG, "ANCS: notification from \"%s\": \"%s\" / \"%s\"", app_id, title, message);
 
