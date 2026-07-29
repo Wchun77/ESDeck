@@ -30,7 +30,7 @@
 #define TOAST_Y_SHOWN     12
 
 #define TOAST_ANIM_MS     220
-#define TOAST_HOLD_MS     2200
+#define TOAST_HOLD_MS     3200
 
 typedef struct {
     char label[TOAST_LABEL_LEN];
@@ -267,14 +267,22 @@ void ui_toast_push(const char *label, int count, const char *merge_key,
 }
 
 /* -----------------------------------------------------------------------
- * Swipe-up-to-dismiss
+ * Tap-to-dismiss
+ *
+ * Was swipe-up-to-dismiss (LV_EVENT_GESTURE + lv_indev_get_gesture_dir()),
+ * but that never actually fired -- lv_obj_constructor() sets
+ * LV_OBJ_FLAG_GESTURE_BUBBLE by default on any object with a parent, which
+ * makes indev_gesture() walk up to the topmost GESTURE_BUBBLE ancestor
+ * (the screen, here) and deliver LV_EVENT_GESTURE *there* instead of on
+ * s_toast, no matter what flags s_toast itself has. A plain tap
+ * (LV_EVENT_CLICKED) doesn't have that bubbling indirection and needs no
+ * gesture-driver tuning to be reliable, at the cost of not distinguishing
+ * "tap to dismiss" from "tap to act on this notification" if that's ever
+ * wanted later.
  * ----------------------------------------------------------------------- */
-static void toast_gesture_cb(lv_event_t *e)
+static void toast_click_cb(lv_event_t *e)
 {
     (void)e;
-    lv_indev_t *indev = lv_indev_get_act();
-    if (!indev) return;
-    if (lv_indev_get_gesture_dir(indev) != LV_DIR_TOP) return;
     if (!s_showing) return;
 
     if (s_hold_timer) {
@@ -309,7 +317,7 @@ void ui_toast_init(void)
     lv_obj_set_style_shadow_width(s_toast, 16, 0);
     lv_obj_set_style_shadow_opa(s_toast, LV_OPA_40, 0);
     lv_obj_clear_flag(s_toast, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(s_toast, toast_gesture_cb, LV_EVENT_GESTURE, NULL);
+    lv_obj_add_event_cb(s_toast, toast_click_cb, LV_EVENT_CLICKED, NULL);
 
     s_toast_lbl = lv_label_create(s_toast);
     lv_obj_set_style_text_color(s_toast_lbl, lv_color_hex(0xffffff), 0);

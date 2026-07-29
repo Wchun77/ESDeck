@@ -8,8 +8,7 @@
  * A single reusable overlay that slides down from the top edge of the
  * screen over whatever is currently showing (Deck/Monitor/Media, even the
  * Settings page or the "switching config" cover), holds for a few seconds,
- * then slides back up on its own. A swipe-up gesture on the banner
- * dismisses it early.
+ * then slides back up on its own. Tapping the banner dismisses it early.
  *
  * Events are queued -- only one shows at a time. Pushing an event whose
  * merge_key matches the one currently showing (or still waiting in the
