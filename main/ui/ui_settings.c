@@ -603,14 +603,26 @@ static void item_boot_anim_cb(lv_event_t *e)
  * ----------------------------------------------------------------------- */
 static const setting_node_t s_system_menu[] = {
     { "Select Config", SETTING_ACTION, SETMASK_ALL, item_config_cb, NULL, 0 },
+#if ESDECK_ENABLE_BLE
     { "Bluetooth",      SETTING_TOGGLE, SETMASK_ALL, NULL,           NULL, 0, ble_manager_is_enabled, ble_manager_set_enabled },
+#endif
     { "MSC Mode",       SETTING_ACTION, SETMASK_ALL,  item_msc_cb,    NULL, 0 },
     { "HID Status",     SETTING_ACTION, SETMASK_ALL,  item_hid_status_cb, NULL, 0 },
     { "Info",            SETTING_ACTION, SETMASK_ALL,  item_info_cb,  NULL, 0 },
 };
 
+/* s_root_menu's "System" row below hardcodes s_system_menu's child count
+ * instead of computing it (matches this file's existing pattern -- see
+ * the other SETTING_SUBMENU rows) -- has to move with the ESDECK_ENABLE_BLE
+ * toggle above since removing the Bluetooth row changes the count. */
+#if ESDECK_ENABLE_BLE
+#define ESDECK_SYSTEM_MENU_COUNT  5
+#else
+#define ESDECK_SYSTEM_MENU_COUNT  4
+#endif
+
 static const setting_node_t s_root_menu[] = {
-    { "System",          SETTING_SUBMENU, SETMASK_ALL,    NULL,              s_system_menu,  5 },
+    { "System",          SETTING_SUBMENU, SETMASK_ALL,    NULL,              s_system_menu,  ESDECK_SYSTEM_MENU_COUNT },
     { "Boot Animation", SETTING_ACTION, SETMASK_ALL,     item_boot_anim_cb, NULL,           0 },
     { "Keyboard Mode", SETTING_ACTION, SETMASK_DECK,    item_keyboard_cb,  NULL,           0 },
     { "Monitor Mode",  SETTING_ACTION, SETMASK_DECK,    item_mode_cb,      NULL,           0 },

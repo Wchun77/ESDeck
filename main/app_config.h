@@ -91,6 +91,27 @@
 #define BOOT_ANIM_CUSTOM_FPS    12
 
 /* --------------------------------------------------------------------------
+ * Feature toggles
+ *
+ * ESDECK_ENABLE_BLE -- compile-time on/off switch for the whole BLE/ANCS
+ * feature (main/ble/ble_manager.c, the Settings "Bluetooth" toggle row).
+ * Set to 0 to build without it.
+ *
+ * This only guards call sites (ble_manager_init() never gets called, the
+ * Settings row never gets added) -- it does NOT strip ble_manager.c or
+ * the "bt" component out of the build (main/CMakeLists.txt still globs
+ * and links ble/ (glob) unconditionally), matching how FS_SD_SCAN_LOG_ENABLE
+ * below only silences logging rather than removing the underlying code.
+ * Flash/link footprint is unchanged either way; only the runtime
+ * behavior (NimBLE host never starts, never advertises) and the visible
+ * Settings entry are affected. If a real build-exclusion (dropping the
+ * bt component and ble/ (glob) entirely) is ever needed, that's a separate,
+ * bigger change in main/CMakeLists.txt.
+ * -------------------------------------------------------------------------- */
+
+#define ESDECK_ENABLE_BLE  1
+
+/* --------------------------------------------------------------------------
  * Boot-time log toggles
  *
  * These only silence logging -- the underlying features (SD scan,

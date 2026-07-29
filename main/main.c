@@ -9,6 +9,7 @@
 #include "boot_anim.h"
 #include "nvs_manager/nvs_manager.h"
 #include "sys_log.h"
+#include "app_config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -56,8 +57,10 @@ void app_main(void)
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
              
     usb_manager_init();   /* preload task continues in background after this */
+#if ESDECK_ENABLE_BLE
     ble_manager_init();   /* host stack up, advertising stays off until the
                             * Settings Bluetooth switch turns it on */
+#endif
     ESP_LOGI("MAIN", "after usb/ble init - PSRAM free: %d B",
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
