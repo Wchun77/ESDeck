@@ -38,3 +38,19 @@ void ble_manager_init(void);
 void ble_manager_set_enabled(bool on);
 
 bool ble_manager_is_enabled(void);
+
+/* True while a phone is actually connected (not just "advertising/waiting
+ * for one") -- Settings' Bluetooth detail page uses this to show
+ * Connected/Not Connected. Note: this is NOT the same as "ANCS is actually
+ * subscribed and working" (that finishes asynchronously after connect, see
+ * ancs_start_discovery() in ble_manager.c) and does NOT expose the phone's
+ * name -- NimBLE never reads the peer's GAP Device Name (0x2A00)
+ * characteristic today, so there's no name to show even while connected. */
+bool ble_manager_is_connected(void);
+
+/* Settings' Bluetooth detail page's live Connection status row (see
+ * ui_settings.c) -- fired from the same lv_async_call() hop as the
+ * connect/disconnect toast, so it's already safe to touch LVGL objects
+ * from here. Mirrors usb_hid_set_conn_cb()'s shape. */
+typedef void (*ble_manager_conn_cb_t)(bool connected);
+void ble_manager_set_conn_cb(ble_manager_conn_cb_t cb);

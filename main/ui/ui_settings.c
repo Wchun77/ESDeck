@@ -53,6 +53,7 @@ typedef enum {
     SETTING_ACTION,
     SETTING_SUBMENU,
     SETTING_TOGGLE,
+    SETTING_LABEL,    /* informational row, not clickable -- see render_current_level() */
 } setting_node_type_t;
 
 typedef struct setting_node_s {
@@ -240,6 +241,15 @@ static void item_msc_cb(lv_event_t *e)
 {
     ui_msc_show_confirm_dialog();
 }
+
+#if ESDECK_ENABLE_BLE
+/* Never actually invoked as a click handler -- SETTING_LABEL rows aren't
+ * wired to generic_item_cb at all (see render_current_level()). This only
+ * exists so the Bluetooth connection-status row can be identified the same
+ * way item_hid_status_cb's row is: by comparing action_cb's identity in
+ * render_current_level()'s label-formatting special case. */
+static void item_bt_conn_status_marker(lv_event_t *e) { (void)e; }
+#endif
 
 static void item_config_cb(lv_event_t *e)
 {
@@ -601,35 +611,58 @@ static void item_boot_anim_cb(lv_event_t *e)
  * elsewhere, add an optional label_fn to setting_node_t instead of
  * growing this pattern.
  * ----------------------------------------------------------------------- */
-static const setting_node_t s_system_menu[] = {
-    { "Select Config", SETTING_ACTION, SETMASK_ALL, item_config_cb, NULL, 0 },
-#if ESDECK_ENABLE_BLE
-    { "Bluetooth",      SETTING_TOGGLE, SETMASK_ALL, NULL,           NULL, 0, ble_manager_is_enabled, ble_manager_set_enabled },
-#endif
-    { "MSC Mode",       SETTING_ACTION, SETMASK_ALL,  item_msc_cb,    NULL, 0 },
-    { "HID Status",     SETTING_ACTION, SETMASK_ALL,  item_hid_status_cb, NULL, 0 },
-    { "Info",            SETTING_ACTION, SETMASK_ALL,  item_info_cb,  NULL, 0 },
+static const setting_node_t s_custom_menu[] = {
+    { "Select Config",  SETTING_ACTION, SETMASK_ALL, item_config_cb,    NULL, 0 },
+    { "Boot Animation", SETTING_ACTION, SETMASK_ALL, item_boot_anim_cb, NULL, 0 },
 };
 
-/* s_root_menu's "System" row below hardcodes s_system_menu's child count
- * instead of computing it (matches this file's existing pattern -- see
- * the other SETTING_SUBMENU rows) -- has to move with the ESDECK_ENABLE_BLE
- * toggle above since removing the Bluetooth row changes the count. */
+static const setting_node_t s_system_menu[] = {
+    { "HID Status", SETTING_ACTION, SETMASK_ALL, item_hid_status_cb, NULL, 0 },
+    { "Info",       SETTING_ACTION, SETMASK_ALL, item_info_cb,       NULL, 0 },
+};
+
 #if ESDECK_ENABLE_BLE
-#define ESDECK_SYSTEM_MENU_COUNT  5
-#else
-#define ESDECK_SYSTEM_MENU_COUNT  4
+/* Bluetooth's own detail page -- the root-level "Bluetooth" row (see
+ * s_root_menu below) only shows On/Off as a status string and isn't itself
+ * a toggle; the actual switch lives in here alongside a connection-status
+ * row. Keeping the switch off the root row avoids the "flick the switch by
+ * accident while trying to tap into the page" ambiguity a combined
+ * switch+navigate row would have. */
+static const setting_node_t s_bluetooth_menu[] = {
+    { "Bluetooth", SETTING_TOGGLE, SETMASK_ALL, NULL, NULL, 0, ble_manager_is_enabled, ble_manager_set_enabled },
+    /* Device name isn't shown -- ble_manager_is_connected() only knows
+     * *that* a phone is connected, not its name (see that function's
+     * header comment). Connected/Not Connected is what's actually
+     * available today. */
+    { "Connection", SETTING_LABEL, SETMASK_ALL, item_bt_conn_status_marker, NULL, 0 },
+};
 #endif
 
+/* Storage Mode first, then whichever of Deck/Monitor/Media apply to the
+ * current mode, always in Deck/Monitor/Media order -- since at most one
+ * "switch to Deck" row, one "switch to Monitor" row, and one "switch to
+ * Media" row is ever visible at once (mode_mask hides "switch to the mode
+ * you're already in"), listing the mode-specific variants together in this
+ * order keeps that relative order no matter which mode is current. See
+ * s_root_menu's old layout (git history) for the pre-reorg flat version of
+ * this same set of rows. */
+static const setting_node_t s_mode_menu[] = {
+    { "Storage Mode", SETTING_ACTION, SETMASK_ALL,     item_msc_cb,                         NULL, 0 },
+    { "Deck Mode",    SETTING_ACTION, SETMASK_MONITOR, item_mode_cb,                        NULL, 0 },
+    { "Deck Mode",    SETTING_ACTION, SETMASK_MEDIA,   item_mode_from_media_cb,             NULL, 0 },
+    { "Monitor Mode", SETTING_ACTION, SETMASK_DECK,    item_mode_cb,                        NULL, 0 },
+    { "Monitor Mode", SETTING_ACTION, SETMASK_MEDIA,   item_mode_from_media_to_monitor_cb,  NULL, 0 },
+    { "Media Mode",   SETTING_ACTION, SETMASK_BOTH,    item_mode_to_media_cb,               NULL, 0 },
+};
+
 static const setting_node_t s_root_menu[] = {
-    { "System",          SETTING_SUBMENU, SETMASK_ALL,    NULL,              s_system_menu,  ESDECK_SYSTEM_MENU_COUNT },
-    { "Boot Animation", SETTING_ACTION, SETMASK_ALL,     item_boot_anim_cb, NULL,           0 },
-    { "Keyboard Mode", SETTING_ACTION, SETMASK_DECK,    item_keyboard_cb,  NULL,           0 },
-    { "Monitor Mode",  SETTING_ACTION, SETMASK_DECK,    item_mode_cb,      NULL,           0 },
-    { "Deck Mode",      SETTING_ACTION, SETMASK_MONITOR, item_mode_cb,      NULL,           0 },
-    { "Media Mode",     SETTING_ACTION, SETMASK_BOTH,    item_mode_to_media_cb,   NULL,     0 },
-    { "Monitor Mode",   SETTING_ACTION, SETMASK_MEDIA,   item_mode_from_media_to_monitor_cb, NULL, 0 },
-    { "Deck Mode",      SETTING_ACTION, SETMASK_MEDIA,   item_mode_from_media_cb, NULL,     0 },
+    { "System",        SETTING_SUBMENU, SETMASK_ALL,  NULL, s_system_menu, 2 },
+#if ESDECK_ENABLE_BLE
+    { "Bluetooth",     SETTING_SUBMENU, SETMASK_ALL,  NULL, s_bluetooth_menu, 2 },
+#endif
+    { "Custom",        SETTING_SUBMENU, SETMASK_ALL,  NULL, s_custom_menu, 2 },
+    { "Mode",          SETTING_SUBMENU, SETMASK_ALL,  NULL, s_mode_menu, 6 },
+    { "Mini Keyboard", SETTING_ACTION,  SETMASK_DECK, item_keyboard_cb, NULL, 0 },
 };
 
 /* -----------------------------------------------------------------------
@@ -648,6 +681,17 @@ static void hid_conn_cb(bool connected)
     if (s_stack_depth >= 0 && s_menu_stack[s_stack_depth] == s_system_menu)
         render_current_level();
 }
+
+#if ESDECK_ENABLE_BLE
+/* Same idea as hid_conn_cb() above, for the Bluetooth detail page's
+ * Connection row. */
+static void ble_conn_cb(bool connected)
+{
+    (void)connected;
+    if (s_stack_depth >= 0 && s_menu_stack[s_stack_depth] == s_bluetooth_menu)
+        render_current_level();
+}
+#endif
 
 static void generic_item_cb(lv_event_t *e)
 {
@@ -736,7 +780,18 @@ static void render_current_level(void)
             bool connected = usb_hid_is_connected();
             lv_label_set_text_fmt(lbl, "HID Status: %s", connected ? "Connected" : "Disconnected");
             lv_obj_set_style_text_color(lbl, lv_color_hex(connected ? 0x33cc33 : 0xcc3333), 0);
-        } else {
+        }
+#if ESDECK_ENABLE_BLE
+        else if (node->children == s_bluetooth_menu) {
+            bool on = ble_manager_is_enabled();
+            lv_label_set_text_fmt(lbl, "Bluetooth: %s", on ? "On" : "Off");
+        } else if (node->action_cb == item_bt_conn_status_marker) {
+            bool connected = ble_manager_is_connected();
+            lv_label_set_text_fmt(lbl, "Connection: %s", connected ? "Connected" : "Not Connected");
+            lv_obj_set_style_text_color(lbl, lv_color_hex(connected ? 0x33cc33 : 0x888888), 0);
+        }
+#endif
+        else {
             lv_label_set_text(lbl, node->label);
         }
 
@@ -761,6 +816,12 @@ static void render_current_level(void)
             if (node->get_state_cb && node->get_state_cb())
                 lv_obj_add_state(sw, LV_STATE_CHECKED);
             lv_obj_add_event_cb(sw, toggle_switch_cb, LV_EVENT_VALUE_CHANGED, (void *)node);
+        } else if (node->type == SETTING_LABEL) {
+            /* Purely informational -- same CLICKABLE-clearing reasoning as
+             * the TOGGLE row above (lv_btn is clickable by default whether
+             * or not anything is wired to it), and no generic_item_cb/
+             * chevron since there's nowhere for this row to go. */
+            lv_obj_clear_flag(item, LV_OBJ_FLAG_CLICKABLE);
         } else {
             lv_obj_add_event_cb(item, generic_item_cb, LV_EVENT_CLICKED, (void *)node);
 
@@ -1129,6 +1190,9 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
      * s_system_menu[] / item_hid_status_cb) -- just register the redraw
      * hook here so that row's color/text stays live while visible. */
     usb_hid_set_conn_cb(hid_conn_cb);
+#if ESDECK_ENABLE_BLE
+    ble_manager_set_conn_cb(ble_conn_cb);
+#endif
 
     /* Scrollable item list -- grows to fill remaining page height */
     s_list = lv_obj_create(s_content);

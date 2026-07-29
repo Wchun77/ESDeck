@@ -34,6 +34,10 @@ static bool     s_enabled     = false;
 static uint8_t  s_own_addr_type;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 
+/* Settings' Bluetooth detail page's live Connection row -- see
+ * ble_manager_set_conn_cb()'s header comment. */
+static ble_manager_conn_cb_t s_conn_cb = NULL;
+
 static int gap_event_handler(struct ble_gap_event *event, void *arg);
 
 /* -----------------------------------------------------------------------
@@ -41,8 +45,19 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg);
  * (see usb_hid.c), now the real source. lv_async_call() is required: GAP
  * events fire from the NimBLE host task, not the LVGL task.
  * ----------------------------------------------------------------------- */
-static void toast_ble_connected_cb(void *arg)    { (void)arg; ui_toast_push("BLE Connected", 1, NULL, NULL); }
-static void toast_ble_disconnected_cb(void *arg) { (void)arg; ui_toast_push("BLE Disconnected", 1, NULL, NULL); }
+static void toast_ble_connected_cb(void *arg)
+{
+    (void)arg;
+    ui_toast_push("BLE Connected", 1, NULL, NULL);
+    if (s_conn_cb) s_conn_cb(true);
+}
+
+static void toast_ble_disconnected_cb(void *arg)
+{
+    (void)arg;
+    ui_toast_push("BLE Disconnected", 1, NULL, NULL);
+    if (s_conn_cb) s_conn_cb(false);
+}
 
 /* -----------------------------------------------------------------------
  * Advertising
@@ -1191,4 +1206,14 @@ void ble_manager_set_enabled(bool on)
 bool ble_manager_is_enabled(void)
 {
     return s_enabled;
+}
+
+bool ble_manager_is_connected(void)
+{
+    return s_conn_handle != BLE_HS_CONN_HANDLE_NONE;
+}
+
+void ble_manager_set_conn_cb(ble_manager_conn_cb_t cb)
+{
+    s_conn_cb = cb;
 }

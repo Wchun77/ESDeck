@@ -124,7 +124,7 @@ void ui_msc_show_confirm_dialog(void)
     lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title = lv_label_create(box);
-    lv_label_set_text(title, "Switch to MSC Mode");
+    lv_label_set_text(title, "Switch to Storage Mode");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xffffff), 0);
     lv_obj_set_pos(title, 0, 0);
