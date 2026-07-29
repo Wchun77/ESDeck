@@ -743,7 +743,13 @@ static void render_current_level(void)
         if (node->type == SETTING_TOGGLE) {
             /* Only the switch is the click target -- the row itself isn't
              * wired to generic_item_cb, so there's no double-toggle to
-             * reconcile between a row-tap and the switch's own tap. */
+             * reconcile between a row-tap and the switch's own tap.
+             * CLICKABLE still needs clearing explicitly though: lv_btn
+             * carries it by default regardless of whether anything is
+             * actually wired to it, so without this the row's PRESSED-state
+             * background (see the style set above) flashes on tap even
+             * though nothing happens -- looks clickable when it isn't. */
+            lv_obj_clear_flag(item, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_t *sw = lv_switch_create(item);
             lv_obj_align(sw, LV_ALIGN_RIGHT_MID, -8, 0);
             /* Plain add_state is safe here -- it used to visibly flash
