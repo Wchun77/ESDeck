@@ -5,12 +5,28 @@
 #include <stdio.h>
 
 #define TOAST_QUEUE_MAX   8
-#define TOAST_LABEL_LEN   32
+/* 32 was fine for our own short, fixed labels ("BLE Connected"); real ANCS
+ * title/message text needs real headroom -- 96 bytes covers a short CJK
+ * sentence (3 bytes/glyph in UTF-8) with room to spare. Actual display
+ * width is still capped by TOAST_W regardless -- this is the data-level
+ * cap (memory + never showing an unbounded string), separate from
+ * whatever long-mode/wrap behavior the label ends up needing once real
+ * message content is wired in. */
+#define TOAST_LABEL_LEN   96
 #define TOAST_KEY_LEN     32
 
-#define TOAST_W           360
-#define TOAST_H           64
-#define TOAST_Y_HIDDEN    (-TOAST_H)
+#define TOAST_W           440
+/* Height is dynamic now (see toast_refresh_label()) -- clamped between
+ * these two rather than fixed, so a short "BLE Connected" banner stays
+ * compact while a long ANCS message (app name + title + message, up to
+ * three wrapped lines or more) gets enough room to actually show instead
+ * of being clipped through the middle by a box too short for its own
+ * content. TOAST_Y_HIDDEN is pinned to -TOAST_MAX_H (not -TOAST_H, which
+ * no longer exists) so the off-screen parking position is always fully
+ * off-screen no matter which height is currently in use. */
+#define TOAST_H_MIN       64
+#define TOAST_MAX_H       240
+#define TOAST_Y_HIDDEN    (-TOAST_MAX_H)
 #define TOAST_Y_SHOWN     12
 
 #define TOAST_ANIM_MS     220
@@ -20,6 +36,7 @@ typedef struct {
     char label[TOAST_LABEL_LEN];
     char merge_key[TOAST_KEY_LEN];   /* empty string == never merges */
     int  count;
+    const lv_font_t *font;           /* NULL == default (montserrat_20) */
 } toast_entry_t;
 
 /* Overlay widgets -- created once in ui_toast_init(), reused for every
@@ -55,6 +72,48 @@ static void toast_set_y(void *obj, int32_t v)
 /* -----------------------------------------------------------------------
  * Label text
  * ----------------------------------------------------------------------- */
+
+/* Copy src into dst (dst_size bytes total, nul included), truncating at
+ * TOAST_LABEL_LEN if needed. snprintf("%s") alone would also stay in
+ * bounds, but it can slice a multi-byte UTF-8 sequence in half at the cut
+ * point -- fine for our own ASCII labels, not fine once real ANCS text
+ * (CJK, 3 bytes/glyph) flows through here, since a chopped sequence can
+ * render as a mangled/garbage glyph. This backs off to the nearest UTF-8
+ * character boundary instead, and appends "..." so a truncated string is
+ * visibly truncated rather than silently cut off. */
+static void toast_copy_truncated(char *dst, size_t dst_size, const char *src)
+{
+    if (dst_size == 0) return;
+
+    size_t src_len = strlen(src);
+    if (src_len < dst_size) {
+        memcpy(dst, src, src_len + 1);
+        return;
+    }
+
+    static const char ellipsis[] = "...";
+    size_t ellipsis_len = sizeof(ellipsis) - 1;
+
+    if (dst_size <= ellipsis_len + 1) {
+        /* Degenerate buffer, no room for the ellipsis -- hard truncate. */
+        size_t n = dst_size - 1;
+        memcpy(dst, src, n);
+        dst[n] = '\0';
+        return;
+    }
+
+    size_t max_copy = dst_size - 1 - ellipsis_len;
+    /* UTF-8 continuation bytes are 10xxxxxx -- back off until we land on
+     * a lead byte (or ASCII byte), never mid-sequence. */
+    while (max_copy > 0 && (src[max_copy] & 0xC0) == 0x80) {
+        max_copy--;
+    }
+
+    memcpy(dst, src, max_copy);
+    memcpy(dst + max_copy, ellipsis, ellipsis_len);
+    dst[max_copy + ellipsis_len] = '\0';
+}
+
 static void toast_refresh_label(void)
 {
     char buf[TOAST_LABEL_LEN + 16];
@@ -63,7 +122,23 @@ static void toast_refresh_label(void)
     } else {
         snprintf(buf, sizeof(buf), "%s", s_current.label);
     }
+    lv_obj_set_style_text_font(s_toast_lbl, s_current.font ? s_current.font : &lv_font_montserrat_20, 0);
     lv_label_set_text(s_toast_lbl, buf);
+
+    /* Resize the box to fit this content -- s_toast_lbl's own height
+     * already auto-fits its (possibly multi-line, wrapped) text since no
+     * explicit height was ever set on it, only width (which is what
+     * forces the wrap); lv_obj_update_layout() forces LVGL to actually
+     * recompute that before we read it back, since label text was just
+     * changed this same tick and layout recalculation is normally
+     * deferred. Clamped to TOAST_H_MIN..TOAST_MAX_H rather than growing
+     * unbounded -- see those macros' comment. */
+    lv_obj_update_layout(s_toast_lbl);
+    lv_coord_t content_h = lv_obj_get_height(s_toast_lbl);
+    lv_coord_t box_h = content_h + 24;   /* 12px worth of margin top and bottom around the (now vertically-centered) label */
+    if (box_h < TOAST_H_MIN) box_h = TOAST_H_MIN;
+    if (box_h > TOAST_MAX_H) box_h = TOAST_MAX_H;
+    lv_obj_set_height(s_toast, box_h);
 }
 
 /* -----------------------------------------------------------------------
@@ -143,7 +218,8 @@ static void toast_try_show_next(void)
     toast_start_slide_in();
 }
 
-void ui_toast_push(const char *label, int count, const char *merge_key)
+void ui_toast_push(const char *label, int count, const char *merge_key,
+                    const lv_font_t *font)
 {
     if (!s_toast) return;   /* ui_toast_init() not called yet */
     if (count < 1) count = 1;
@@ -152,8 +228,9 @@ void ui_toast_push(const char *label, int count, const char *merge_key)
 
     if (has_key) {
         if (s_showing && strcmp(s_current.merge_key, merge_key) == 0) {
-            snprintf(s_current.label, sizeof(s_current.label), "%s", label);
+            toast_copy_truncated(s_current.label, sizeof(s_current.label), label);
             s_current.count = count;
+            s_current.font  = font;
             toast_refresh_label();
             /* Restart the hold window so the update gets its own full
              * read-time instead of vanishing right after. */
@@ -169,8 +246,9 @@ void ui_toast_push(const char *label, int count, const char *merge_key)
         for (int i = 0; i < s_queue_count; i++) {
             int idx = (s_queue_head + i) % TOAST_QUEUE_MAX;
             if (strcmp(s_queue[idx].merge_key, merge_key) == 0) {
-                snprintf(s_queue[idx].label, sizeof(s_queue[idx].label), "%s", label);
+                toast_copy_truncated(s_queue[idx].label, sizeof(s_queue[idx].label), label);
                 s_queue[idx].count = count;
+                s_queue[idx].font  = font;
                 return;
             }
         }
@@ -179,9 +257,10 @@ void ui_toast_push(const char *label, int count, const char *merge_key)
     if (s_queue_count >= TOAST_QUEUE_MAX) return;   /* drop -- queue full */
 
     int idx = (s_queue_head + s_queue_count) % TOAST_QUEUE_MAX;
-    snprintf(s_queue[idx].label, sizeof(s_queue[idx].label), "%s", label);
+    toast_copy_truncated(s_queue[idx].label, sizeof(s_queue[idx].label), label);
     snprintf(s_queue[idx].merge_key, sizeof(s_queue[idx].merge_key), "%s", has_key ? merge_key : "");
     s_queue[idx].count = count;
+    s_queue[idx].font  = font;
     s_queue_count++;
 
     toast_try_show_next();
@@ -213,8 +292,15 @@ void ui_toast_init(void)
     lv_obj_t *scr = lv_scr_act();
 
     s_toast = lv_obj_create(scr);
-    lv_obj_set_size(s_toast, TOAST_W, TOAST_H);
+    lv_obj_set_size(s_toast, TOAST_W, TOAST_H_MIN);   /* height grows per-push, see toast_refresh_label() */
     lv_obj_set_pos(s_toast, (SCREEN_W - TOAST_W) / 2, TOAST_Y_HIDDEN);
+    /* Zeroed explicitly -- lv_obj_create() picks up whatever padding the
+     * active theme defaults to for a plain container, which is otherwise
+     * an unknown extra inset stacking on top of the label's own (16, 0)
+     * alignment offset below. With this at 0, that offset is the only
+     * spacing in play, so the box's actual size/position math (here and
+     * in toast_refresh_label()) means what it says. */
+    lv_obj_set_style_pad_all(s_toast, 0, 0);
     lv_obj_set_style_bg_color(s_toast, lv_color_hex(0x1e1e1e), 0);
     lv_obj_set_style_bg_opa(s_toast, LV_OPA_90, 0);
     lv_obj_set_style_border_color(s_toast, lv_color_hex(0x444444), 0);
@@ -228,7 +314,29 @@ void ui_toast_init(void)
     s_toast_lbl = lv_label_create(s_toast);
     lv_obj_set_style_text_color(s_toast_lbl, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_text_font(s_toast_lbl, &lv_font_montserrat_20, 0);
-    lv_obj_center(s_toast_lbl);
+    /* Fixed width + wrap -- needed now that real (potentially multi-word,
+     * CJK) ANCS text flows through here instead of just our own short
+     * fixed ASCII labels. s_toast's height now tracks this label's
+     * wrapped content height (see toast_refresh_label()), clamped to
+     * TOAST_MAX_H -- only content that still doesn't fit even at that cap
+     * would get clipped, which shouldn't happen in practice given
+     * TOAST_LABEL_LEN's byte-level cap upstream. Left-aligned, anchored
+     * horizontally-left, vertically-centered rather than fully centered --
+     * multi-line centered text (an app name over a wrapped message) read
+     * as "broken/misaligned" rather than intentional; left alignment
+     * reads as a normal notification banner instead. LEFT_MID rather
+     * than TOP_LEFT specifically: box height is dynamic (see
+     * toast_refresh_label()) and only ever sized to content + a fixed
+     * margin, so vertical centering and top-anchoring end up looking
+     * almost identical for a long wrapped message (little slack either
+     * way) -- but for a short single-line message, which clamps to
+     * TOAST_H_MIN, TOP_LEFT left a visibly lopsided gap underneath the
+     * text with nothing above it, while LEFT_MID balances that gap
+     * evenly top and bottom instead. */
+    lv_obj_set_width(s_toast_lbl, TOAST_W - 32);
+    lv_label_set_long_mode(s_toast_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(s_toast_lbl, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_align(s_toast_lbl, LV_ALIGN_LEFT_MID, 16, 0);
 
     s_queue_head  = 0;
     s_queue_count = 0;

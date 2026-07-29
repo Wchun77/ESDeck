@@ -2,11 +2,14 @@
 #include "ui_deck.h"
 #include "ui_settings.h"
 #include "ui_toast.h"
+#include "ui_font_cjk.h"
 #include "sys_clock.h"
 #include "usb/usb_hid.h"
 #include "lvgl.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static lv_obj_t *s_sidebar       = NULL;
 static lv_obj_t *s_context_panel = NULL;
@@ -122,6 +125,35 @@ static void ui_build_static(void)
 }
 
 /* -----------------------------------------------------------------------
+ * CJK notification font preload -- warms ui_font_cjk_get()'s cache on a
+ * background task at boot, so the *first* real ANCS notification doesn't
+ * stall the LVGL task waiting on a synchronous font load inside
+ * ancs_toast_push_cb() (see ble_manager.c). ui_font_cjk_get() caches the
+ * loaded font after its first call (s_font/s_tried in ui_font_cjk.c), so
+ * every call after this one -- including the real one from
+ * ble_manager.c -- is effectively free.
+ *
+ * No stack-depth risk here (unlike the earlier FreeType attempt --
+ * lv_font_load() just parses LVGL's own pre-converted bitmap font
+ * format, no rasterization engine involved) -- but it IS slow: measured
+ * ~13s to load a ~5500-glyph common-Hanzi .bin from the SD card.
+ * lv_font_load() does two full passes over every glyph (metadata, then
+ * bitmap data), each doing an lv_fs_seek() + several small reads, and
+ * SD random-access seeks are the expensive part -- this is roughly
+ * linear in glyph count, not file size. Runs on its own task rather than
+ * inline in my_ui_init() purely so it doesn't block reaching the main
+ * screen for that same ~13s -- no LVGL tree access needed here at all
+ * (unlike the earlier version of this task, back when it also drew a
+ * visible on-screen test string -- removed now that real ANCS text
+ * exercises this same path end to end, see ble_manager.c). */
+static void cjk_font_preload_task(void *arg)
+{
+    (void)arg;
+    ui_font_cjk_get();
+    vTaskDelete(NULL);
+}
+
+/* -----------------------------------------------------------------------
  * Entry point
  * ----------------------------------------------------------------------- */
 void my_ui_init(void)
@@ -136,6 +168,16 @@ void my_ui_init(void)
 
     ui_build_static();
     ui_toast_init();
+
+    xTaskCreate(cjk_font_preload_task, "cjk_font_preload", 4096, NULL, 3, NULL);
+
+    /* Temporary checkpoint -- isolates ui_build_static()+ui_toast_init()'s
+     * own PSRAM cost from ui_deck_build()'s (logged separately below and
+     * in ui_deck.c), to track down where a reported PSRAM regression is
+     * actually coming from instead of guessing. Remove once that's
+     * settled. */
+    ESP_LOGI("UI", "before deck build - PSRAM free: %d B",
+             heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     deck_cfg_t *cfg = ui_deck_preload_take_cfg();
     ui_deck_build(s_sidebar, cfg);

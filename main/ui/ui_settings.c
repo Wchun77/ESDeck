@@ -11,6 +11,7 @@
 #include "usb/usb_hid.h"
 #include "ui_toast.h"
 #include "ui.h"
+#include "ble/ble_manager.h"
 #include "lvgl.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -51,6 +52,7 @@ typedef enum {
 typedef enum {
     SETTING_ACTION,
     SETTING_SUBMENU,
+    SETTING_TOGGLE,
 } setting_node_type_t;
 
 typedef struct setting_node_s {
@@ -60,6 +62,8 @@ typedef struct setting_node_s {
     lv_event_cb_t                 action_cb;   /* used when type == SETTING_ACTION */
     const struct setting_node_s  *children;    /* used when type == SETTING_SUBMENU */
     int                            child_count;
+    bool                        (*get_state_cb)(void);   /* used when type == SETTING_TOGGLE */
+    void                        (*set_state_cb)(bool on); /* used when type == SETTING_TOGGLE */
 } setting_node_t;
 
 #define SETTINGS_STACK_MAX 4
@@ -471,11 +475,11 @@ static void item_hid_status_cb(lv_event_t *e)
     if (usb_hid_is_connected()) {
         ESP_LOGI("SETTINGS", "HID Status: user forced disconnect");
         usb_hid_force_disconnect();
-        ui_toast_push("HID: Disconnected", 1, NULL);
+        ui_toast_push("HID: Disconnected", 1, NULL, NULL);
     } else {
         ESP_LOGI("SETTINGS", "HID Status: user forced connect");
         usb_hid_force_connect();
-        ui_toast_push("HID: Connecting...", 1, NULL);
+        ui_toast_push("HID: Connecting...", 1, NULL, NULL);
     }
 }
 
@@ -599,13 +603,26 @@ static void item_boot_anim_cb(lv_event_t *e)
  * ----------------------------------------------------------------------- */
 static const setting_node_t s_system_menu[] = {
     { "Select Config", SETTING_ACTION, SETMASK_ALL, item_config_cb, NULL, 0 },
+#if ESDECK_ENABLE_BLE
+    { "Bluetooth",      SETTING_TOGGLE, SETMASK_ALL, NULL,           NULL, 0, ble_manager_is_enabled, ble_manager_set_enabled },
+#endif
     { "MSC Mode",       SETTING_ACTION, SETMASK_ALL,  item_msc_cb,    NULL, 0 },
     { "HID Status",     SETTING_ACTION, SETMASK_ALL,  item_hid_status_cb, NULL, 0 },
     { "Info",            SETTING_ACTION, SETMASK_ALL,  item_info_cb,  NULL, 0 },
 };
 
+/* s_root_menu's "System" row below hardcodes s_system_menu's child count
+ * instead of computing it (matches this file's existing pattern -- see
+ * the other SETTING_SUBMENU rows) -- has to move with the ESDECK_ENABLE_BLE
+ * toggle above since removing the Bluetooth row changes the count. */
+#if ESDECK_ENABLE_BLE
+#define ESDECK_SYSTEM_MENU_COUNT  5
+#else
+#define ESDECK_SYSTEM_MENU_COUNT  4
+#endif
+
 static const setting_node_t s_root_menu[] = {
-    { "System",          SETTING_SUBMENU, SETMASK_ALL,    NULL,              s_system_menu,  4 },
+    { "System",          SETTING_SUBMENU, SETMASK_ALL,    NULL,              s_system_menu,  ESDECK_SYSTEM_MENU_COUNT },
     { "Boot Animation", SETTING_ACTION, SETMASK_ALL,     item_boot_anim_cb, NULL,           0 },
     { "Keyboard Mode", SETTING_ACTION, SETMASK_DECK,    item_keyboard_cb,  NULL,           0 },
     { "Monitor Mode",  SETTING_ACTION, SETMASK_DECK,    item_mode_cb,      NULL,           0 },
@@ -646,6 +663,17 @@ static void generic_item_cb(lv_event_t *e)
     } else {
         if (node->action_cb) node->action_cb(e);
     }
+}
+
+/* SETTING_TOGGLE rows -- only the lv_switch itself is the click target
+ * (see render_current_level()), so there's no row-tap/switch-tap
+ * double-toggle to reconcile. */
+static void toggle_switch_cb(lv_event_t *e)
+{
+    const setting_node_t *node = (const setting_node_t *)lv_event_get_user_data(e);
+    lv_obj_t *sw = lv_event_get_target(e);
+    bool on = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (node->set_state_cb) node->set_state_cb(on);
 }
 
 /* Close Settings entirely and resume whatever mode is active -- the
@@ -699,7 +727,6 @@ static void render_current_level(void)
         lv_obj_set_style_outline_width(item, 0, 0);
         lv_obj_set_style_radius(item, 6, 0);
         lv_obj_clear_flag(item, LV_OBJ_FLAG_PRESS_LOCK);
-        lv_obj_add_event_cb(item, generic_item_cb, LV_EVENT_CLICKED, (void *)node);
 
         lv_obj_t *lbl = lv_label_create(item);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
@@ -713,11 +740,30 @@ static void render_current_level(void)
             lv_label_set_text(lbl, node->label);
         }
 
-        if (node->type == SETTING_SUBMENU) {
-            lv_obj_t *chevron = lv_label_create(item);
-            lv_label_set_text(chevron, LV_SYMBOL_RIGHT);
-            lv_obj_set_style_text_color(chevron, lv_color_hex(0x888888), 0);
-            lv_obj_align(chevron, LV_ALIGN_RIGHT_MID, -12, 0);
+        if (node->type == SETTING_TOGGLE) {
+            /* Only the switch is the click target -- the row itself isn't
+             * wired to generic_item_cb, so there's no double-toggle to
+             * reconcile between a row-tap and the switch's own tap. */
+            lv_obj_t *sw = lv_switch_create(item);
+            lv_obj_align(sw, LV_ALIGN_RIGHT_MID, -8, 0);
+            /* Plain add_state is safe here -- it used to visibly flash
+             * off->on for a frame on reopen (LVGL drawing the fresh
+             * switch's default state before this applies), fixed at the
+             * theme level via CONFIG_LV_THEME_DEFAULT_TRANSITION_TIME=0
+             * in sdkconfig rather than worked around per-widget here.
+             * See https://github.com/lvgl/lvgl/issues/3157. */
+            if (node->get_state_cb && node->get_state_cb())
+                lv_obj_add_state(sw, LV_STATE_CHECKED);
+            lv_obj_add_event_cb(sw, toggle_switch_cb, LV_EVENT_VALUE_CHANGED, (void *)node);
+        } else {
+            lv_obj_add_event_cb(item, generic_item_cb, LV_EVENT_CLICKED, (void *)node);
+
+            if (node->type == SETTING_SUBMENU) {
+                lv_obj_t *chevron = lv_label_create(item);
+                lv_label_set_text(chevron, LV_SYMBOL_RIGHT);
+                lv_obj_set_style_text_color(chevron, lv_color_hex(0x888888), 0);
+                lv_obj_align(chevron, LV_ALIGN_RIGHT_MID, -12, 0);
+            }
         }
     }
 
