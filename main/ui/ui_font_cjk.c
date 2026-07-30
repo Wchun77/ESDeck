@@ -9,9 +9,8 @@ static const char *TAG = "FONT_CJK";
 /* Fixed filename for this first pass -- a Settings font picker (scan
  * SD_PATH_ASSETS_FONTS_BIN_NOTIFY, let the user choose, remember it in
  * NVS) is a later step, same shape as ui_settings.c's Boot Animation
- * picker. For now, drop a pre-converted common-Hanzi .bin font (see
- * doc/ESDeck_Monitor_字體轉換指南.md) on the SD card with exactly this
- * name to test.
+ * picker. For now, drop a pre-converted common-Hanzi .bin font on the SD
+ * card with exactly this name to test.
  *
  * "S:" prefix is LVGL's registered file-driver letter for the SD card
  * (see lvgl_port.c) -- required by lv_font_load()/lv_font_free(), same

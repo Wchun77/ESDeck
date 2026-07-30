@@ -65,8 +65,7 @@
  * assets/fonts/bin/<feature>/, same idea as assets/boot/<name>/.
  *   bin/clock/  -- Monitor clock digits (oxanium_*.bin)
  *   bin/notify/ -- BLE/ANCS notification text: a curated common-Hanzi
- *                  subset only (not the full CJK range) -- see
- *                  doc/ESDeck_Monitor_字體轉換指南.md for how to build one. */
+ *                  subset only (not the full CJK range). */
 #define SD_DIR_ASSETS_FONTS            "assets/fonts"
 #define SD_DIR_ASSETS_FONTS_BIN_CLOCK  SD_DIR_ASSETS_FONTS "/bin/clock"
 #define SD_DIR_ASSETS_FONTS_BIN_NOTIFY SD_DIR_ASSETS_FONTS "/bin/notify"

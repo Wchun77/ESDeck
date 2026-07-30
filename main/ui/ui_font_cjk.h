@@ -7,8 +7,7 @@
  * own font loader).
  *
  * Lazily loads a curated common-Hanzi .bin font (converted ahead of time
- * via lv_font_conv --format bin -- see
- * doc/ESDeck_Monitor_字體轉換指南.md) from SD_PATH_ASSETS_FONTS_BIN_NOTIFY
+ * via lv_font_conv --format bin) from SD_PATH_ASSETS_FONTS_BIN_NOTIFY
  * on first call, then reuses the same lv_font_t* afterward.
  *
  * Deliberately NOT FreeType/TTF: an earlier version of this file
