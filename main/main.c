@@ -8,6 +8,7 @@
 #include "ble/ble_manager.h"
 #include "boot_anim.h"
 #include "nvs_manager/nvs_manager.h"
+#include "dump_manager/dump_manager.h"
 #include "sys_log.h"
 #include "app_config.h"
 #include "freertos/FreeRTOS.h"
@@ -17,8 +18,14 @@
 
 void app_main(void)
 {
-    /* First thing, before anything else has a chance to log -- so the
-     * ring buffer already holds the full boot log by the time the
+    /* Very first thing, before anything else exists that could arm an
+     * interrupt (LVGL's 2ms tick esp_timer, LCD/touch drivers, etc.) --
+     * esp_core_dump_image_check() was observed to crash when called later,
+     * after waveshare_esp32_s3_rgb_lcd_init(). See dump_manager.h. */
+    dump_manager_check();
+
+    /* First thing that logs, before anything else has a chance to log --
+     * so the ring buffer already holds the full boot log by the time the
      * on-device log viewer (see ui_log_view.c) is ever opened. */
     sys_log_init();
 
@@ -32,6 +39,11 @@ void app_main(void)
 
     nvs_manager_init();
     fs_sd_init();
+
+    /* Second half of the dump_manager_check() call above -- copies the
+     * flash coredump (if any) to the SD card now that it's mounted. No-op
+     * on a normal boot. See dump_manager.h. */
+    dump_manager_export();
 
     ui_deck_preload_start();   /* load config, kick off background preload task */
 

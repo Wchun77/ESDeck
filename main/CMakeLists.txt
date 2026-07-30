@@ -9,6 +9,7 @@ file(GLOB_RECURSE fs_manager    "fs_manager/*.c")
 file(GLOB_RECURSE anim_srcs     "anim/*.c")
 file(GLOB_RECURSE nvs_manager   "nvs_manager/*.c")
 file(GLOB_RECURSE ota_manager   "ota_manager/*.c")
+file(GLOB_RECURSE dump_manager  "dump_manager/*.c")
 
 # ============================================================
 #   Component sources
@@ -28,6 +29,7 @@ set(COMPONENT_SRCS
     ${anim_srcs}
     ${nvs_manager}
     ${ota_manager}
+    ${dump_manager}
 )
 
 # ============================================================
@@ -43,6 +45,7 @@ set(COMPONENT_ADD_INCLUDEDIRS
     "anim"
     "nvs_manager"
     "ota_manager"
+    "dump_manager"
 )
 
 # ============================================================
@@ -66,6 +69,7 @@ idf_component_register(
         nvs_flash
         app_update
         bt
+        espcoredump
 )
 
 idf_component_get_property(lvgl_lib lvgl__lvgl COMPONENT_LIB)

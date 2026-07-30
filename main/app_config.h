@@ -37,6 +37,14 @@
 #define SD_DIR_ASSETS_BOOT      "assets/boot"
 #define SD_DIR_ASSETS_SIDE_ICON "assets/side_icons"
 #define SD_DIR_UPDATE           "update"
+/* Leading dot -- Unix-convention "hidden" (ls -a, most file managers on
+ * macOS/Linux won't show it by default). Not a real hide on Windows:
+ * FatFs's ff.h is linked into this build without chmod/attribute support
+ * (no FF_USE_CHMOD Kconfig knob is exposed for this IDF version -- see
+ * dump_manager.c), so there's no way to also set the FAT hidden-attribute
+ * bit from the device side. Windows Explorer will still list this folder
+ * normally. */
+#define SD_DIR_DUMP             ".dump"
 
 /* assets/fonts/bin/ holds pre-rasterized fonts (converted ahead of time via
  * lv_font_conv --format bin, loaded on-device with lv_font_load()) -- this
@@ -72,6 +80,7 @@
 #define SD_PATH_ASSETS_BOOT     SD_MOUNT_POINT "/" SD_DIR_ASSETS_BOOT
 #define SD_PATH_ASSETS_SIDE_ICON SD_MOUNT_POINT "/" SD_DIR_ASSETS_SIDE_ICON
 #define SD_PATH_UPDATE          SD_MOUNT_POINT "/" SD_DIR_UPDATE
+#define SD_PATH_DUMP            SD_MOUNT_POINT "/" SD_DIR_DUMP
 
 #define SD_PATH_ASSETS_FONTS_BIN_CLOCK  SD_MOUNT_POINT "/" SD_DIR_ASSETS_FONTS_BIN_CLOCK
 #define SD_PATH_ASSETS_FONTS_BIN_NOTIFY SD_MOUNT_POINT "/" SD_DIR_ASSETS_FONTS_BIN_NOTIFY
