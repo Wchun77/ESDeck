@@ -206,7 +206,7 @@ static void back_to_deck_task(void *arg)
 
 void ui_settings_monitor_reload(void)
 {
-    /* Same reasoning as item_mode_cb(): rebuilding pages (here, Monitor's
+    /* Same reasoning as switch_to_mode(): rebuilding pages (here, Monitor's
      * sidebar) unconditionally re-highlights its own page 0, so leave
      * Settings first or the gear stays selected alongside it. */
     ui_settings_deselect();
@@ -233,7 +233,7 @@ void ui_settings_media_reload(void)
  * Item callbacks
  *
  * None of these hide the Settings page anymore -- they only open a popup
- * dialog on top of it (or, for item_mode_cb, actually leave the page).
+ * dialog on top of it (or, for switch_to_mode(), actually leave the page).
  * When a dialog is dismissed, the still-selected/highlighted Settings
  * page underneath is exactly as the user left it.
  * ----------------------------------------------------------------------- */
@@ -266,95 +266,77 @@ static void item_keyboard_cb(lv_event_t *e)
     ui_keyboard_show();
 }
 
-static void item_mode_cb(lv_event_t *e)
+/* -----------------------------------------------------------------------
+ * Mode switching -- one function, any mode to any mode.
+ *
+ * Replaces the old per-pair callbacks (item_mode_cb /
+ * item_mode_to_media_cb / item_mode_from_media_cb /
+ * item_mode_from_media_to_monitor_cb, see git history) that accreted when
+ * Media was bolted onto an originally Deck<->Monitor-only design. Teardown
+ * only depends on the mode being left; setup only depends on the mode
+ * being entered -- so N modes need N teardowns + N setups, not N*N
+ * transition callbacks.
+ *
+ * The old Monitor -> Deck path had an extra show-screen-then-lv_refr_now
+ * step BEFORE ui_monitor_exit(), with a comment about LVGL rendering a
+ * frame against a freed background buffer. That hazard lived inside
+ * ui_monitor_exit() itself and has since been fixed there (it deletes
+ * every LVGL object before ui_img_pool_free() -- see its own comments), so
+ * exit-before-show is safe now; ui_settings_monitor_reload() has always
+ * called ui_monitor_exit() first the same way. The lv_refr_now() after
+ * ui_show_switching_screen() is kept (for every transition, not just
+ * Deck's) so the switching screen is on-glass before any heavy setup work
+ * starts, rather than a UAF guard.
+ * ----------------------------------------------------------------------- */
+static void switch_to_mode(ui_mode_t target)
 {
-    /* This one really does leave the Settings page (mode switch replaces
-     * the whole page set), unlike the other items above. */
+    if (target == s_mode) return;
+
+    /* This really does leave the Settings page (mode switch replaces the
+     * whole page set), unlike the dialog-opening items above. */
     ui_settings_deselect();
 
-    if (s_mode == UI_MODE_DECK) {
-        /* Deck -> Monitor */
-        ui_deck_destroy();
-        s_mode = UI_MODE_MONITOR;
-        ui_show_switching_screen("Entering Monitor Mode...");
-        xTaskCreate(enter_monitor_task, "enter_mon", 4096, NULL, 3, NULL);
-    } else {
-        /* Monitor -> Deck
-         * Show the switching screen FIRST so LVGL renders a clean frame
-         * before ui_monitor_exit() frees the background image buffer.
-         * Without this, the last Monitor frame may render with a freed buffer. */
-        s_mode = UI_MODE_DECK;
+    /* Teardown -- depends only on the mode being left. */
+    switch (s_mode) {
+    case UI_MODE_DECK:    ui_deck_destroy(); break;
+    case UI_MODE_MONITOR: ui_monitor_exit(); break;
+    case UI_MODE_MEDIA:   ui_media_exit();   break;
+    }
 
-        bool cfg_ok = ui_deck_config_load(&s_back_cfg);
-        if (!cfg_ok || s_back_cfg.page_count == 0) {
+    s_mode = target;
+
+    /* Setup -- depends only on the mode being entered. */
+    switch (target) {
+    case UI_MODE_DECK:
+        if (!ui_deck_config_load(&s_back_cfg) || s_back_cfg.page_count == 0) {
             s_back_cfg.page_count = 1;
             s_back_cfg.pages      = calloc(1, sizeof(page_cfg_t));
             snprintf(s_back_cfg.pages[0].name, UI_DECK_CONFIG_NAME_LEN, "Main");
             s_back_cfg.pages[0].button_count = 0;
             s_back_cfg.pages[0].buttons      = NULL;
         }
-
         ui_show_switching_screen("Entering Deck Mode...");
-        lv_refr_now(NULL);   /* flush switching screen before freeing monitor buffers */
-        ui_monitor_exit();
+        lv_refr_now(NULL);
         xTaskCreate(back_to_deck_task, "back_deck", 8192, NULL, 3, NULL);
+        break;
+
+    case UI_MODE_MONITOR:
+        ui_show_switching_screen("Entering Monitor Mode...");
+        lv_refr_now(NULL);
+        xTaskCreate(enter_monitor_task, "enter_mon", 4096, NULL, 3, NULL);
+        break;
+
+    case UI_MODE_MEDIA:
+        ui_show_switching_screen("Entering Media Mode...");
+        lv_refr_now(NULL);
+        xTaskCreate(enter_media_task, "enter_media", 4096, NULL, 3, NULL);
+        break;
     }
 }
 
-/* -----------------------------------------------------------------------
- * Media mode transitions -- UI PROTOTYPE ONLY (see ui_media.h).
- *
- * Uses the same show-switching-screen + xTaskCreate pattern as
- * item_mode_cb() above (see enter_media_task()) so entering Media already
- * has room for background image / icon loading once that's real, instead
- * of needing this rewired later.
- * ----------------------------------------------------------------------- */
-static void item_mode_to_media_cb(lv_event_t *e)
-{
-    ui_settings_deselect();
-
-    if (s_mode == UI_MODE_DECK)
-        ui_deck_destroy();
-    else if (s_mode == UI_MODE_MONITOR)
-        ui_monitor_exit();
-
-    s_mode = UI_MODE_MEDIA;
-    ui_show_switching_screen("Entering Media Mode...");
-    xTaskCreate(enter_media_task, "enter_media", 4096, NULL, 3, NULL);
-}
-
-static void item_mode_from_media_cb(lv_event_t *e)
-{
-    ui_settings_deselect();
-    ui_media_exit();
-    s_mode = UI_MODE_DECK;
-
-    bool cfg_ok = ui_deck_config_load(&s_back_cfg);
-    if (!cfg_ok || s_back_cfg.page_count == 0) {
-        s_back_cfg.page_count = 1;
-        s_back_cfg.pages      = calloc(1, sizeof(page_cfg_t));
-        snprintf(s_back_cfg.pages[0].name, UI_DECK_CONFIG_NAME_LEN, "Main");
-        s_back_cfg.pages[0].button_count = 0;
-        s_back_cfg.pages[0].buttons      = NULL;
-    }
-
-    ui_show_switching_screen("Entering Deck Mode...");
-    lv_refr_now(NULL);
-    xTaskCreate(back_to_deck_task, "back_deck", 8192, NULL, 3, NULL);
-}
-
-/* Media -> Monitor. Was left out originally (only Deck was wired as the
- * one way back out of Media, to keep the first pass small) -- added now
- * that it's clearly wanted. Reuses enter_monitor_task(), same as the
- * existing Deck -> Monitor path. */
-static void item_mode_from_media_to_monitor_cb(lv_event_t *e)
-{
-    ui_settings_deselect();
-    ui_media_exit();
-    s_mode = UI_MODE_MONITOR;
-    ui_show_switching_screen("Entering Monitor Mode...");
-    xTaskCreate(enter_monitor_task, "enter_mon", 4096, NULL, 3, NULL);
-}
+static void item_mode_to_deck_cb(lv_event_t *e)    { (void)e; switch_to_mode(UI_MODE_DECK); }
+static void item_mode_to_monitor_cb(lv_event_t *e) { (void)e; switch_to_mode(UI_MODE_MONITOR); }
+static void item_mode_to_media_cb(lv_event_t *e)   { (void)e; switch_to_mode(UI_MODE_MEDIA); }
 
 static void info_dismiss_cb(lv_event_t *e)
 {
@@ -638,21 +620,15 @@ static const setting_node_t s_bluetooth_menu[] = {
 };
 #endif
 
-/* Storage Mode first, then whichever of Deck/Monitor/Media apply to the
- * current mode, always in Deck/Monitor/Media order -- since at most one
- * "switch to Deck" row, one "switch to Monitor" row, and one "switch to
- * Media" row is ever visible at once (mode_mask hides "switch to the mode
- * you're already in"), listing the mode-specific variants together in this
- * order keeps that relative order no matter which mode is current. See
- * s_root_menu's old layout (git history) for the pre-reorg flat version of
- * this same set of rows. */
+/* Storage Mode first, then one row per target mode in fixed
+ * Deck/Monitor/Media order -- switch_to_mode() handles any source mode,
+ * so each destination needs exactly one row; mode_mask only hides
+ * "switch to the mode you're already in". */
 static const setting_node_t s_mode_menu[] = {
-    { "Storage Mode", SETTING_ACTION, SETMASK_ALL,     item_msc_cb,                         NULL, 0 },
-    { "Deck Mode",    SETTING_ACTION, SETMASK_MONITOR, item_mode_cb,                        NULL, 0 },
-    { "Deck Mode",    SETTING_ACTION, SETMASK_MEDIA,   item_mode_from_media_cb,             NULL, 0 },
-    { "Monitor Mode", SETTING_ACTION, SETMASK_DECK,    item_mode_cb,                        NULL, 0 },
-    { "Monitor Mode", SETTING_ACTION, SETMASK_MEDIA,   item_mode_from_media_to_monitor_cb,  NULL, 0 },
-    { "Media Mode",   SETTING_ACTION, SETMASK_BOTH,    item_mode_to_media_cb,               NULL, 0 },
+    { "Storage Mode", SETTING_ACTION, SETMASK_ALL,                       item_msc_cb,             NULL, 0 },
+    { "Deck Mode",    SETTING_ACTION, SETMASK_MONITOR | SETMASK_MEDIA,   item_mode_to_deck_cb,    NULL, 0 },
+    { "Monitor Mode", SETTING_ACTION, SETMASK_DECK | SETMASK_MEDIA,      item_mode_to_monitor_cb, NULL, 0 },
+    { "Media Mode",   SETTING_ACTION, SETMASK_BOTH,                      item_mode_to_media_cb,   NULL, 0 },
 };
 
 static const setting_node_t s_root_menu[] = {
@@ -661,7 +637,7 @@ static const setting_node_t s_root_menu[] = {
     { "Bluetooth",     SETTING_SUBMENU, SETMASK_ALL,  NULL, s_bluetooth_menu, 2 },
 #endif
     { "Custom",        SETTING_SUBMENU, SETMASK_ALL,  NULL, s_custom_menu, 2 },
-    { "Mode",          SETTING_SUBMENU, SETMASK_ALL,  NULL, s_mode_menu, 6 },
+    { "Mode",          SETTING_SUBMENU, SETMASK_ALL,  NULL, s_mode_menu, 4 },
     { "Mini Keyboard", SETTING_ACTION,  SETMASK_DECK, item_keyboard_cb, NULL, 0 },
 };
 
