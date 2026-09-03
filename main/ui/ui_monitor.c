@@ -94,6 +94,11 @@ static void ui_monitor_on_hid_data(uint8_t cpu_usage, uint8_t cpu_temp,
                                    uint8_t ssd_life);
 static void monitor_lazy_bg_set(int page_idx);
 
+/* Opens the per-metric history chart popup for the tapped cell -- see the
+ * mon_hist_* section below (defined near monitor_timer_cb, which is what
+ * feeds it). */
+static void cell_click_cb(lv_event_t *e);
+
 /* -----------------------------------------------------------------------
  * Sidebar page switching
  * ----------------------------------------------------------------------- */
@@ -464,12 +469,20 @@ static void build_data_page(lv_obj_t *parent, int page_idx)
 
         int col = j % 2;
         int row = j / 2;
-        make_cell(parent, col, row, s_cell_meta[id].label,
+        lv_obj_t *cell = make_cell(parent, col, row, s_cell_meta[id].label,
                   &s_cell_lbl[page_idx][j],
                   &s_cell_bar[page_idx][j],
                   s_cell_meta[id].bar_max);
 
         /* bar range is already set via make_cell's bar_max param */
+
+        /* Tap any cell -- bar or not -- to see its recorded history.
+         * lv_obj_create() objects aren't clickable by default (unlike
+         * lv_btn_create(), see ui_settings.c's toggle-row bug), so this
+         * needs to be added explicitly. */
+        lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(cell, cell_click_cb, LV_EVENT_CLICKED,
+                            (void *)(uintptr_t)id);
     }
 }
 
@@ -526,6 +539,285 @@ static void update_data_pages(void)
 }
 
 /* -----------------------------------------------------------------------
+ * Per-metric history -- tap any cell (bar or not) to see a chart of its
+ * last MON_HIST_CAPACITY samples (5 min @ 1 sample/sec, matching
+ * monitor_timer_cb's rate). Session-scoped only: reset on every
+ * ui_monitor_enter(), never persisted -- plain SRAM, no NVS/SD involved.
+ *
+ * One fixed-size ring buffer per metric, 1 byte/sample, completely
+ * decoupled from the popup's lv_chart widget -- recording keeps running
+ * whether or not the chart is currently open, while the chart object
+ * itself only exists for as long as the popup is on screen. FIFO: once
+ * full, each new sample overwrites the oldest.
+ *
+ * All of this only ever runs from monitor_timer_cb() on the LVGL task
+ * (fed from s_data, itself already copied off the TinyUSB-task queue by
+ * the time this runs) -- never touched from ui_monitor_on_hid_data()
+ * directly, since that runs on the TinyUSB task and this code calls
+ * lv_chart_* functions when a popup is open.
+ * ----------------------------------------------------------------------- */
+#define MON_HIST_CAPACITY  300   /* 5 min @ 1 Hz -- was 10 min/600, halved to
+                                  * ease internal DRAM pressure (~4.5KB back
+                                  * across 13 metrics); the extra 5 min of
+                                  * window wasn't showing anything useful
+                                  * anyway. */
+
+static uint8_t  s_hist_buf[MON_CELL_COUNT][MON_HIST_CAPACITY];
+static uint16_t s_hist_head[MON_CELL_COUNT];   /* next write index (circular) */
+static uint16_t s_hist_count[MON_CELL_COUNT];  /* valid samples, saturates at capacity */
+static uint8_t  s_hist_max[MON_CELL_COUNT];    /* max over the currently valid window */
+
+/* Scratch buffer for chronological readout -- module-static rather than a
+ * local array so it doesn't sit on whatever task's stack calls into this
+ * (see dump_manager.c's comment on the same lesson: this exact class of
+ * "big local buffer, small task stack" bug already bit this project once). */
+static uint8_t s_hist_scratch[MON_HIST_CAPACITY];
+
+/* Popup state -- NULL/MON_CELL_NONE when no chart is open. */
+static lv_obj_t          *s_hist_dim      = NULL;
+static lv_obj_t          *s_hist_chart    = NULL;
+static lv_chart_series_t *s_hist_series   = NULL;
+static lv_obj_t          *s_hist_peak_lbl = NULL;
+static mon_cell_id_t      s_hist_open_id  = MON_CELL_NONE;
+
+/* Called once from ui_monitor_enter() -- "every time you enter Monitor,
+ * history starts over" per design discussion. */
+static void mon_hist_reset(void)
+{
+    memset(s_hist_head,  0, sizeof(s_hist_head));
+    memset(s_hist_count, 0, sizeof(s_hist_count));
+    memset(s_hist_max,   0, sizeof(s_hist_max));
+    /* s_hist_buf contents don't need clearing -- count[] gates how much of
+     * it is ever read. */
+}
+
+/* Copies the valid window for one metric into s_hist_scratch in
+ * chronological order (oldest first) -- s_hist_count[id] bytes are valid
+ * on return. */
+static void mon_hist_copy_chrono(mon_cell_id_t id)
+{
+    uint16_t n = s_hist_count[id];
+    if (n < MON_HIST_CAPACITY) {
+        /* Hasn't wrapped yet -- already in order starting at index 0. */
+        memcpy(s_hist_scratch, s_hist_buf[id], n);
+    } else {
+        /* Full -- oldest sample sits at head (next slot to be overwritten),
+         * the rest wraps around from there. */
+        uint16_t start = s_hist_head[id];
+        memcpy(s_hist_scratch, &s_hist_buf[id][start], MON_HIST_CAPACITY - start);
+        memcpy(s_hist_scratch + (MON_HIST_CAPACITY - start), s_hist_buf[id], start);
+    }
+}
+
+/* Re-populates the currently-open chart from scratch (whole window, not
+ * just the newest point) -- simplest way to stay correct whether the
+ * window is still growing (session < 5 min old) or already steady-state
+ * FIFO, without juggling two different LVGL chart update paths. Trivial
+ * cost at this scale (<=MON_HIST_CAPACITY points, once/sec, only while a
+ * popup happens to be open). No-op if no chart is open. */
+static void refresh_open_chart(mon_cell_id_t id)
+{
+    if (s_hist_open_id != id || !s_hist_chart || !s_hist_series) return;
+
+    uint16_t n = s_hist_count[id];
+    mon_hist_copy_chrono(id);
+
+    lv_chart_set_point_count(s_hist_chart, n > 0 ? n : 1);
+    for (uint16_t i = 0; i < n; i++) {
+        lv_chart_set_value_by_id(s_hist_chart, s_hist_series, i, s_hist_scratch[i]);
+    }
+
+    uint8_t max = s_hist_max[id];
+    const cell_meta_t *m = &s_cell_meta[id];
+
+    /* Metrics that already have a bar (CPU/RAM/GPU usage, temps, VRAM,
+     * Disk, GPU Power%, SSD Life) have a meaningful fixed ceiling -- the
+     * same one the bar widget itself uses. Reusing it for the chart's Y
+     * axis keeps the two visually consistent, and avoids the chart
+     * rescaling to fill the height whenever the metric has just been
+     * sitting low, which would make ordinary idle fluctuation look
+     * artificially dramatic. Metrics without a bar (CPU Freq, Net Up/
+     * Down, CPU Power) have no natural ceiling, so those stay dynamic --
+     * scaled to the highest value actually seen in the current window. */
+    uint8_t range_max = (m->bar_max > 0) ? (uint8_t)m->bar_max : (max > 0 ? max : 1);
+    lv_chart_set_range(s_hist_chart, LV_CHART_AXIS_PRIMARY_Y, 0, range_max);
+    lv_chart_refresh(s_hist_chart);
+
+    if (s_hist_peak_lbl) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "Peak: %u%s", max, m->unit);
+        lv_label_set_text(s_hist_peak_lbl, buf);
+    }
+}
+
+/* Records one sample for one metric -- called once per metric per
+ * received tick from monitor_timer_cb(), regardless of which page/cell is
+ * currently visible on screen. */
+static void mon_hist_append(mon_cell_id_t id, uint8_t v)
+{
+    uint16_t head = s_hist_head[id];
+    s_hist_buf[id][head] = v;
+    s_hist_head[id] = (uint16_t)((head + 1) % MON_HIST_CAPACITY);
+    if (s_hist_count[id] < MON_HIST_CAPACITY) s_hist_count[id]++;
+
+    /* Full rescan for the window max -- buffer is tiny (MON_HIST_CAPACITY
+     * bytes) and this runs once/sec, so this is cheap, and it's simpler and more
+     * correct than trying to maintain a running max incrementally (which
+     * would need extra bookkeeping for when the max-holding sample ages
+     * out of the FIFO window). */
+    uint8_t max = 0;
+    uint16_t n = s_hist_count[id];
+    for (uint16_t i = 0; i < n; i++) {
+        if (s_hist_buf[id][i] > max) max = s_hist_buf[id][i];
+    }
+    s_hist_max[id] = max;
+
+    refresh_open_chart(id);
+}
+
+/* Closes the history popup if one is open -- also called defensively from
+ * ui_monitor_exit() in case a mode switch somehow lands while it's open
+ * (shouldn't normally be reachable: the popup's own full-screen dim
+ * overlay sits above the context panel and swallows taps, but this is
+ * cheap insurance against a control path this file doesn't know about). */
+static void close_history_chart(void)
+{
+    if (s_hist_dim) {
+        lv_obj_del(s_hist_dim);
+        s_hist_dim = NULL;
+    }
+    s_hist_chart    = NULL;
+    s_hist_series   = NULL;
+    s_hist_peak_lbl = NULL;
+    s_hist_open_id  = MON_CELL_NONE;
+}
+
+static void hist_dismiss_cb(lv_event_t *e)
+{
+    (void)e;
+    close_history_chart();
+}
+
+/* Must match the major_cnt passed to lv_chart_set_axis_tick() for the
+ * X axis below -- hist_chart_draw_cb() needs to know it too (see comment
+ * there for why) and there's no public getter for it on an existing
+ * chart, so this is the one shared source of truth for both call sites. */
+#define MON_HIST_X_MAJOR_CNT  5
+
+/* X-axis tick labels -- LVGL's default would print the raw point index,
+ * which is what this was first written to assume dsc->value was. That's
+ * wrong: for a LINE-type chart (ours), lv_chart.c's draw_x_ticks() sets
+ * `tick_value = i / minor_cnt`, i.e. dsc->value is just the major tick's
+ * ordinal (0..MON_HIST_X_MAJOR_CNT-1, left to right) -- it is NOT a point
+ * index, and is NOT related to point_count at all. (The point-index
+ * mapping only happens for LV_CHART_TYPE_SCATTER.) Treating it as a point
+ * index near the end of a several-hundred-point buffer was the bug behind
+ * "all 5 labels show the same minute, and they all flip together" -- every
+ * ordinal 0..4 landed within a few seconds of point_count-1, which all
+ * round down to the same "/60" minute value.
+ *
+ * Fixed here by mapping the ordinal back onto the real point range
+ * ourselves before doing the "how long ago" math. */
+static void hist_chart_draw_cb(lv_event_t *e)
+{
+    lv_obj_t *chart = lv_event_get_target(e);
+    lv_obj_draw_part_dsc_t *dsc = lv_event_get_draw_part_dsc(e);
+    if (!lv_obj_draw_part_check_type(dsc, &lv_chart_class, LV_CHART_DRAW_PART_TICK_LABEL)) return;
+    if (dsc->id != LV_CHART_AXIS_PRIMARY_X || !dsc->text) return;
+
+    int32_t point_cnt = (int32_t)lv_chart_get_point_count(chart);
+    int32_t idx = point_cnt > 1
+                  ? (point_cnt - 1) * dsc->value / (MON_HIST_X_MAJOR_CNT - 1)
+                  : 0;
+    int32_t seconds_ago = point_cnt - 1 - idx;
+
+    if (seconds_ago <= 0) {
+        lv_snprintf(dsc->text, dsc->text_length, "now");
+    } else {
+        lv_snprintf(dsc->text, dsc->text_length, "-%dm", (int)(seconds_ago / 60));
+    }
+}
+
+/* Tap handler wired onto every data-page cell in build_data_page(). Opens
+ * a Select-Config-sized (80% x 80% screen) popup -- see ui_config_dialog.c
+ * -- with an lv_chart (gridlines + Y value ticks + X "time ago" ticks, per
+ * design discussion) plotting this metric's current history window. */
+static void cell_click_cb(lv_event_t *e)
+{
+    mon_cell_id_t id = (mon_cell_id_t)(uintptr_t)lv_event_get_user_data(e);
+    if (id <= MON_CELL_NONE || id >= MON_CELL_COUNT) return;
+
+    close_history_chart();   /* in case one was somehow already open */
+
+    const cell_meta_t *m = &s_cell_meta[id];
+    lv_obj_t *scr = lv_scr_act();
+
+    s_hist_dim = lv_obj_create(scr);
+    lv_obj_set_size(s_hist_dim, SCREEN_W, SCREEN_H);
+    lv_obj_set_pos(s_hist_dim, 0, 0);
+    lv_obj_set_style_bg_color(s_hist_dim, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_hist_dim, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(s_hist_dim, 0, 0);
+    lv_obj_set_style_radius(s_hist_dim, 0, 0);
+    lv_obj_clear_flag(s_hist_dim, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_hist_dim, hist_dismiss_cb, LV_EVENT_CLICKED, NULL);
+
+    int dlg_w = (SCREEN_W * 80) / 100;
+    int dlg_h = (SCREEN_H * 80) / 100;
+
+    lv_obj_t *box = lv_obj_create(s_hist_dim);
+    lv_obj_set_size(box, dlg_w, dlg_h);
+    lv_obj_center(box);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x1e1e1e), 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x444444), 0);
+    lv_obj_set_style_border_width(box, 1, 0);
+    lv_obj_set_style_radius(box, 12, 0);
+    lv_obj_set_style_pad_all(box, 20, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text(title, m->label);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    s_hist_peak_lbl = lv_label_create(box);
+    lv_obj_set_style_text_color(s_hist_peak_lbl, lv_color_hex(0xaaaaaa), 0);
+    lv_obj_set_style_text_font(s_hist_peak_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_align(s_hist_peak_lbl, LV_ALIGN_TOP_RIGHT, 0, 0);
+
+    /* Explicit pos/size (not align) -- axis ticks draw labels outside the
+     * chart's own rectangle (its "extended draw size"), so it needs real
+     * margin on the left (Y value labels) and bottom (X time labels), on
+     * top of the box's own pad_all(20) and the title/peak row above it. */
+    lv_obj_t *chart = lv_chart_create(box);
+    lv_obj_set_pos(chart, 46, 40);
+    lv_obj_set_size(chart, dlg_w - 96, dlg_h - 110);
+    lv_chart_set_type(chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_div_line_count(chart, 4, 4);   /* light grid, aligned to the ticks below */
+    lv_obj_set_style_line_color(chart, lv_color_hex(0x333333), LV_PART_MAIN);
+    lv_obj_set_style_size(chart, 0, LV_PART_INDICATOR);   /* line only, no point dots */
+    lv_obj_set_style_bg_opa(chart, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(chart, 0, 0);
+
+    /* Y: value ticks (LVGL's default numeric label is already meaningful
+     * here -- these are raw %, W, C, GHz etc, no custom formatting
+     * needed). X: "time ago" ticks via hist_chart_draw_cb() above. */
+    lv_chart_set_axis_tick(chart, LV_CHART_AXIS_PRIMARY_Y, 6, 3, 5, 2, true, 40);
+    lv_chart_set_axis_tick(chart, LV_CHART_AXIS_PRIMARY_X, 6, 3, MON_HIST_X_MAJOR_CNT, 2, true, 20);
+    lv_obj_add_event_cb(chart, hist_chart_draw_cb, LV_EVENT_DRAW_PART_BEGIN, NULL);
+
+    lv_chart_series_t *ser = lv_chart_add_series(chart, lv_color_hex(0x00aaff),
+                                                  LV_CHART_AXIS_PRIMARY_Y);
+
+    s_hist_chart   = chart;
+    s_hist_series  = ser;
+    s_hist_open_id = id;
+
+    refresh_open_chart(id);   /* initial populate + range + peak label */
+}
+
+/* -----------------------------------------------------------------------
  * Master 1-second timer — runs on LVGL task, safe to touch widgets.
  * The clock itself ticks independently in sys_clock.c (survives mode
  * switches); this timer just repaints from it each second while the
@@ -543,6 +835,22 @@ static void monitor_timer_cb(lv_timer_t *t)
         s_data          = data_d;
         s_data_received = true;
         s_data_timeout  = 0;
+
+        /* History recording -- one sample per metric per received tick,
+         * regardless of which page/cell is currently visible. Values are
+         * clamped to a byte, same range the wire protocol already uses
+         * for everything except cpu_freq (sent as GHz*10 raw, decoded to
+         * a float GHz here) -- that one loses sub-GHz resolution in the
+         * recorded history, an accepted trade-off for keeping this at a
+         * flat 1 byte/sample instead of hooking the raw pre-decode bytes
+         * (which arrive on the TinyUSB task -- see mon_hist_append()'s own
+         * comment on why this must stay LVGL-task-only). */
+        for (int id = MON_CELL_CPU_USAGE; id < MON_CELL_COUNT; id++) {
+            float v = cell_value((mon_cell_id_t)id);
+            if (v < 0)   v = 0;
+            if (v > 255) v = 255;
+            mon_hist_append((mon_cell_id_t)id, (uint8_t)v);
+        }
     } else if (s_data_received) {
         s_data_timeout++;
         if (s_data_timeout >= 3) {
@@ -564,6 +872,9 @@ void ui_monitor_enter(lv_obj_t *sidebar)
      * No time queue here anymore -- sys_clock.c's is registered once at
      * boot and keeps running regardless of mode. */
     s_data_queue = xQueueCreate(1, sizeof(monitor_data_t));
+
+    /* Fresh history every time Monitor is entered -- see mon_hist_reset(). */
+    mon_hist_reset();
 
     lv_obj_t *scr = lv_scr_act();
 
@@ -708,6 +1019,10 @@ void ui_monitor_enter(lv_obj_t *sidebar)
 
 void ui_monitor_exit(void)
 {
+    /* Defensive -- see close_history_chart()'s comment on why this
+     * shouldn't normally be reachable with a popup still open. */
+    close_history_chart();
+
     /* Notify PC to stop sending data and unregister callback first.
      * Time callback stays registered -- it's global, not Monitor's. */
     usb_hid_monitor_unsubscribe();
