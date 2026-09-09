@@ -117,7 +117,7 @@
  * bigger change in main/CMakeLists.txt.
  * -------------------------------------------------------------------------- */
 
-#define ESDECK_ENABLE_BLE  1
+#define ESDECK_ENABLE_BLE  0
 
 /* --------------------------------------------------------------------------
  * Boot-time log toggles

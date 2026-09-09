@@ -3,6 +3,7 @@
 #include "ui_settings.h"
 #include "ui_toast.h"
 #include "ui_font_cjk.h"
+#include "app_config.h"
 #include "sys_clock.h"
 #include "usb/usb_hid.h"
 #include "lvgl.h"
@@ -146,12 +147,14 @@ static void ui_build_static(void)
  * (unlike the earlier version of this task, back when it also drew a
  * visible on-screen test string -- removed now that real ANCS text
  * exercises this same path end to end, see ble_manager.c). */
+#if ESDECK_ENABLE_BLE
 static void cjk_font_preload_task(void *arg)
 {
     (void)arg;
     ui_font_cjk_get();
     vTaskDelete(NULL);
 }
+#endif
 
 /* -----------------------------------------------------------------------
  * Entry point
@@ -169,7 +172,13 @@ void my_ui_init(void)
     ui_build_static();
     ui_toast_init();
 
+    /* CJK font is only ever consumed by ble_manager.c's ANCS toast path --
+     * skip the ~13s SD load and the permanent font-bitmap footprint
+     * entirely when BLE is compiled out, instead of loading a font
+     * nothing will ever call ui_font_cjk_try_get() to use. */
+#if ESDECK_ENABLE_BLE
     xTaskCreate(cjk_font_preload_task, "cjk_font_preload", 4096, NULL, 3, NULL);
+#endif
 
     /* Temporary checkpoint -- isolates ui_build_static()+ui_toast_init()'s
      * own PSRAM cost from ui_deck_build()'s (logged separately below and
