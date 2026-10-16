@@ -39,7 +39,7 @@ bool fs_sd_init(void)
 {
     if (s_mounted) return true;
 
-    ESP_LOGI(TAG, "Probing SD card (SDMMC 4-bit) -> \"%s\"", FS_SD_MOUNT_POINT);
+    ESP_LOGI(TAG, "Probing SD card (SDMMC 1-bit) -> \"%s\"", FS_SD_MOUNT_POINT);
 
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     host.max_freq_khz = SDMMC_FREQ_DEFAULT;
