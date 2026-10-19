@@ -539,6 +539,7 @@ static void toast_hid_disconnected_cb(void *arg)
 static void usb_hid_event_cb(tinyusb_event_t *event, void *arg)
 {
     (void)arg;
+    if (!s_active) return;
     /* Called from the TinyUSB task, not the LVGL task -- hop over via
      * lv_async_call() same as every other cross-task UI call in this
      * codebase (see ui_settings.c's enter_monitor_task pattern). */

@@ -221,7 +221,8 @@ static void toast_try_show_next(void)
 void ui_toast_push(const char *label, int count, const char *merge_key,
                     const lv_font_t *font)
 {
-    if (!s_toast) return;   /* ui_toast_init() not called yet */
+    if (!s_toast || !s_toast_lbl ||
+        !lv_obj_is_valid(s_toast) || !lv_obj_is_valid(s_toast_lbl)) return;
     if (count < 1) count = 1;
 
     bool has_key = (merge_key && merge_key[0] != '\0');
@@ -297,7 +298,7 @@ static void toast_click_cb(lv_event_t *e)
  * ----------------------------------------------------------------------- */
 void ui_toast_init(void)
 {
-    lv_obj_t *scr = lv_scr_act();
+    lv_obj_t *scr = lv_layer_top();
 
     s_toast = lv_obj_create(scr);
     lv_obj_set_size(s_toast, TOAST_W, TOAST_H_MIN);   /* height grows per-push, see toast_refresh_label() */
