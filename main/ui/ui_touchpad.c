@@ -421,11 +421,33 @@ static void build_sidebar(lv_obj_t *sidebar)
     lv_obj_clear_flag(kb_btn, LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_add_event_cb(kb_btn, kb_btn_cb, LV_EVENT_CLICKED, NULL);
 
-    /* Reserved: s_cfg.keyboard_icon (image) replaces this glyph later. */
-    lv_obj_t *kb_lbl = lv_label_create(kb_btn);
-    lv_label_set_text(kb_lbl, LV_SYMBOL_KEYBOARD);
-    lv_obj_set_style_text_font(kb_lbl, &lv_font_montserrat_24, 0);
-    lv_obj_center(kb_lbl);
+    /* keyboard_icon from config, same handling as the gear's side_icon
+     * (ui_settings_apply_appearance()): image if the file exists, else
+     * the keyboard glyph. */
+    bool has_icon = false;
+    if (s_cfg.keyboard_icon[0]) {
+        char icon_path[sizeof("S:") + sizeof(SD_PATH_ASSETS_SIDE_ICON) + 1 + UI_SETTINGS_SIDE_ICON_LEN];
+        snprintf(icon_path, sizeof(icon_path), "S:%s/%s", SD_PATH_ASSETS_SIDE_ICON, s_cfg.keyboard_icon);
+
+        FILE *f = fopen(icon_path + 2, "r");   /* skip the "S:" LVGL drive letter */
+        if (f) {
+            fclose(f);
+            lv_obj_t *img = lv_img_create(kb_btn);
+            lv_img_set_src(img, icon_path);
+            lv_obj_center(img);
+            lv_obj_set_style_clip_corner(kb_btn, true, 0);
+            has_icon = true;
+        } else {
+            ESP_LOGW(TAG, "keyboard_icon set but not found: %s (falling back to glyph)", icon_path);
+        }
+    }
+
+    if (!has_icon) {
+        lv_obj_t *kb_lbl = lv_label_create(kb_btn);
+        lv_label_set_text(kb_lbl, LV_SYMBOL_KEYBOARD);
+        lv_obj_set_style_text_font(kb_lbl, &lv_font_montserrat_24, 0);
+        lv_obj_center(kb_lbl);
+    }
 
     /* Wheel strip */
     s_wheel = make_plain_obj(sidebar);

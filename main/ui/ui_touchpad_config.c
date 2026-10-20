@@ -78,6 +78,7 @@ bool ui_touchpad_config_load(ui_touchpad_config_t *cfg)
     }
 
     str_field(root, "bg_image", cfg->bg_image, sizeof(cfg->bg_image));
+    str_field(root, "keyboard_icon", cfg->keyboard_icon, sizeof(cfg->keyboard_icon));
 
     cJSON *settings_obj = cJSON_GetObjectItem(root, "settings");
     if (cJSON_IsObject(settings_obj)) {
@@ -86,8 +87,8 @@ bool ui_touchpad_config_load(ui_touchpad_config_t *cfg)
     }
 
     cJSON_Delete(root);
-    ESP_LOGI(TAG, "loaded: %s bg_image=\"%s\" settings.bg_image=\"%s\" settings.side_icon=\"%s\"",
-             path, cfg->bg_image, cfg->settings.bg_image, cfg->settings.side_icon);
+    ESP_LOGI(TAG, "loaded: %s bg_image=\"%s\" keyboard_icon=\"%s\" settings.bg_image=\"%s\" settings.side_icon=\"%s\"",
+             path, cfg->bg_image, cfg->keyboard_icon, cfg->settings.bg_image, cfg->settings.side_icon);
     return true;
 }
 

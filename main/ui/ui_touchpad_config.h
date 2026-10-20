@@ -8,16 +8,19 @@
  *
  *   {
  *       "bg_image": "desk.jpg",
+ *       "keyboard_icon": "kb.png",
  *       "settings": {
  *           "bg_image": "panel_bg.jpg",
  *           "side_icon": "mouse.png"
  *       }
  *   }
  *
- * All fields optional. The sidebar keyboard button icon is fixed
- * (LV_SYMBOL_KEYBOARD) for now -- not part of the schema yet. */
+ * All fields optional. keyboard_icon is the sidebar keyboard button's
+ * image (under assets/side_icons, same as any side_icon); empty or
+ * missing file = LV_SYMBOL_KEYBOARD glyph. */
 typedef struct {
     char bg_image[CFG_BG_LEN];         /* content bg, under SD_PATH_ASSETS_BG; empty = flat color */
+    char keyboard_icon[UI_SETTINGS_SIDE_ICON_LEN]; /* under SD_PATH_ASSETS_SIDE_ICON; empty = glyph */
     ui_settings_appearance_t settings; /* Settings overlay's own bg_image + side_icon */
 } ui_touchpad_config_t;
 
