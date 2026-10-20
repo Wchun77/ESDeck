@@ -2,7 +2,6 @@
 #include "ui_msc.h"
 #include "ui_config_dialog.h"
 #include "ui_monitor_config.h"
-#include "ui_keyboard.h"
 #include "ui_monitor.h"
 #include "ui_deck.h"
 #include "ui_media.h"
@@ -291,11 +290,6 @@ static void item_config_cb(lv_event_t *e)
         ui_touchpad_config_dialog_show();
     else
         ui_config_dialog_show();
-}
-
-static void item_keyboard_cb(lv_event_t *e)
-{
-    ui_keyboard_show();
 }
 
 /* -----------------------------------------------------------------------
@@ -679,7 +673,6 @@ static const setting_node_t s_root_menu[] = {
 #endif
     { "Custom",        SETTING_SUBMENU, SETMASK_ALL,  NULL, s_custom_menu, 2 },
     { "Mode",          SETTING_SUBMENU, SETMASK_ALL,  NULL, s_mode_menu, 5 },
-    { "Mini Keyboard", SETTING_ACTION,  SETMASK_DECK, item_keyboard_cb, NULL, 0 },
 };
 
 /* -----------------------------------------------------------------------
