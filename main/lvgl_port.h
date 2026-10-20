@@ -158,6 +158,11 @@ bool lvgl_port_notify_rgb_vsync(void);
 
 TaskHandle_t lvgl_port_get_task_handle(void);
 
+/* Fingers on the panel at the last touch read (0, 1 or 2). LVGL only
+ * tracks the first finger; this exposes whether a second one is down.
+ * Call from the LVGL task. */
+uint8_t lvgl_port_touch_points(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -3,6 +3,7 @@
 #include "ui_settings.h"
 #include "ui_keyboard.h"
 #include "usb/usb_hid.h"
+#include "lvgl_port.h"       /* lvgl_port_touch_points() */
 #include "app_config.h"     /* SD_PATH_ASSETS_BG, CFG_NVS_* */
 #include "nvs_manager/nvs_manager.h"
 #include "lvgl.h"
@@ -55,6 +56,8 @@ static const char *TAG = "TOUCHPAD";
 #define TP_TAP_MAX_MS       200   /* press->release shorter than this ... */
 #define TP_TAP_MAX_TRAVEL   10    /* ... and moved less than this (px) = tap */
 #define TP_DOUBLE_TAP_MS    250   /* window after a tap for tap-and-drag / double tap */
+#define TP_TWO_TAP_MAX_MS   250   /* two-finger tap (right click): shorter than this ... */
+#define TP_TWO_TAP_MAX_TRAVEL 15  /* ... and scrolled less than this (px) */
 #define WHEEL_NOTCH_PX      24    /* grip line spacing (visual only) */
 #define WHEEL_NATURAL       1     /* 1: finger down = scroll up (phone-style) */
 /* Smooth scrolling: raw finger pixels go to the PC (ESDeckPC scales them
@@ -122,6 +125,13 @@ static bool     s_tap_pending    = false;  /* a tap is waiting out the double-ta
 static uint32_t s_tap_tick       = 0;
 static bool     s_second_touch   = false;  /* current touch started inside that window */
 static bool     s_dragging       = false;
+
+/* Two-finger state for the current touch:
+ *   two finger move = scroll (same smooth wheel + inertia as the strip)
+ *   two finger tap  = right click */
+static bool     s_pad_two        = false;
+static bool     s_pad_two_frozen = false;  /* a finger lifted mid-gesture: ignore the rest */
+static uint32_t s_pad_two_travel = 0;
 
 /* Mouse button state from the L/R buttons */
 static bool     s_left_held      = false;
@@ -194,6 +204,13 @@ static void click_left(void)
     usb_hid_tp_buttons(m & (uint8_t)~HID_TP_BTN_LEFT);
 }
 
+static void click_right(void)
+{
+    uint8_t m = current_mask();
+    usb_hid_tp_buttons(m | HID_TP_BTN_RIGHT);
+    usb_hid_tp_buttons(m & (uint8_t)~HID_TP_BTN_RIGHT);
+}
+
 /* 10 ms: release a pending tap once its double-tap window has passed,
  * then send whatever is staged. */
 /* Finger pixels -> wheel (+ = scroll up, Windows sign). */
@@ -216,6 +233,46 @@ static void wheel_coast_step(void)
         s_wheel_coast     = 0;
         s_wheel_coast_rem = 0;
     }
+}
+
+/* Shared smooth-scroll tracking -- used by the sidebar wheel strip and by
+ * two-finger scrolling on the pad. begin on touch down, track per move,
+ * end on release (starts inertia coasting after a flick). */
+static void scroll_begin(void)
+{
+    s_wheel_coast     = 0;   /* new touch stops any coasting */
+    s_wheel_coast_rem = 0;
+    s_wheel_vel       = 0;
+    s_wheel_last_tick = lv_tick_get();
+}
+
+static void scroll_track(int dy)
+{
+    if (dy == 0) return;
+    send_wheel_px(dy);
+
+    /* Speed estimate for the flick, normalised to px per 10 ms so it
+     * doesn't depend on the actual touch read interval. */
+    uint32_t dt = lv_tick_elaps(s_wheel_last_tick);
+    if (dt == 0) dt = 1;
+    float inst = (float)dy * 10.0f / (float)dt;
+    s_wheel_vel = s_wheel_vel * 0.5f + inst * 0.5f;
+    s_wheel_last_tick = lv_tick_get();
+}
+
+static void scroll_end(bool allow_flick)
+{
+#if WHEEL_INERTIA
+    if (allow_flick &&
+        lv_tick_elaps(s_wheel_last_tick) < WHEEL_FLICK_IDLE_MS &&
+        (s_wheel_vel > WHEEL_FLICK_MIN || s_wheel_vel < -WHEEL_FLICK_MIN)) {
+        s_wheel_coast     = s_wheel_vel;
+        s_wheel_coast_rem = 0;
+    }
+#else
+    (void)allow_flick;
+#endif
+    s_wheel_vel = 0;
 }
 
 static void flush_timer_cb(lv_timer_t *t)
@@ -277,6 +334,9 @@ static void pad_cb(lv_event_t *e)
     if (code == LV_EVENT_PRESSED) {
         s_pad_press_tick = lv_tick_get();
         s_pad_travel     = 0;
+        s_pad_two        = false;
+        s_pad_two_frozen = false;
+        s_pad_two_travel = 0;
 
         /* Touch landed inside the double-tap window: hold the pending tap
          * back until we know whether this is a drag or a second tap. */
@@ -290,8 +350,39 @@ static void pad_cb(lv_event_t *e)
         lv_indev_t *indev = lv_indev_get_act();
         if (!indev) return;
 
+        uint8_t pts = lvgl_port_touch_points();
+
+        /* Second finger down -> two-finger scroll for the rest of this
+         * touch. Not while dragging (left button held). */
+        if (!s_pad_two && pts >= 2 && !s_dragging) {
+            s_pad_two = true;
+            if (s_second_touch) {
+                /* A tap was being held back for tap-and-drag -- it was a
+                 * real click after all. */
+                click_left();
+                s_second_touch = false;
+            }
+            scroll_begin();
+            ESP_LOGI(TAG, "two-finger scroll");
+        }
+
         lv_point_t v;
         lv_indev_get_vect(indev, &v);
+
+        if (s_pad_two) {
+            if (s_pad_two_frozen) return;
+            if (pts < 2) {
+                /* One finger lifted. LVGL's point 0 may now jump to the
+                 * other finger, so stop here; a fast lift still flicks. */
+                s_pad_two_frozen = true;
+                scroll_end(true);
+                return;
+            }
+            scroll_track(v.y);
+            s_pad_two_travel += (uint32_t)(abs(v.x) + abs(v.y));
+            return;
+        }
+
         if (v.x == 0 && v.y == 0) return;
 
         usb_hid_tp_move(v.x, v.y);
@@ -308,6 +399,20 @@ static void pad_cb(lv_event_t *e)
         if (s_dot) lv_obj_add_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
 
         uint32_t held  = lv_tick_elaps(s_pad_press_tick);
+
+        if (s_pad_two) {
+            if (!s_pad_two_frozen) scroll_end(code == LV_EVENT_RELEASED);
+            /* Quick two-finger tap with (almost) no scrolling = right click. */
+            if (code == LV_EVENT_RELEASED &&
+                held < TP_TWO_TAP_MAX_MS && s_pad_two_travel < TP_TWO_TAP_MAX_TRAVEL) {
+                click_right();
+                ESP_LOGI(TAG, "two-finger tap -> right click");
+            }
+            s_pad_two      = false;
+            s_second_touch = false;
+            return;
+        }
+
         bool     is_tap = (code == LV_EVENT_RELEASED) &&
                           held < TP_TAP_MAX_MS && s_pad_travel < TP_TAP_MAX_TRAVEL;
 
@@ -338,10 +443,7 @@ static void wheel_cb(lv_event_t *e)
 
     if (code == LV_EVENT_PRESSED) {
         leave_settings();
-        s_wheel_coast     = 0;   /* touching the wheel stops any coasting */
-        s_wheel_coast_rem = 0;
-        s_wheel_vel       = 0;
-        s_wheel_last_tick = lv_tick_get();
+        scroll_begin();
         lv_obj_set_style_bg_color(s_wheel, lv_color_hex(COL_BTN), 0);
     }
     else if (code == LV_EVENT_PRESSING) {
@@ -360,27 +462,11 @@ static void wheel_cb(lv_event_t *e)
         lv_obj_set_y(s_wheel_grip, s_wheel_offset - WHEEL_NOTCH_PX);
 #endif
 
-        send_wheel_px(v.y);
-
-        /* Speed estimate for the flick, normalised to px per 10 ms so it
-         * doesn't depend on the actual touch read interval. */
-        uint32_t dt = lv_tick_elaps(s_wheel_last_tick);
-        if (dt == 0) dt = 1;
-        float inst = (float)v.y * 10.0f / (float)dt;
-        s_wheel_vel = s_wheel_vel * 0.5f + inst * 0.5f;
-        s_wheel_last_tick = lv_tick_get();
+        scroll_track(v.y);
     }
     else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
         lv_obj_set_style_bg_color(s_wheel, lv_color_hex(COL_SURFACE), 0);
-#if WHEEL_INERTIA
-        if (code == LV_EVENT_RELEASED &&
-            lv_tick_elaps(s_wheel_last_tick) < WHEEL_FLICK_IDLE_MS &&
-            (s_wheel_vel > WHEEL_FLICK_MIN || s_wheel_vel < -WHEEL_FLICK_MIN)) {
-            s_wheel_coast     = s_wheel_vel;
-            s_wheel_coast_rem = 0;
-        }
-#endif
-        s_wheel_vel = 0;
+        scroll_end(code == LV_EVENT_RELEASED);
     }
 }
 
