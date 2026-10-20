@@ -627,9 +627,13 @@ static void item_boot_anim_cb(lv_event_t *e)
  * elsewhere, add an optional label_fn to setting_node_t instead of
  * growing this pattern.
  * ----------------------------------------------------------------------- */
+/* Touchpad-only rows live in Custom too; mode_mask hides them elsewhere,
+ * so Custom's child_count below counts every row, shown or not. */
 static const setting_node_t s_custom_menu[] = {
     { "Select Config",  SETTING_ACTION, SETMASK_ALL, item_config_cb,    NULL, 0 },
     { "Boot Animation", SETTING_ACTION, SETMASK_ALL, item_boot_anim_cb, NULL, 0 },
+    { "Hide Labels",    SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
+      ui_touchpad_get_hide_labels, ui_touchpad_set_hide_labels },
 };
 
 static const setting_node_t s_system_menu[] = {
@@ -671,7 +675,7 @@ static const setting_node_t s_root_menu[] = {
 #if ESDECK_ENABLE_BLE
     { "Bluetooth",     SETTING_SUBMENU, SETMASK_ALL,  NULL, s_bluetooth_menu, 2 },
 #endif
-    { "Custom",        SETTING_SUBMENU, SETMASK_ALL,  NULL, s_custom_menu, 2 },
+    { "Custom",        SETTING_SUBMENU, SETMASK_ALL,  NULL, s_custom_menu, 3 },
     { "Mode",          SETTING_SUBMENU, SETMASK_ALL,  NULL, s_mode_menu, 5 },
 };
 

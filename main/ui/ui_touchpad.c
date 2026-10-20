@@ -3,7 +3,8 @@
 #include "ui_settings.h"
 #include "ui_keyboard.h"
 #include "usb/usb_hid.h"
-#include "app_config.h"     /* SD_PATH_ASSETS_BG */
+#include "app_config.h"     /* SD_PATH_ASSETS_BG, CFG_NVS_* */
+#include "nvs_manager/nvs_manager.h"
 #include "lvgl.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -92,6 +93,13 @@ static lv_img_dsc_t s_bg_dsc;
 static uint8_t  *s_bg_data    = NULL;       /* PSRAM pixels behind s_bg_dsc, owned here */
 static lv_obj_t *s_btn_left   = NULL;
 static lv_obj_t *s_btn_right  = NULL;
+static lv_obj_t *s_lbl_left   = NULL;       /* text labels, hidden by the "Hide Labels" toggle */
+static lv_obj_t *s_lbl_right  = NULL;
+static lv_obj_t *s_lbl_hint   = NULL;
+
+static bool s_hide_labels        = false;
+static bool s_hide_labels_loaded = false;   /* NVS read once, then cached */
+static void apply_hide_labels(void);
 static lv_obj_t *s_pad        = NULL;
 static lv_obj_t *s_dot        = NULL;       /* finger position indicator */
 
@@ -603,6 +611,8 @@ static void build_page(lv_obj_t *scr)
 
     s_btn_left  = build_mouse_btn(TP_MARGIN,                     "Left",  "L");
     s_btn_right = build_mouse_btn(TP_MARGIN * 2 + TP_BTN_W,      "Right", "R");
+    s_lbl_left  = lv_obj_get_child(s_btn_left, 0);
+    s_lbl_right = lv_obj_get_child(s_btn_right, 0);
     if (has_bg) {
         lv_obj_set_style_bg_opa(s_btn_left,  OPA_BTN_ON_BG, 0);
         lv_obj_set_style_bg_opa(s_btn_right, OPA_BTN_ON_BG, 0);
@@ -621,6 +631,7 @@ static void build_page(lv_obj_t *scr)
     if (has_bg) lv_obj_set_style_bg_opa(s_pad, OPA_SURFACE_ON_BG, 0);
 
     lv_obj_t *hint = lv_label_create(s_pad);
+    s_lbl_hint = hint;
     lv_label_set_text(hint, "Touchpad");
     lv_obj_set_style_text_color(hint, lv_color_hex(has_bg ? 0x777777 : COL_HINT), 0);
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_20, 0);
@@ -650,6 +661,8 @@ void ui_touchpad_enter(lv_obj_t *sidebar)
 
     build_sidebar(sidebar);
     build_page(lv_scr_act());
+    ui_touchpad_get_hide_labels();   /* load from NVS on first enter */
+    apply_hide_labels();
 
     s_wheel_offset    = 0;
     s_wheel_vel       = 0;
@@ -698,6 +711,7 @@ void ui_touchpad_exit(void)
         s_page = NULL;
     }
     s_bg_img = s_bg_mask = s_btn_left = s_btn_right = s_pad = s_dot = NULL;
+    s_lbl_left = s_lbl_right = s_lbl_hint = NULL;
 
     if (s_bg_data) {
         heap_caps_free(s_bg_data);
@@ -716,6 +730,39 @@ void ui_touchpad_exit(void)
     s_wheel_grip = NULL;
 
     ESP_LOGI(TAG, "exited touchpad mode");
+}
+
+/* -----------------------------------------------------------------------
+ * Hide Labels toggle
+ * ----------------------------------------------------------------------- */
+static void apply_hide_labels(void)
+{
+    lv_obj_t *lbls[] = { s_lbl_left, s_lbl_right, s_lbl_hint };
+    for (size_t i = 0; i < sizeof(lbls) / sizeof(lbls[0]); i++) {
+        if (!lbls[i]) continue;
+        if (s_hide_labels) lv_obj_add_flag(lbls[i], LV_OBJ_FLAG_HIDDEN);
+        else               lv_obj_clear_flag(lbls[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+bool ui_touchpad_get_hide_labels(void)
+{
+    if (!s_hide_labels_loaded) {
+        char v[4] = "";
+        s_hide_labels = nvs_manager_get_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_TPAD_HIDE_LBL,
+                                            v, sizeof(v)) && v[0] == '1';
+        s_hide_labels_loaded = true;
+    }
+    return s_hide_labels;
+}
+
+void ui_touchpad_set_hide_labels(bool hide)
+{
+    s_hide_labels        = hide;
+    s_hide_labels_loaded = true;
+    if (!nvs_manager_set_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_TPAD_HIDE_LBL, hide ? "1" : "0"))
+        ESP_LOGW(TAG, "failed to save hide-labels to NVS");
+    apply_hide_labels();
 }
 
 void ui_touchpad_deselect_current(void)

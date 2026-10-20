@@ -36,3 +36,9 @@ void ui_touchpad_exit(void);
  * same contract as ui_media_deselect_current()/reselect_current(). */
 void ui_touchpad_deselect_current(void);
 void ui_touchpad_reselect_current(void);
+
+/* "Hide Labels" Settings toggle -- hides the Left/Right/Touchpad text.
+ * Persisted in NVS (CFG_NVS_KEY_TPAD_HIDE_LBL); set applies immediately
+ * if Touchpad mode is currently built. LVGL thread only. */
+bool ui_touchpad_get_hide_labels(void);
+void ui_touchpad_set_hide_labels(bool hide);

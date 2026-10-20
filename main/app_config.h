@@ -165,6 +165,7 @@
 #define CFG_NVS_KEY_MONITOR   "mon_cfg"
 #define CFG_NVS_KEY_MEDIA     "media_cfg"
 #define CFG_NVS_KEY_TOUCHPAD  "tpad_cfg"
+#define CFG_NVS_KEY_TPAD_HIDE_LBL "tpad_hide_lbl"   /* "1" = hide Touchpad text labels */
 #define CFG_NVS_KEY_BOOT_ANIM "boot_anim"
 
 /* --------------------------------------------------------------------------
