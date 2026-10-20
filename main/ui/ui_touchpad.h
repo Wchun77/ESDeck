@@ -3,8 +3,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "lvgl.h"
-#include "app_config.h"     /* CFG_BG_LEN */
-#include "ui_settings.h"    /* ui_settings_appearance_t */
+#include "ui_touchpad_config.h"
 
 /* -----------------------------------------------------------------------
  * Touchpad mode -- use the content area as a mouse touchpad for the PC.
@@ -22,17 +21,8 @@
  * them into SendInput mouse events.
  * ----------------------------------------------------------------------- */
 
-/* Reserved appearance config -- same idea as ui_media_config_t, intended
- * to come from config/touchpad/<name>.json later. Not loaded from SD yet:
- * ui_touchpad_enter() uses an all-zero instance, which means
- * "no bg image, default overlay, default keyboard glyph". */
-typedef struct {
-    char     bg_image[CFG_BG_LEN];                   /* content bg, under SD_PATH_ASSETS_BG; empty = flat color */
-    uint32_t overlay_color;                          /* 0xRRGGBB, translucent mask drawn over bg_image */
-    uint8_t  overlay_opa;                            /* 0 = no mask */
-    char     keyboard_icon[UI_SETTINGS_SIDE_ICON_LEN]; /* sidebar keyboard button icon; empty = LV_SYMBOL_KEYBOARD */
-    ui_settings_appearance_t settings;               /* Settings overlay's own bg_image + side_icon */
-} ui_touchpad_config_t;
+/* Appearance config (bg_image + Settings appearance) lives in
+ * ui_touchpad_config.h, loaded from config/touchpad/<name>.json. */
 
 /* Build Touchpad mode's sidebar widgets + content page. Must run on the
  * LVGL thread (same as ui_media_enter()). */

@@ -2,6 +2,7 @@
 #include "ui_deck_config.h"
 #include "ui_monitor_config.h"
 #include "ui_media_config.h"
+#include "ui_touchpad_config.h"
 #include "ui_settings.h"
 #include "ui_deck.h"
 #include "ui.h"
@@ -45,6 +46,7 @@ typedef enum {
     CFG_DIALOG_DECK,
     CFG_DIALOG_MONITOR,
     CFG_DIALOG_MEDIA,
+    CFG_DIALOG_TOUCHPAD,
 } cfg_dialog_mode_t;
 
 static cfg_dialog_mode_t s_dialog_mode = CFG_DIALOG_DECK;
@@ -143,6 +145,16 @@ static void confirm_cb(lv_event_t *e)
 
     const char *fname = s_scan.names[s_sel_idx];
     ESP_LOGI("CFG_DLG", "switching config: %s", fname);
+
+    if (s_dialog_mode == CFG_DIALOG_TOUCHPAD) {
+        if (!ui_touchpad_config_nvs_save(fname)) {
+            ESP_LOGE("CFG_DLG", "Failed to save touchpad config to NVS");
+            return;
+        }
+        dialog_close();
+        ui_settings_touchpad_reload();
+        return;
+    }
 
     if (s_dialog_mode == CFG_DIALOG_MEDIA) {
         if (!ui_media_config_nvs_save(fname)) {
@@ -282,6 +294,10 @@ static void dialog_show_internal(cfg_dialog_mode_t mode)
         s_scan  = ui_media_config_scan();
         cfg_dir = SD_PATH_CONFIG_MEDIA;
         break;
+    case CFG_DIALOG_TOUCHPAD:
+        s_scan  = ui_touchpad_config_scan();
+        cfg_dir = SD_PATH_CONFIG_TOUCHPAD;
+        break;
     default:
         s_scan = ui_deck_config_scan();
         break;
@@ -373,6 +389,7 @@ static void dialog_show_internal(cfg_dialog_mode_t mode)
     const char *title_text = "Select Config";
     if (s_dialog_mode == CFG_DIALOG_MONITOR) title_text = "Select Monitor Config";
     else if (s_dialog_mode == CFG_DIALOG_MEDIA) title_text = "Select Media Config";
+    else if (s_dialog_mode == CFG_DIALOG_TOUCHPAD) title_text = "Select Touchpad Config";
     lv_label_set_text(title_lbl, title_text);
     lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title_lbl, lv_color_hex(0xffffff), 0);
@@ -496,6 +513,8 @@ static void dialog_show_internal(cfg_dialog_mode_t mode)
         ui_monitor_config_nvs_load(s_active_fname, sizeof(s_active_fname));
     else if (s_dialog_mode == CFG_DIALOG_MEDIA)
         ui_media_config_nvs_load(s_active_fname, sizeof(s_active_fname));
+    else if (s_dialog_mode == CFG_DIALOG_TOUCHPAD)
+        ui_touchpad_config_nvs_load(s_active_fname, sizeof(s_active_fname));
     else
         ui_deck_config_nvs_load(s_active_fname, sizeof(s_active_fname));
     for (int i = 0; i < s_scan.count; i++) {
@@ -522,4 +541,9 @@ void ui_monitor_config_dialog_show(void)
 void ui_media_config_dialog_show(void)
 {
     dialog_show_internal(CFG_DIALOG_MEDIA);
+}
+
+void ui_touchpad_config_dialog_show(void)
+{
+    dialog_show_internal(CFG_DIALOG_TOUCHPAD);
 }

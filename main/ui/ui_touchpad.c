@@ -3,8 +3,11 @@
 #include "ui_settings.h"
 #include "ui_keyboard.h"
 #include "usb/usb_hid.h"
+#include "app_config.h"     /* SD_PATH_ASSETS_BG */
 #include "lvgl.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -72,13 +75,21 @@ static const char *TAG = "TOUCHPAD";
 #define COL_TEXT        0xcccccc
 #define COL_ACCENT      0x00d4ff
 
+/* With a bg image, surfaces go translucent so the image shows through
+ * (image itself already sits under a 50% black mask, same as Media). */
+#define OPA_SURFACE_ON_BG  LV_OPA_50
+#define OPA_BTN_ON_BG      LV_OPA_70
+
 /* -----------------------------------------------------------------------
  * State
  * ----------------------------------------------------------------------- */
-static ui_touchpad_config_t s_cfg;          /* reserved, all-zero until config loading exists */
+static ui_touchpad_config_t s_cfg;          /* loaded in ui_touchpad_enter() */
 
 static lv_obj_t *s_page       = NULL;       /* content page, child of screen */
-static lv_obj_t *s_bg_mask    = NULL;       /* reserved: translucent overlay over a future bg image */
+static lv_obj_t *s_bg_img     = NULL;       /* page child0, only when bg_image is set */
+static lv_obj_t *s_bg_mask    = NULL;       /* page child1, black 50% over s_bg_img */
+static lv_img_dsc_t s_bg_dsc;
+static uint8_t  *s_bg_data    = NULL;       /* PSRAM pixels behind s_bg_dsc, owned here */
 static lv_obj_t *s_btn_left   = NULL;
 static lv_obj_t *s_btn_right  = NULL;
 static lv_obj_t *s_pad        = NULL;
@@ -459,23 +470,107 @@ static void build_sidebar(lv_obj_t *sidebar)
     lv_obj_align(down, LV_ALIGN_BOTTOM_MID, 0, -8);
 }
 
-/* Reserved: bg image + translucent overlay from s_cfg. Kept as children
- * 0/1 of s_page (before any widget), same ordering trick as Media's
- * build_bg(). With the all-zero config nothing is created. */
-static void build_bg(void)
+/* Decode bg_image straight into a PSRAM buffer -- copy of ui_media.c's
+ * decode_bg_to_psram() (Media/Touchpad have no shared LRU pool to join,
+ * same reasoning as there). Runs on the LVGL thread. */
+static bool decode_bg_to_psram(const char *path, lv_img_dsc_t *dsc)
 {
-    if (s_cfg.bg_image[0] != '\0') {
-        ESP_LOGW(TAG, "bg_image '%s' set but bg loading not implemented yet", s_cfg.bg_image);
+    lv_img_decoder_dsc_t dec;
+    memset(&dec, 0, sizeof(dec));
+
+    if (lv_img_decoder_open(&dec, path, lv_color_white(), 0) != LV_RES_OK) {
+        ESP_LOGW(TAG, "bg decode open failed: %s", path);
+        return false;
     }
 
-    if (s_cfg.overlay_opa > 0) {
-        s_bg_mask = make_plain_obj(s_page);
-        lv_obj_set_size(s_bg_mask, CONTENT_W, CONTENT_H);
-        lv_obj_set_pos(s_bg_mask, 0, 0);
-        lv_obj_set_style_bg_color(s_bg_mask, lv_color_hex(s_cfg.overlay_color), 0);
-        lv_obj_set_style_bg_opa(s_bg_mask, s_cfg.overlay_opa, 0);
-        lv_obj_clear_flag(s_bg_mask, LV_OBJ_FLAG_CLICKABLE);
+    uint32_t    w  = dec.header.w;
+    uint32_t    h  = dec.header.h;
+    lv_img_cf_t cf = dec.header.cf;
+    uint8_t     px = lv_img_cf_get_px_size(cf) / 8;
+
+    /* JPEG reports px_size == 0 -- fix up to TRUE_COLOR. */
+    if (px == 0) {
+        cf = LV_IMG_CF_TRUE_COLOR;
+        px = sizeof(lv_color_t);
     }
+
+    size_t   sz  = (size_t)w * h * px;
+    uint8_t *buf = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        ESP_LOGW(TAG, "bg PSRAM alloc failed (%lu KB): %s", (unsigned long)(sz / 1024), path);
+        lv_img_decoder_close(&dec);
+        return false;
+    }
+
+    bool ok = true;
+    if (dec.img_data) {
+        memcpy(buf, dec.img_data, sz);
+    } else {
+        size_t stride = (size_t)w * px;
+        for (lv_coord_t y = 0; y < (lv_coord_t)h && ok; y++) {
+            if (lv_img_decoder_read_line(&dec, 0, y, (lv_coord_t)w,
+                                          buf + (size_t)y * stride) != LV_RES_OK) {
+                ok = false;
+            }
+        }
+    }
+    lv_img_decoder_close(&dec);
+
+    if (!ok) {
+        heap_caps_free(buf);
+        return false;
+    }
+
+    dsc->header.cf          = cf;
+    dsc->header.always_zero = 0;
+    dsc->header.w           = w;
+    dsc->header.h           = h;
+    dsc->data_size          = sz;
+    dsc->data               = buf;
+    return true;
+}
+
+/* bg(child0) + 50% black mask(child1) under every widget on s_page,
+ * cover-fit + centered -- same as Media's build_bg(). No-op when
+ * bg_image is empty (flat COL_PAGE_BG stays). Returns true if a bg image
+ * is actually showing. */
+static bool build_bg(void)
+{
+    if (!s_cfg.bg_image[0]) return false;
+
+    char path[sizeof("S:") + sizeof(SD_PATH_ASSETS_BG) + 1 + CFG_BG_LEN];
+    snprintf(path, sizeof(path), "S:%s/%s", SD_PATH_ASSETS_BG, s_cfg.bg_image);
+
+    if (!decode_bg_to_psram(path, &s_bg_dsc)) return false;
+    s_bg_data = (uint8_t *)s_bg_dsc.data;
+
+    uint32_t zoom_x   = (uint32_t)CONTENT_W * 256 / s_bg_dsc.header.w;
+    uint32_t zoom_y   = (uint32_t)CONTENT_H * 256 / s_bg_dsc.header.h;
+    uint32_t zoom     = (zoom_x > zoom_y) ? zoom_x : zoom_y;
+    int32_t  scaled_w = (int32_t)s_bg_dsc.header.w * (int32_t)zoom / 256;
+    int32_t  scaled_h = (int32_t)s_bg_dsc.header.h * (int32_t)zoom / 256;
+    int32_t  off_x    = ((int32_t)CONTENT_W - scaled_w) / 2;
+    int32_t  off_y    = ((int32_t)CONTENT_H - scaled_h) / 2;
+
+    s_bg_img = lv_img_create(s_page);
+    lv_obj_move_to_index(s_bg_img, 0);
+    lv_img_set_src(s_bg_img, &s_bg_dsc);
+    lv_img_set_pivot(s_bg_img, 0, 0);
+    lv_obj_set_pos(s_bg_img, off_x, off_y);
+    lv_obj_set_size(s_bg_img, CONTENT_W, CONTENT_H);
+    lv_img_set_zoom(s_bg_img, (uint16_t)zoom);
+    lv_obj_clear_flag(s_bg_img, LV_OBJ_FLAG_CLICKABLE);
+
+    s_bg_mask = make_plain_obj(s_page);
+    lv_obj_move_to_index(s_bg_mask, 1);
+    lv_obj_set_size(s_bg_mask, CONTENT_W, CONTENT_H);
+    lv_obj_set_pos(s_bg_mask, 0, 0);
+    lv_obj_set_style_bg_color(s_bg_mask, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_bg_mask, LV_OPA_50, 0);
+    lv_obj_clear_flag(s_bg_mask, LV_OBJ_FLAG_CLICKABLE);
+
+    ESP_LOGI(TAG, "bg image: %s", s_cfg.bg_image);
+    return true;
 }
 
 static lv_obj_t *build_mouse_btn(lv_coord_t x, const char *text, const char *name)
@@ -504,10 +599,14 @@ static void build_page(lv_obj_t *scr)
     lv_obj_set_pos(s_page, SIDEBAR_W, 0);
     lv_obj_set_style_bg_color(s_page, lv_color_hex(COL_PAGE_BG), 0);
 
-    build_bg();
+    bool has_bg = build_bg();
 
     s_btn_left  = build_mouse_btn(TP_MARGIN,                     "Left",  "L");
     s_btn_right = build_mouse_btn(TP_MARGIN * 2 + TP_BTN_W,      "Right", "R");
+    if (has_bg) {
+        lv_obj_set_style_bg_opa(s_btn_left,  OPA_BTN_ON_BG, 0);
+        lv_obj_set_style_bg_opa(s_btn_right, OPA_BTN_ON_BG, 0);
+    }
 
     s_pad = make_plain_obj(s_page);
     lv_obj_set_size(s_pad, TP_PAD_W, TP_PAD_H);
@@ -519,10 +618,11 @@ static void build_page(lv_obj_t *scr)
     lv_obj_add_flag(s_pad, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_clear_flag(s_pad, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_add_event_cb(s_pad, pad_cb, LV_EVENT_ALL, NULL);
+    if (has_bg) lv_obj_set_style_bg_opa(s_pad, OPA_SURFACE_ON_BG, 0);
 
     lv_obj_t *hint = lv_label_create(s_pad);
     lv_label_set_text(hint, "Touchpad");
-    lv_obj_set_style_text_color(hint, lv_color_hex(COL_HINT), 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(has_bg ? 0x777777 : COL_HINT), 0);
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_20, 0);
     lv_obj_center(hint);
 
@@ -542,10 +642,10 @@ static void build_page(lv_obj_t *scr)
  * ----------------------------------------------------------------------- */
 void ui_touchpad_enter(lv_obj_t *sidebar)
 {
-    memset(&s_cfg, 0, sizeof(s_cfg));
-
-    /* Every mode re-applies Settings' appearance on enter; all-empty =
-     * plain bg + default gear glyph (see ui_settings_apply_appearance()). */
+    /* Selected config/touchpad/<name>.json; none selected / missing just
+     * leaves s_cfg all-empty (flat colors, default gear glyph). Every mode
+     * re-applies Settings' appearance on enter, same as Media. */
+    ui_touchpad_config_load(&s_cfg);
     ui_settings_apply_appearance(&s_cfg.settings);
 
     build_sidebar(sidebar);
@@ -587,11 +687,23 @@ void ui_touchpad_exit(void)
     }
     set_fast_touch_read(false);
 
+    /* LVGL's image cache keys on the source pointer (&s_bg_dsc, a static
+     * that's reused on every enter) -- invalidate before freeing so a
+     * stale cache hit can't serve the freed buffer next time. Same as
+     * ui_media_exit(). */
+    lv_img_cache_invalidate_src(NULL);
+
     if (s_page) {
-        lv_obj_del(s_page);   /* also deletes bg mask, buttons, pad, dot */
+        lv_obj_del(s_page);   /* also deletes bg img/mask, buttons, pad, dot */
         s_page = NULL;
     }
-    s_bg_mask = s_btn_left = s_btn_right = s_pad = s_dot = NULL;
+    s_bg_img = s_bg_mask = s_btn_left = s_btn_right = s_pad = s_dot = NULL;
+
+    if (s_bg_data) {
+        heap_caps_free(s_bg_data);
+        s_bg_data = NULL;
+    }
+    memset(&s_bg_dsc, 0, sizeof(s_bg_dsc));
 
     if (s_kb_cell) {
         lv_obj_del(s_kb_cell);

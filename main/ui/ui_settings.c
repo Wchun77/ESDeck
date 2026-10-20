@@ -249,6 +249,16 @@ void ui_settings_media_reload(void)
     xTaskCreate(enter_media_task, "media_reload", 4096, NULL, 3, NULL);
 }
 
+void ui_settings_touchpad_reload(void)
+{
+    /* Same shape as ui_settings_media_reload(). */
+    ui_settings_deselect();
+    ui_touchpad_exit();
+    ui_show_switching_screen("Applying config...");
+    lv_refr_now(NULL);
+    xTaskCreate(enter_touchpad_task, "tpad_reload", 4096, NULL, 3, NULL);
+}
+
 /* -----------------------------------------------------------------------
  * Item callbacks
  *
@@ -277,6 +287,8 @@ static void item_config_cb(lv_event_t *e)
         ui_monitor_config_dialog_show();
     else if (s_mode == UI_MODE_MEDIA)
         ui_media_config_dialog_show();
+    else if (s_mode == UI_MODE_TOUCHPAD)
+        ui_touchpad_config_dialog_show();
     else
         ui_config_dialog_show();
 }
@@ -622,9 +634,7 @@ static void item_boot_anim_cb(lv_event_t *e)
  * growing this pattern.
  * ----------------------------------------------------------------------- */
 static const setting_node_t s_custom_menu[] = {
-    /* Touchpad has no config picker yet (item_config_cb would fall
-     * through to Deck's dialog), so the row is hidden there for now. */
-    { "Select Config",  SETTING_ACTION, SETMASK_BOTH | SETMASK_MEDIA, item_config_cb, NULL, 0 },
+    { "Select Config",  SETTING_ACTION, SETMASK_ALL, item_config_cb,    NULL, 0 },
     { "Boot Animation", SETTING_ACTION, SETMASK_ALL, item_boot_anim_cb, NULL, 0 },
 };
 

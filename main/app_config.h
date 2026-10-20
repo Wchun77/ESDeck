@@ -32,6 +32,7 @@
 #define SD_DIR_CONFIG_DECK      "config/deck"
 #define SD_DIR_CONFIG_MONITOR   "config/monitor"
 #define SD_DIR_CONFIG_MEDIA     "config/media"
+#define SD_DIR_CONFIG_TOUCHPAD  "config/touchpad"
 #define SD_DIR_ASSETS_ICONS     "assets/icons"
 #define SD_DIR_ASSETS_BG        "assets/backgrounds"
 #define SD_DIR_ASSETS_BOOT      "assets/boot"
@@ -73,6 +74,7 @@
 #define SD_PATH_CONFIG_DECK     SD_MOUNT_POINT "/" SD_DIR_CONFIG_DECK
 #define SD_PATH_CONFIG_MONITOR  SD_MOUNT_POINT "/" SD_DIR_CONFIG_MONITOR
 #define SD_PATH_CONFIG_MEDIA    SD_MOUNT_POINT "/" SD_DIR_CONFIG_MEDIA
+#define SD_PATH_CONFIG_TOUCHPAD SD_MOUNT_POINT "/" SD_DIR_CONFIG_TOUCHPAD
 
 #define SD_PATH_ASSETS_ICONS    SD_MOUNT_POINT "/" SD_DIR_ASSETS_ICONS
 #define SD_PATH_ASSETS_BG       SD_MOUNT_POINT "/" SD_DIR_ASSETS_BG
@@ -162,6 +164,7 @@
 #define CFG_NVS_KEY_DECK      "deck_cfg"
 #define CFG_NVS_KEY_MONITOR   "mon_cfg"
 #define CFG_NVS_KEY_MEDIA     "media_cfg"
+#define CFG_NVS_KEY_TOUCHPAD  "tpad_cfg"
 #define CFG_NVS_KEY_BOOT_ANIM "boot_anim"
 
 /* --------------------------------------------------------------------------

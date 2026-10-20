@@ -54,6 +54,10 @@ void ui_settings_monitor_reload(void);
  * Same shape as ui_settings_monitor_reload(). */
 void ui_settings_media_reload(void);
 
+/* Exit and re-enter touchpad mode to apply a new config.
+ * Same shape as ui_settings_media_reload(). */
+void ui_settings_touchpad_reload(void);
+
 /* Update the Settings page's background image and gear sidebar icon to
  * match whichever Deck or Monitor config is currently active. Called by
  * ui_deck_build() and ui_monitor_enter() right after loading their own
