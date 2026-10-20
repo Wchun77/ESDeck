@@ -13,7 +13,18 @@
 
 static const char *TAG = "USB_HID";
 
-#define TUSB_DESC_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
+#define TUSB_DESC_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN * 2)
+
+/* HID instances / interfaces:
+ *   0 = ESDeck vendor HID (Deck / Monitor / Media / time sync / ESDeckPC paths)
+ *   1 = standard keyboard (Report ID 1) + mouse (Report ID 2), used when
+ *       the input mode is "USB HID" (usb_hid_set_native_input()) -- Windows
+ *       sees a real keyboard / mouse: no ESDeckPC needed, works with
+ *       elevated windows, UAC and games that reject injected input. */
+#define HID_ITF_VENDOR   0
+#define HID_ITF_INPUT    1
+#define RID_KEYBOARD     1
+#define RID_MOUSE        2
 
 static bool s_active = false;
 
@@ -58,9 +69,84 @@ static const uint8_t hid_report_descriptor[] = {
     0xC0
 };
 
+/*
+ * Interface 1 report descriptor: boot-style keyboard (TinyUSB's standard
+ * one) + a 5-button mouse with high-resolution wheel / horizontal pan.
+ *
+ * Hi-res scrolling uses the HID "Resolution Multiplier" (Generic Desktop
+ * 0x48): Windows reads the feature report and, if it supports it, sets the
+ * multiplier to max (physical 120) -- then 1 wheel count = 1/120 notch
+ * (= 1 WHEEL_DELTA unit), same smooth scrolling ESDeckPC gives. If the
+ * host never sets it, counts are whole notches and the flush code falls
+ * back to coarse steps (see s_res_mult).
+ *
+ * Mouse input report (ID 2): buttons(5 bits + 3 pad) X Y wheel pan, all
+ * int8 -- the layout TinyUSB's tud_hid_n_mouse_report() sends.
+ * Mouse feature report (ID 2): wheel multiplier (2 bits), pan multiplier
+ * (2 bits), 4 bits padding.
+ */
+static const uint8_t hid_input_report_descriptor[] = {
+    TUD_HID_REPORT_DESC_KEYBOARD(HID_REPORT_ID(RID_KEYBOARD)),
+
+    0x05, 0x01,             /* Usage Page (Generic Desktop) */
+    0x09, 0x02,             /* Usage (Mouse) */
+    0xA1, 0x01,             /* Collection (Application) */
+    0x85, RID_MOUSE,        /*   Report ID */
+    0x09, 0x01,             /*   Usage (Pointer) */
+    0xA1, 0x00,             /*   Collection (Physical) */
+    0x05, 0x09,             /*     Usage Page (Button) */
+    0x19, 0x01, 0x29, 0x05, /*     Buttons 1..5 (L R M Back Forward) */
+    0x15, 0x00, 0x25, 0x01, /*     Logical 0..1 */
+    0x95, 0x05, 0x75, 0x01, /*     5 x 1 bit */
+    0x81, 0x02,             /*     Input (Data,Var,Abs) */
+    0x95, 0x01, 0x75, 0x03, /*     1 x 3 bits padding */
+    0x81, 0x01,             /*     Input (Const) */
+    0x05, 0x01,             /*     Usage Page (Generic Desktop) */
+    0x09, 0x30, 0x09, 0x31, /*     X, Y */
+    0x15, 0x81, 0x25, 0x7F, /*     Logical -127..127 */
+    0x75, 0x08, 0x95, 0x02, /*     2 x 8 bits */
+    0x81, 0x06,             /*     Input (Data,Var,Rel) */
+
+    0xA1, 0x02,             /*     Collection (Logical) -- wheel */
+    0x09, 0x48,             /*       Usage (Resolution Multiplier) */
+    0x15, 0x00, 0x25, 0x01, /*       Logical 0..1 */
+    0x35, 0x01, 0x45, 0x78, /*       Physical 1..120 */
+    0x75, 0x02, 0x95, 0x01, /*       1 x 2 bits */
+    0xB1, 0x02,             /*       Feature (Data,Var,Abs) */
+    0x35, 0x00, 0x45, 0x00, /*       Physical reset */
+    0x09, 0x38,             /*       Usage (Wheel) */
+    0x15, 0x81, 0x25, 0x7F, /*       Logical -127..127 */
+    0x75, 0x08, 0x95, 0x01, /*       1 x 8 bits */
+    0x81, 0x06,             /*       Input (Data,Var,Rel) */
+    0xC0,                   /*     End Collection */
+
+    0xA1, 0x02,             /*     Collection (Logical) -- pan */
+    0x09, 0x48,             /*       Usage (Resolution Multiplier) */
+    0x15, 0x00, 0x25, 0x01, /*       Logical 0..1 */
+    0x35, 0x01, 0x45, 0x78, /*       Physical 1..120 */
+    0x75, 0x02, 0x95, 0x01, /*       1 x 2 bits */
+    0xB1, 0x02,             /*       Feature (Data,Var,Abs) */
+    0x75, 0x04,             /*       1 x 4 bits padding */
+    0xB1, 0x01,             /*       Feature (Const) */
+    0x35, 0x00, 0x45, 0x00, /*       Physical reset */
+    0x05, 0x0C,             /*       Usage Page (Consumer) */
+    0x0A, 0x38, 0x02,       /*       Usage (AC Pan) */
+    0x15, 0x81, 0x25, 0x7F, /*       Logical -127..127 */
+    0x75, 0x08, 0x95, 0x01, /*       1 x 8 bits */
+    0x81, 0x06,             /*       Input (Data,Var,Rel) */
+    0xC0,                   /*     End Collection */
+
+    0xC0,                   /*   End Collection (Physical) */
+    0xC0,                   /* End Collection (Application) */
+};
+
 static const uint8_t s_config_desc[] = {
-    TUD_CONFIG_DESCRIPTOR(1, 1, 0, TUSB_DESC_TOTAL_LEN, 0, 100),
-    TUD_HID_DESCRIPTOR(0, 0, false, sizeof(hid_report_descriptor), 0x81, 16, 10),
+    TUD_CONFIG_DESCRIPTOR(1, 2, 0, TUSB_DESC_TOTAL_LEN, 0, 100),
+    TUD_HID_DESCRIPTOR(HID_ITF_VENDOR, 0, HID_ITF_PROTOCOL_NONE,
+                       sizeof(hid_report_descriptor), 0x81, 16, 10),
+    /* 1 ms poll for the pointer -- real mice use 1..8 ms */
+    TUD_HID_DESCRIPTOR(HID_ITF_INPUT, 0, HID_ITF_PROTOCOL_NONE,
+                       sizeof(hid_input_report_descriptor), 0x82, 16, 1),
 };
 
 static const tusb_desc_device_t s_device_desc = {
@@ -72,7 +158,11 @@ static const tusb_desc_device_t s_device_desc = {
     .bDeviceProtocol    = 0,
     .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor           = 0x303A,
-    .idProduct          = 0x4004,
+    /* 0x4005 (was 0x4004): the interface layout changed (vendor HID +
+     * keyboard/mouse), and Windows caches descriptors per VID/PID --
+     * a new PID makes it enumerate the composite device cleanly. ESDeckPC
+     * accepts both. */
+    .idProduct          = 0x4005,
     .bcdDevice          = 0x0100,
     .iManufacturer      = 0x01,
     .iProduct           = 0x02,
@@ -694,6 +784,115 @@ void usb_hid_media_seek(uint32_t position_ms)
 }
 
 /* -----------------------------------------------------------------------
+ * Native input (interface 1: standard keyboard + mouse) -- helpers.
+ * The flush functions that use the touchpad / keyboard queues are further
+ * down, after those queues (tp_flush_native(), kb_flush_native()).
+ * ----------------------------------------------------------------------- */
+static bool    s_native   = false;   /* usb_hid_set_native_input() */
+
+/* Mouse feature report (ID 2): bits 0-1 wheel multiplier, bits 2-3 pan
+ * multiplier, as set by the host. Non-zero = host turned hi-res on, so one
+ * count = 1/120 notch; zero = counts are whole notches. Written from the
+ * TinyUSB task (SET_REPORT), read on the LVGL task -- a single byte, no
+ * lock needed. */
+static volatile uint8_t s_res_mult = 0;
+
+static void native_set_report(uint8_t report_id, hid_report_type_t type,
+                              uint8_t const *buf, uint16_t len)
+{
+    if (type == HID_REPORT_TYPE_FEATURE && report_id == RID_MOUSE && len >= 1) {
+        s_res_mult = buf[0] & 0x0F;
+        ESP_LOGI(TAG, "mouse resolution multiplier: wheel %s, pan %s",
+                 (s_res_mult & 0x03) ? "hi-res" : "notch",
+                 (s_res_mult & 0x0C) ? "hi-res" : "notch");
+    }
+    /* Keyboard LED output report (ID 1) -- nothing to show, ignored. */
+}
+
+static uint16_t native_get_report(uint8_t report_id, hid_report_type_t type,
+                                  uint8_t *buf, uint16_t reqlen)
+{
+    if (reqlen < 1) return 0;
+    if (type == HID_REPORT_TYPE_FEATURE && report_id == RID_MOUSE) {
+        buf[0] = s_res_mult;
+        return 1;
+    }
+    /* Anything else: an all-zero report of the requested size (max 8). */
+    uint16_t n = reqlen < 8 ? reqlen : 8;
+    memset(buf, 0, n);
+    return n;
+}
+
+/* Windows virtual-key code -> HID keyboard usage (US layout). Only the keys
+ * the mini keyboard / sidebar hotkeys can produce. 0 = none. Modifier VKs
+ * are handled separately (vk_to_modifier()). */
+static uint8_t vk_to_usage(uint8_t vk)
+{
+    if (vk >= 'A' && vk <= 'Z') return (uint8_t)(0x04 + (vk - 'A'));
+    if (vk >= '1' && vk <= '9') return (uint8_t)(0x1E + (vk - '1'));
+    if (vk == '0')              return 0x27;
+    if (vk >= 0x70 && vk <= 0x7B) return (uint8_t)(0x3A + (vk - 0x70));   /* F1..F12 */
+    switch (vk) {
+    case 0x0D: return 0x28;   /* Enter */
+    case 0x1B: return 0x29;   /* Esc */
+    case 0x08: return 0x2A;   /* Backspace */
+    case 0x09: return 0x2B;   /* Tab */
+    case 0x20: return 0x2C;   /* Space */
+    case 0xBD: return 0x2D;   /* - */
+    case 0xBB: return 0x2E;   /* = */
+    case 0xDB: return 0x2F;   /* [ */
+    case 0xDD: return 0x30;   /* ] */
+    case 0xDC: return 0x31;   /* \ */
+    case 0xBA: return 0x33;   /* ; */
+    case 0xDE: return 0x34;   /* ' */
+    case 0xC0: return 0x35;   /* ` */
+    case 0xBC: return 0x36;   /* , */
+    case 0xBE: return 0x37;   /* . */
+    case 0xBF: return 0x38;   /* / */
+    case 0x14: return 0x39;   /* Caps Lock */
+    case 0x2C: return 0x46;   /* Print Screen */
+    case 0x2D: return 0x49;   /* Insert */
+    case 0x24: return 0x4A;   /* Home */
+    case 0x21: return 0x4B;   /* Page Up */
+    case 0x2E: return 0x4C;   /* Delete */
+    case 0x23: return 0x4D;   /* End */
+    case 0x22: return 0x4E;   /* Page Down */
+    case 0x27: return 0x4F;   /* Right */
+    case 0x25: return 0x50;   /* Left */
+    case 0x28: return 0x51;   /* Down */
+    case 0x26: return 0x52;   /* Up */
+    default:   return 0;
+    }
+}
+
+/* Modifier VKs -> HID modifier bit (0 = not a modifier key). */
+static uint8_t vk_to_modifier(uint8_t vk)
+{
+    switch (vk) {
+    case 0xA2: case 0x11: return KEYBOARD_MODIFIER_LEFTCTRL;
+    case 0xA3:            return KEYBOARD_MODIFIER_RIGHTCTRL;
+    case 0xA0: case 0x10: return KEYBOARD_MODIFIER_LEFTSHIFT;
+    case 0xA1:            return KEYBOARD_MODIFIER_RIGHTSHIFT;
+    case 0xA4: case 0x12: return KEYBOARD_MODIFIER_LEFTALT;
+    case 0xA5:            return KEYBOARD_MODIFIER_RIGHTALT;
+    case 0x5B:            return KEYBOARD_MODIFIER_LEFTGUI;
+    case 0x5C:            return KEYBOARD_MODIFIER_RIGHTGUI;
+    default:              return 0;
+    }
+}
+
+/* HID_KB_MOD_* (the queue's mods byte) -> HID modifier bits. */
+static uint8_t mods_to_modifier(uint8_t mods)
+{
+    uint8_t m = 0;
+    if (mods & HID_KB_MOD_CTRL)  m |= KEYBOARD_MODIFIER_LEFTCTRL;
+    if (mods & HID_KB_MOD_SHIFT) m |= KEYBOARD_MODIFIER_LEFTSHIFT;
+    if (mods & HID_KB_MOD_ALT)   m |= KEYBOARD_MODIFIER_LEFTALT;
+    if (mods & HID_KB_MOD_WIN)   m |= KEYBOARD_MODIFIER_LEFTGUI;
+    return m;
+}
+
+/* -----------------------------------------------------------------------
  * Touchpad reports (see usb_hid.h). All called from the LVGL thread only.
  * ----------------------------------------------------------------------- */
 #define TP_BTN_QUEUE_LEN  8
@@ -732,8 +931,12 @@ static int32_t tp_clamp(int32_t v, int32_t lo, int32_t hi)
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+static void tp_flush_native(void);
+
 void usb_hid_tp_flush(void)
 {
+    if (s_native) { tp_flush_native(); return; }
+
     bool have_btn = s_tp_btn_count > 0;
     bool have_move = have_btn || s_tp_dx || s_tp_dy || s_tp_wheel;
     if (!have_move && s_tp_hwheel == 0) return;
@@ -802,8 +1005,11 @@ bool usb_hid_kb_key(bool down, uint8_t vk, uint8_t mods)
 
 bool usb_hid_kb_pending(void) { return s_kb_count > 0; }
 
+static void kb_flush_native(void);
+
 void usb_hid_kb_flush(void)
 {
+    if (s_native) { kb_flush_native(); return; }
     if (s_kb_count == 0) return;
     if (!s_active || !tud_hid_ready()) return;
 
@@ -819,17 +1025,157 @@ void usb_hid_kb_flush(void)
 }
 
 /* -----------------------------------------------------------------------
+ * Native input -- flush (interface 1). LVGL thread, same as the vendor
+ * flushes above; one report per call, nothing dropped if the endpoint is
+ * busy (state stays queued / accumulated for the next call).
+ * ----------------------------------------------------------------------- */
+
+/* Finger pixels -> wheel counts. Matches ESDeckPC's WheelPerPixel = 5
+ * (24 px per notch): hi-res = 5 counts (1/120 notch each) per px, else
+ * whole notches every 24 px. */
+#define NATIVE_WHEEL_PX_PER_NOTCH  24
+#define NATIVE_WHEEL_HIRES_PER_PX  5
+/* Pointer gain on the native path = ESDeckPC's TouchpadInput.Sensitivity
+ * (2.0), so Cursor Speed 1.00x feels the same in both input modes. */
+#define NATIVE_POINTER_GAIN        2
+
+/* Take up to one report's worth out of a px accumulator; returns counts. */
+static int8_t take_wheel(int32_t *acc, bool hires)
+{
+    if (*acc == 0) return 0;
+    if (hires) {
+        int32_t px = tp_clamp(*acc, -127 / NATIVE_WHEEL_HIRES_PER_PX, 127 / NATIVE_WHEEL_HIRES_PER_PX);
+        *acc -= px;
+        return (int8_t)(px * NATIVE_WHEEL_HIRES_PER_PX);
+    }
+    int32_t notches = tp_clamp(*acc / NATIVE_WHEEL_PX_PER_NOTCH, -127, 127);
+    *acc -= notches * NATIVE_WHEEL_PX_PER_NOTCH;   /* remainder waits for more px */
+    return (int8_t)notches;
+}
+
+static void tp_flush_native(void)
+{
+    bool have_btn = s_tp_btn_count > 0;
+    bool have_wh  = (s_res_mult & 0x03) ? (s_tp_wheel != 0)
+                                        : (s_tp_wheel >= NATIVE_WHEEL_PX_PER_NOTCH || s_tp_wheel <= -NATIVE_WHEEL_PX_PER_NOTCH);
+    bool have_pan = (s_res_mult & 0x0C) ? (s_tp_hwheel != 0)
+                                        : (s_tp_hwheel >= NATIVE_WHEEL_PX_PER_NOTCH || s_tp_hwheel <= -NATIVE_WHEEL_PX_PER_NOTCH);
+    if (!have_btn && !s_tp_dx && !s_tp_dy && !have_wh && !have_pan) return;
+    if (!s_active || !tud_hid_n_ready(HID_ITF_INPUT)) return;
+
+    /* Take at most what still fits int8 after the gain. */
+    int32_t dx = tp_clamp(s_tp_dx, -127 / NATIVE_POINTER_GAIN, 127 / NATIVE_POINTER_GAIN);
+    int32_t dy = tp_clamp(s_tp_dy, -127 / NATIVE_POINTER_GAIN, 127 / NATIVE_POINTER_GAIN);
+    int32_t wacc = s_tp_wheel, hacc = s_tp_hwheel;
+    int8_t  wh  = take_wheel(&wacc, (s_res_mult & 0x03) != 0);
+    int8_t  pan = take_wheel(&hacc, (s_res_mult & 0x0C) != 0);
+    /* HID_TP_BTN_* bits are already the HID mouse button bits
+     * (1 L, 2 R, 4 M, 8 button 4 / back, 16 button 5 / forward). */
+    uint8_t mask = have_btn ? s_tp_btn_q[s_tp_btn_head] : s_tp_btn_last;
+
+    if (!tud_hid_n_mouse_report(HID_ITF_INPUT, RID_MOUSE, mask,
+                                (int8_t)(dx * NATIVE_POINTER_GAIN),
+                                (int8_t)(dy * NATIVE_POINTER_GAIN), wh, pan)) return;
+
+    s_tp_dx -= dx;
+    s_tp_dy -= dy;
+    s_tp_wheel  = wacc;
+    s_tp_hwheel = hacc;
+    if (have_btn) {
+        s_tp_btn_head = (s_tp_btn_head + 1) % TP_BTN_QUEUE_LEN;
+        s_tp_btn_count--;
+    }
+}
+
+/* Keyboard state as the host currently sees it. The queue carries
+ * down/up events (one key at a time from the mini keyboard / hotkeys);
+ * this turns them into 6-key-rollover reports. */
+static uint8_t s_nk_keys[6];
+static uint8_t s_nk_mod = 0;
+
+static void kb_flush_native(void)
+{
+    if (s_kb_count == 0) return;
+    if (!s_active || !tud_hid_n_ready(HID_ITF_INPUT)) return;
+
+    const kb_evt_t *ev = &s_kb_q[s_kb_head];
+    uint8_t keys[6], mod;
+    memcpy(keys, s_nk_keys, sizeof(keys));
+    mod = s_nk_mod;
+
+    uint8_t usage = vk_to_usage(ev->vk);
+    uint8_t vkmod = vk_to_modifier(ev->vk);
+
+    if (ev->cmd == HID_KB_CMD_DOWN) {
+        /* Held modifiers come with the key; a modifier VK (IME Shift tap)
+         * is just its modifier bit. A repeat DOWN of a held key changes
+         * nothing -- the OS does its own typematic repeat for real keys. */
+        mod |= mods_to_modifier(ev->mods) | vkmod;
+        if (usage) {
+            bool have = false;
+            for (int i = 0; i < 6; i++) if (keys[i] == usage) have = true;
+            for (int i = 0; i < 6 && !have; i++) if (!keys[i]) { keys[i] = usage; have = true; }
+        }
+    } else {
+        if (usage) for (int i = 0; i < 6; i++) if (keys[i] == usage) keys[i] = 0;
+        mod &= (uint8_t)~vkmod;
+        /* Modifiers were sent along with this key -- with no key left
+         * down they go up too (same as ESDeckPC's KeyboardInput). */
+        bool any = false;
+        for (int i = 0; i < 6; i++) if (keys[i]) any = true;
+        if (!any) mod = 0;
+    }
+
+    if (!tud_hid_n_keyboard_report(HID_ITF_INPUT, RID_KEYBOARD, mod, keys)) return;
+
+    memcpy(s_nk_keys, keys, sizeof(keys));
+    s_nk_mod = mod;
+    s_kb_head = (s_kb_head + 1) % KB_Q_LEN;
+    s_kb_count--;
+}
+
+bool usb_hid_get_native_input(void) { return s_native; }
+
+void usb_hid_set_native_input(bool native)
+{
+    if (native == s_native) return;
+
+    /* Release whatever the old path still holds, best effort. */
+    if (s_native) {
+        if (s_active && tud_hid_n_ready(HID_ITF_INPUT))
+            tud_hid_n_mouse_report(HID_ITF_INPUT, RID_MOUSE, 0, 0, 0, 0, 0);
+        if (s_active && tud_hid_n_ready(HID_ITF_INPUT))
+            tud_hid_n_keyboard_report(HID_ITF_INPUT, RID_KEYBOARD, 0, NULL);
+        memset(s_nk_keys, 0, sizeof(s_nk_keys));
+        s_nk_mod = 0;
+    }
+    /* Vendor path: ESDeckPC releases on its side when it sees no more
+     * input; queued events are dropped rather than replayed on the new path. */
+    s_kb_count = 0;
+    s_tp_btn_count = 0;
+    s_tp_btn_last  = 0;
+    s_tp_dx = s_tp_dy = s_tp_wheel = s_tp_hwheel = 0;
+
+    s_native = native;
+    ESP_LOGI(TAG, "input mode: %s", native ? "USB HID (keyboard + mouse)" : "ESDeckPC (vendor reports)");
+}
+
+/* -----------------------------------------------------------------------
  * TinyUSB HID callbacks
  * ----------------------------------------------------------------------- */
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance)
 {
-    return hid_report_descriptor;
+    return (instance == HID_ITF_INPUT) ? hid_input_report_descriptor : hid_report_descriptor;
 }
 
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                             hid_report_type_t report_type,
                             uint8_t const *buffer, uint16_t bufsize)
 {
+    if (instance == HID_ITF_INPUT) {
+        native_set_report(report_id, report_type, buffer, bufsize);
+        return;
+    }
     if (report_type != HID_REPORT_TYPE_FEATURE) return;
     if (bufsize < 1) return;
 
@@ -894,6 +1240,9 @@ uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
                                 hid_report_type_t report_type,
                                 uint8_t *buffer, uint16_t reqlen)
 {
+    if (instance == HID_ITF_INPUT)
+        return native_get_report(report_id, report_type, buffer, reqlen);
+
     if (report_type == HID_REPORT_TYPE_FEATURE ||
         report_type == HID_REPORT_TYPE_INPUT) {
         uint16_t len = reqlen < 8 ? reqlen : 8;

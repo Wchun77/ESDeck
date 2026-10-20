@@ -148,6 +148,16 @@ bool usb_hid_kb_key(bool down, uint8_t vk, uint8_t mods);
 void usb_hid_kb_flush(void);
 bool usb_hid_kb_pending(void);
 
+/* Input mode for the touchpad / keyboard queues above (LVGL thread):
+ *   false (default) -- vendor reports on interface 0 (0xFD / 0xFC), turned
+ *                      into SendInput by ESDeckPC
+ *   true            -- standard keyboard + mouse reports on interface 1,
+ *                      no ESDeckPC needed
+ * Same queues, same callers; only the flush changes. Switching releases
+ * everything held on the old path first. */
+void usb_hid_set_native_input(bool native);
+bool usb_hid_get_native_input(void);
+
 void usb_hid_driver_install(void);
 
 void usb_hid_activate(void);

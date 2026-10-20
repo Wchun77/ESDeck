@@ -82,3 +82,18 @@ typedef enum {
 const char *const *ui_touchpad_swipe_mode_names(void);   /* TP_SWIPE_COUNT entries */
 int  ui_touchpad_get_swipe_mode(void);
 void ui_touchpad_set_swipe_mode(int mode);
+
+/* Input Mode: how touchpad + mini keyboard input reaches the PC.
+ *   TP_INPUT_ESDECKPC -- vendor reports, ESDeckPC injects them (default)
+ *   TP_INPUT_USB_HID  -- the device's own USB keyboard + mouse interface;
+ *                        no ESDeckPC needed, works where injected input
+ *                        doesn't (games with anti-cheat, elevated windows) */
+typedef enum {
+    TP_INPUT_ESDECKPC = 0,
+    TP_INPUT_USB_HID,
+    TP_INPUT_COUNT,
+} tp_input_mode_t;
+
+const char *const *ui_touchpad_input_mode_names(void);   /* TP_INPUT_COUNT entries */
+int  ui_touchpad_get_input_mode(void);
+void ui_touchpad_set_input_mode(int mode);
