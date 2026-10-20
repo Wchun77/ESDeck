@@ -1,4 +1,6 @@
 #include "ui_touchpad_config.h"
+#include "usb/usb_hid.h"   /* HID_KB_MOD_* */
+#include <strings.h>        /* strcasecmp */
 #include "app_config.h"
 #include "nvs_manager.h"
 
@@ -52,6 +54,107 @@ static void str_field(const cJSON *obj, const char *key, char *out, size_t out_s
 }
 
 /* -----------------------------------------------------------------------
+ * Hotkey "keys" parsing -- same vocabulary as a Deck hotkey action
+ * (ESDeckPC's ActionExecutor VkMap), plus a few extra names. Keep in sync
+ * with TouchpadHotkeyKeys in ESDeckPC (Config/TouchpadConfig.cs).
+ * ----------------------------------------------------------------------- */
+typedef struct { const char *name; uint8_t vk; } key_name_t;
+
+static const key_name_t s_key_names[] = {
+    { "enter", 0x0D }, { "tab", 0x09 }, { "esc", 0x1B }, { "del", 0x2E },
+    { "backspace", 0x08 }, { "space", 0x20 },
+    { "up", 0x26 }, { "down", 0x28 }, { "left", 0x25 }, { "right", 0x27 },
+    { "home", 0x24 }, { "end", 0x23 }, { "pgup", 0x21 }, { "pgdn", 0x22 },
+    { "insert", 0x2D }, { "prtscr", 0x2C },
+    { "f1", 0x70 }, { "f2", 0x71 }, { "f3", 0x72 }, { "f4", 0x73 },
+    { "f5", 0x74 }, { "f6", 0x75 }, { "f7", 0x76 }, { "f8", 0x77 },
+    { "f9", 0x78 }, { "f10", 0x79 }, { "f11", 0x7A }, { "f12", 0x7B },
+};
+
+/* Single character -> VK (US layout), 0 if unknown. */
+static uint8_t char_to_vk(char c)
+{
+    if (c >= 'a' && c <= 'z') return (uint8_t)(c - 'a' + 'A');
+    if (c >= 'A' && c <= 'Z') return (uint8_t)c;
+    if (c >= '0' && c <= '9') return (uint8_t)c;
+    switch (c) {
+    case '-':  return 0xBD; case '=': return 0xBB;
+    case '[':  return 0xDB; case ']': return 0xDD; case '\\': return 0xDC;
+    case ';':  return 0xBA; case '\'': return 0xDE;
+    case ',':  return 0xBC; case '.': return 0xBE; case '/': return 0xBF;
+    case '`':  return 0xC0;
+    default:   return 0;
+    }
+}
+
+/* ["ctrl","c"] -> vk + mods. Exactly one non-modifier key required. */
+static bool parse_keys(const cJSON *arr, uint8_t *vk_out, uint8_t *mods_out)
+{
+    if (!cJSON_IsArray(arr)) return false;
+
+    uint8_t vk = 0, mods = 0;
+    const cJSON *it;
+    cJSON_ArrayForEach(it, arr) {
+        if (!cJSON_IsString(it) || !it->valuestring || !it->valuestring[0]) return false;
+        const char *s = it->valuestring;
+
+        if      (strcasecmp(s, "ctrl")  == 0) { mods |= HID_KB_MOD_CTRL;  continue; }
+        else if (strcasecmp(s, "shift") == 0) { mods |= HID_KB_MOD_SHIFT; continue; }
+        else if (strcasecmp(s, "alt")   == 0) { mods |= HID_KB_MOD_ALT;   continue; }
+        else if (strcasecmp(s, "win")   == 0) { mods |= HID_KB_MOD_WIN;   continue; }
+
+        uint8_t k = 0;
+        if (s[1] == '\0') {
+            k = char_to_vk(s[0]);
+        } else {
+            for (size_t i = 0; i < sizeof(s_key_names) / sizeof(s_key_names[0]); i++) {
+                if (strcasecmp(s, s_key_names[i].name) == 0) { k = s_key_names[i].vk; break; }
+            }
+        }
+        if (k == 0 || vk != 0) return false;   /* unknown name, or a second main key */
+        vk = k;
+    }
+    if (vk == 0) return false;
+
+    *vk_out   = vk;
+    *mods_out = mods;
+    return true;
+}
+
+static void load_sidebar(const cJSON *root, ui_touchpad_config_t *cfg)
+{
+    cfg->sidebar_mode = TP_SIDEBAR_NONE;
+
+    const cJSON *mode = cJSON_GetObjectItem(root, "sidebar_mode");
+    if (cJSON_IsString(mode) && mode->valuestring) {
+        if      (strcasecmp(mode->valuestring, "wheel")   == 0) cfg->sidebar_mode = TP_SIDEBAR_WHEEL;
+        else if (strcasecmp(mode->valuestring, "hotkeys") == 0) cfg->sidebar_mode = TP_SIDEBAR_HOTKEYS;
+    }
+    if (cfg->sidebar_mode != TP_SIDEBAR_HOTKEYS) return;
+
+    const cJSON *arr = cJSON_GetObjectItem(root, "hotkeys");
+    if (!cJSON_IsArray(arr)) return;
+
+    const cJSON *it;
+    cJSON_ArrayForEach(it, arr) {
+        if (cfg->hotkey_count >= TP_HOTKEY_MAX) {
+            ESP_LOGW(TAG, "more than %d hotkeys, extra ignored", TP_HOTKEY_MAX);
+            break;
+        }
+        tp_hotkey_t *hk = &cfg->hotkeys[cfg->hotkey_count];
+        memset(hk, 0, sizeof(*hk));
+        str_field(it, "label", hk->label, sizeof(hk->label));
+        str_field(it, "icon",  hk->icon,  sizeof(hk->icon));
+
+        if (!parse_keys(cJSON_GetObjectItem(it, "keys"), &hk->vk, &hk->mods)) {
+            ESP_LOGW(TAG, "hotkey \"%s\": invalid keys, skipped", hk->label);
+            continue;
+        }
+        cfg->hotkey_count++;
+    }
+}
+
+/* -----------------------------------------------------------------------
  * Public API
  * ----------------------------------------------------------------------- */
 bool ui_touchpad_config_load(ui_touchpad_config_t *cfg)
@@ -79,6 +182,7 @@ bool ui_touchpad_config_load(ui_touchpad_config_t *cfg)
 
     str_field(root, "bg_image", cfg->bg_image, sizeof(cfg->bg_image));
     str_field(root, "keyboard_icon", cfg->keyboard_icon, sizeof(cfg->keyboard_icon));
+    load_sidebar(root, cfg);
 
     cJSON *settings_obj = cJSON_GetObjectItem(root, "settings");
     if (cJSON_IsObject(settings_obj)) {

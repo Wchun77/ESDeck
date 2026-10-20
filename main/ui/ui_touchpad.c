@@ -107,7 +107,9 @@ static lv_obj_t *s_pad        = NULL;
 static lv_obj_t *s_dot        = NULL;       /* finger position indicator */
 
 static lv_obj_t *s_kb_cell    = NULL;       /* sidebar: keyboard button cell */
-static lv_obj_t *s_wheel      = NULL;       /* sidebar: wheel strip */
+static lv_obj_t *s_wheel      = NULL;       /* sidebar: wheel strip (sidebar_mode "wheel") */
+static lv_obj_t *s_hk_cont    = NULL;       /* sidebar: hotkey buttons (sidebar_mode "hotkeys") */
+static int       s_hk_down    = -1;         /* hotkey currently held, -1 = none */
 static lv_obj_t *s_wheel_grip = NULL;       /* moving grip lines inside the wheel track */
 
 static lv_indev_t *s_touch_indev   = NULL;
@@ -285,6 +287,7 @@ static void flush_timer_cb(lv_timer_t *t)
         ESP_LOGI(TAG, "click");
     }
     usb_hid_tp_flush();
+    usb_hid_kb_flush();   /* sidebar hotkeys go out on the keyboard report path */
 }
 
 static void pad_move_dot(void)
@@ -491,6 +494,97 @@ static lv_obj_t *make_plain_obj(lv_obj_t *parent)
     return o;
 }
 
+/* Put assets/side_icons/<file> on btn if the file exists (same handling as
+ * the gear's side_icon in ui_settings_apply_appearance()). */
+static bool add_side_icon(lv_obj_t *btn, const char *file)
+{
+    if (!file || !file[0]) return false;
+
+    char icon_path[sizeof("S:") + sizeof(SD_PATH_ASSETS_SIDE_ICON) + 1 + UI_SETTINGS_SIDE_ICON_LEN];
+    snprintf(icon_path, sizeof(icon_path), "S:%s/%s", SD_PATH_ASSETS_SIDE_ICON, file);
+
+    FILE *f = fopen(icon_path + 2, "r");   /* skip the "S:" LVGL drive letter */
+    if (!f) {
+        ESP_LOGW(TAG, "icon not found: %s (falling back to text)", icon_path);
+        return false;
+    }
+    fclose(f);
+
+    lv_obj_t *img = lv_img_create(btn);
+    lv_img_set_src(img, icon_path);
+    lv_obj_center(img);
+    lv_obj_set_style_clip_corner(btn, true, 0);
+    return true;
+}
+
+static void hotkey_release(void)
+{
+    if (s_hk_down < 0) return;
+    const tp_hotkey_t *hk = &s_cfg.hotkeys[s_hk_down];
+    usb_hid_kb_key(false, hk->vk, hk->mods);
+    usb_hid_kb_flush();
+    s_hk_down = -1;
+}
+
+/* Hotkey button: real key down on press, up on release (modifiers ride
+ * along, ESDeckPC wraps them around the key). No auto-repeat. */
+static void hotkey_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_cfg.hotkey_count) return;
+
+    if (code == LV_EVENT_PRESSED) {
+        leave_settings();
+        hotkey_release();
+        const tp_hotkey_t *hk = &s_cfg.hotkeys[idx];
+        usb_hid_kb_key(true, hk->vk, hk->mods);
+        usb_hid_kb_flush();
+        s_hk_down = idx;
+        ESP_LOGI(TAG, "hotkey %d \"%s\" vk=0x%02X mods=0x%02X", idx, hk->label, hk->vk, hk->mods);
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        hotkey_release();
+    }
+}
+
+static void build_hotkeys(lv_obj_t *sidebar)
+{
+    if (s_cfg.hotkey_count == 0) return;
+
+    /* Same 80 px cells as the keyboard / gear buttons, stacked between them. */
+    s_hk_cont = make_plain_obj(sidebar);
+    lv_obj_set_size(s_hk_cont, SB_CELL, SCREEN_H - SB_CELL * 2);
+    lv_obj_set_pos(s_hk_cont, 0, SB_CELL);
+    lv_obj_set_style_bg_opa(s_hk_cont, LV_OPA_TRANSP, 0);
+    lv_obj_clear_flag(s_hk_cont, LV_OBJ_FLAG_CLICKABLE);
+
+    for (int i = 0; i < s_cfg.hotkey_count; i++) {
+        const tp_hotkey_t *hk = &s_cfg.hotkeys[i];
+
+        lv_obj_t *btn = lv_btn_create(s_hk_cont);
+        lv_obj_set_size(btn, SB_BTN, SB_BTN);
+        lv_obj_set_pos(btn, SB_PAD, i * SB_CELL + SB_PAD);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(COL_BTN), 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(COL_BTN_PRESSED), LV_STATE_PRESSED);
+        lv_obj_set_style_radius(btn, 8, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_set_style_pad_all(btn, 2, 0);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_PRESS_LOCK);
+        lv_obj_add_event_cb(btn, hotkey_cb, LV_EVENT_ALL, (void *)(intptr_t)i);
+
+        if (!add_side_icon(btn, hk->icon)) {
+            lv_obj_t *lbl = lv_label_create(btn);
+            lv_label_set_text(lbl, hk->label[0] ? hk->label : "?");
+            lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+            lv_obj_set_width(lbl, SB_BTN - 4);
+            lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+            lv_obj_set_style_text_color(lbl, lv_color_hex(COL_TEXT), 0);
+            lv_obj_center(lbl);
+        }
+    }
+}
+
 static void build_sidebar(lv_obj_t *sidebar)
 {
     /* Keyboard button cell -- mirrors the gear cell in ui.c. */
@@ -510,30 +604,19 @@ static void build_sidebar(lv_obj_t *sidebar)
     /* keyboard_icon from config, same handling as the gear's side_icon
      * (ui_settings_apply_appearance()): image if the file exists, else
      * the keyboard glyph. */
-    bool has_icon = false;
-    if (s_cfg.keyboard_icon[0]) {
-        char icon_path[sizeof("S:") + sizeof(SD_PATH_ASSETS_SIDE_ICON) + 1 + UI_SETTINGS_SIDE_ICON_LEN];
-        snprintf(icon_path, sizeof(icon_path), "S:%s/%s", SD_PATH_ASSETS_SIDE_ICON, s_cfg.keyboard_icon);
-
-        FILE *f = fopen(icon_path + 2, "r");   /* skip the "S:" LVGL drive letter */
-        if (f) {
-            fclose(f);
-            lv_obj_t *img = lv_img_create(kb_btn);
-            lv_img_set_src(img, icon_path);
-            lv_obj_center(img);
-            lv_obj_set_style_clip_corner(kb_btn, true, 0);
-            has_icon = true;
-        } else {
-            ESP_LOGW(TAG, "keyboard_icon set but not found: %s (falling back to glyph)", icon_path);
-        }
-    }
-
-    if (!has_icon) {
+    if (!add_side_icon(kb_btn, s_cfg.keyboard_icon)) {
         lv_obj_t *kb_lbl = lv_label_create(kb_btn);
         lv_label_set_text(kb_lbl, LV_SYMBOL_KEYBOARD);
         lv_obj_set_style_text_font(kb_lbl, &lv_font_montserrat_24, 0);
         lv_obj_center(kb_lbl);
     }
+
+    /* Middle area: per sidebar_mode -- default "none" leaves it empty. */
+    if (s_cfg.sidebar_mode == TP_SIDEBAR_HOTKEYS) {
+        build_hotkeys(sidebar);
+        return;
+    }
+    if (s_cfg.sidebar_mode != TP_SIDEBAR_WHEEL) return;
 
     /* Wheel strip */
     s_wheel = make_plain_obj(sidebar);
@@ -805,6 +888,7 @@ void ui_touchpad_exit(void)
     s_wheel_coast = 0;
     push_buttons();
     usb_hid_tp_flush();
+    hotkey_release();   /* never leave a hotkey combo held on the PC */
 
     if (s_flush_timer) {
         lv_timer_del(s_flush_timer);
@@ -838,6 +922,10 @@ void ui_touchpad_exit(void)
     if (s_wheel) {
         lv_obj_del(s_wheel);  /* also deletes grip lines */
         s_wheel = NULL;
+    }
+    if (s_hk_cont) {
+        lv_obj_del(s_hk_cont);
+        s_hk_cont = NULL;
     }
     s_wheel_grip = NULL;
 

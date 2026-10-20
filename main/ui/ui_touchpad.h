@@ -12,8 +12,9 @@
  *   - top strip     : Left / Right mouse buttons
  *   - rest          : touchpad surface (single finger, relative motion)
  * Sidebar (above the shared gear button from ui.c):
- *   - top button    : opens the existing mini keyboard (ui_keyboard_show())
- *   - middle strip  : scroll wheel (drag up/down)
+ *   - top button    : opens the mini keyboard (ui_keyboard_show())
+ *   - middle area   : per config sidebar_mode -- empty (default), scroll
+ *                     wheel, or up to TP_HOTKEY_MAX hotkey buttons
  *
  * Pad gestures: tap = left click (sent after a 250 ms double-tap window),
  * tap + tap = double click, tap + touch-and-move = drag.
