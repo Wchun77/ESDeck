@@ -3,6 +3,7 @@
 #include "ui_settings.h"
 #include "ui_monitor.h"
 #include "ui_media.h"
+#include "ui_touchpad.h"
 #include "lvgl.h"
 
 #define SCREEN_W  800
@@ -83,6 +84,9 @@ static void dialog_confirm_cb(lv_event_t *e)
         ui_monitor_exit();
     } else if (mode == UI_MODE_MEDIA) {
         ui_media_exit();
+    } else if (mode == UI_MODE_TOUCHPAD) {
+        /* No timer to stop, but exit restores the touch read period. */
+        ui_touchpad_exit();
     }
 
     lv_obj_t *black = lv_obj_create(lv_scr_act());

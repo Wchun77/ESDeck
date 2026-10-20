@@ -5,7 +5,8 @@
 typedef enum {
     UI_MODE_DECK    = 0,
     UI_MODE_MONITOR = 1,
-    UI_MODE_MEDIA   = 2,
+    UI_MODE_MEDIA    = 2,
+    UI_MODE_TOUCHPAD = 3,
 } ui_mode_t;
 
 /* Settings page appearance -- bg_image + side_icon, same filename-only

@@ -6,6 +6,7 @@
 #include "ui_monitor.h"
 #include "ui_deck.h"
 #include "ui_media.h"
+#include "ui_touchpad.h"
 #include "ui_img_pool.h"
 #include "ui_log_view.h"
 #include "usb/usb_hid.h"
@@ -44,9 +45,10 @@
 typedef enum {
     SETMASK_DECK    = 1 << 0,
     SETMASK_MONITOR = 1 << 1,
-    SETMASK_MEDIA   = 1 << 2,
-    SETMASK_BOTH    = SETMASK_DECK | SETMASK_MONITOR,
-    SETMASK_ALL     = SETMASK_DECK | SETMASK_MONITOR | SETMASK_MEDIA,
+    SETMASK_MEDIA    = 1 << 2,
+    SETMASK_TOUCHPAD = 1 << 3,
+    SETMASK_BOTH     = SETMASK_DECK | SETMASK_MONITOR,
+    SETMASK_ALL      = SETMASK_DECK | SETMASK_MONITOR | SETMASK_MEDIA | SETMASK_TOUCHPAD,
 } setting_mask_t;
 
 typedef enum {
@@ -184,6 +186,24 @@ static void enter_media_task(void *arg)
 }
 
 /* -----------------------------------------------------------------------
+ * Any -> Touchpad background task -- same shape as enter_media_task():
+ * nothing to preload yet, the delay just keeps the switching screen up
+ * for a beat.
+ * ----------------------------------------------------------------------- */
+static void on_enter_touchpad_done(void *arg)
+{
+    ui_touchpad_enter(ui_get_sidebar());
+    ui_hide_switching_screen();
+}
+
+static void enter_touchpad_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    lv_async_call(on_enter_touchpad_done, NULL);
+    vTaskDelete(NULL);
+}
+
+/* -----------------------------------------------------------------------
  * Monitor -> Deck background task
  * ----------------------------------------------------------------------- */
 static void on_back_to_deck_done(void *arg)
@@ -300,7 +320,8 @@ static void switch_to_mode(ui_mode_t target)
     switch (s_mode) {
     case UI_MODE_DECK:    ui_deck_destroy(); break;
     case UI_MODE_MONITOR: ui_monitor_exit(); break;
-    case UI_MODE_MEDIA:   ui_media_exit();   break;
+    case UI_MODE_MEDIA:    ui_media_exit();    break;
+    case UI_MODE_TOUCHPAD: ui_touchpad_exit(); break;
     }
 
     s_mode = target;
@@ -331,12 +352,19 @@ static void switch_to_mode(ui_mode_t target)
         lv_refr_now(NULL);
         xTaskCreate(enter_media_task, "enter_media", 4096, NULL, 3, NULL);
         break;
+
+    case UI_MODE_TOUCHPAD:
+        ui_show_switching_screen("Entering Touchpad Mode...");
+        lv_refr_now(NULL);
+        xTaskCreate(enter_touchpad_task, "enter_tpad", 4096, NULL, 3, NULL);
+        break;
     }
 }
 
 static void item_mode_to_deck_cb(lv_event_t *e)    { (void)e; switch_to_mode(UI_MODE_DECK); }
 static void item_mode_to_monitor_cb(lv_event_t *e) { (void)e; switch_to_mode(UI_MODE_MONITOR); }
 static void item_mode_to_media_cb(lv_event_t *e)   { (void)e; switch_to_mode(UI_MODE_MEDIA); }
+static void item_mode_to_touchpad_cb(lv_event_t *e) { (void)e; switch_to_mode(UI_MODE_TOUCHPAD); }
 
 static void info_dismiss_cb(lv_event_t *e)
 {
@@ -594,7 +622,9 @@ static void item_boot_anim_cb(lv_event_t *e)
  * growing this pattern.
  * ----------------------------------------------------------------------- */
 static const setting_node_t s_custom_menu[] = {
-    { "Select Config",  SETTING_ACTION, SETMASK_ALL, item_config_cb,    NULL, 0 },
+    /* Touchpad has no config picker yet (item_config_cb would fall
+     * through to Deck's dialog), so the row is hidden there for now. */
+    { "Select Config",  SETTING_ACTION, SETMASK_BOTH | SETMASK_MEDIA, item_config_cb, NULL, 0 },
     { "Boot Animation", SETTING_ACTION, SETMASK_ALL, item_boot_anim_cb, NULL, 0 },
 };
 
@@ -626,9 +656,10 @@ static const setting_node_t s_bluetooth_menu[] = {
  * "switch to the mode you're already in". */
 static const setting_node_t s_mode_menu[] = {
     { "Storage Mode", SETTING_ACTION, SETMASK_ALL,                       item_msc_cb,             NULL, 0 },
-    { "Deck Mode",    SETTING_ACTION, SETMASK_MONITOR | SETMASK_MEDIA,   item_mode_to_deck_cb,    NULL, 0 },
-    { "Monitor Mode", SETTING_ACTION, SETMASK_DECK | SETMASK_MEDIA,      item_mode_to_monitor_cb, NULL, 0 },
-    { "Media Mode",   SETTING_ACTION, SETMASK_BOTH,                      item_mode_to_media_cb,   NULL, 0 },
+    { "Deck Mode",     SETTING_ACTION, SETMASK_ALL & ~SETMASK_DECK,     item_mode_to_deck_cb,     NULL, 0 },
+    { "Monitor Mode",  SETTING_ACTION, SETMASK_ALL & ~SETMASK_MONITOR,  item_mode_to_monitor_cb,  NULL, 0 },
+    { "Media Mode",    SETTING_ACTION, SETMASK_ALL & ~SETMASK_MEDIA,    item_mode_to_media_cb,    NULL, 0 },
+    { "Touchpad Mode", SETTING_ACTION, SETMASK_ALL & ~SETMASK_TOUCHPAD, item_mode_to_touchpad_cb, NULL, 0 },
 };
 
 static const setting_node_t s_root_menu[] = {
@@ -637,7 +668,7 @@ static const setting_node_t s_root_menu[] = {
     { "Bluetooth",     SETTING_SUBMENU, SETMASK_ALL,  NULL, s_bluetooth_menu, 2 },
 #endif
     { "Custom",        SETTING_SUBMENU, SETMASK_ALL,  NULL, s_custom_menu, 2 },
-    { "Mode",          SETTING_SUBMENU, SETMASK_ALL,  NULL, s_mode_menu, 4 },
+    { "Mode",          SETTING_SUBMENU, SETMASK_ALL,  NULL, s_mode_menu, 5 },
     { "Mini Keyboard", SETTING_ACTION,  SETMASK_DECK, item_keyboard_cb, NULL, 0 },
 };
 
@@ -709,6 +740,8 @@ static void close_settings(void)
         ui_deck_reselect_current();
     else if (s_mode == UI_MODE_MONITOR)
         ui_monitor_reselect_current();
+    else if (s_mode == UI_MODE_TOUCHPAD)
+        ui_touchpad_reselect_current();
     else
         ui_media_reselect_current();
 }
@@ -1198,6 +1231,8 @@ void ui_settings_select(void)
         ui_deck_deselect_current();
     else if (s_mode == UI_MODE_MONITOR)
         ui_monitor_deselect_current();
+    else if (s_mode == UI_MODE_TOUCHPAD)
+        ui_touchpad_deselect_current();
     else
         ui_media_deselect_current();
 

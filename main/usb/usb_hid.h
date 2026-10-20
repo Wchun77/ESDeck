@@ -143,7 +143,7 @@ void usb_hid_media_prev(void);
 void usb_hid_media_seek(uint32_t position_ms);
 
 /* Reply to a CMD_QUERY with current UI mode.
- * mode: 0=deck, 1=monitor, 2=media (matches ui_mode_t in ui_settings.h --
+ * mode: 0=deck, 1=monitor, 2=media, 3=touchpad (matches ui_mode_t in ui_settings.h --
  * usb_hid.c intentionally does not #include ui_settings.h to avoid a
  * layering dependency, so the caller passes the raw enum value). */
 void usb_hid_reply_mode(uint8_t mode);

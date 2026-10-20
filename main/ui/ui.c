@@ -18,7 +18,7 @@ static lv_obj_t *s_switching_cover = NULL;
 
 /* -----------------------------------------------------------------------
  * Mode query callback — called from TinyUSB task via usb_hid.
- * Returns the raw ui_mode_t value (0=deck, 1=monitor, 2=media) -- usb_hid.c
+ * Returns the raw ui_mode_t value (0=deck, 1=monitor, 2=media, 3=touchpad) -- usb_hid.c
  * intentionally doesn't know about ui_mode_t, see usb_hid_reply_mode().
  * ----------------------------------------------------------------------- */
 static uint8_t mode_query_cb(void)
