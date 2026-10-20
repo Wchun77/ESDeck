@@ -64,6 +64,12 @@ static const char *TAG = "TOUCHPAD";
 #define TP_MATCH_MAX_PX     150   /* moved less than this between reads = same finger */
 #define TP_AXIS_LOCK_PX     10    /* two-finger travel before locking vertical / horizontal */
 #define TP_SWIPE_TRIGGER_PX 80    /* two-finger horizontal travel for one Back / Forward */
+/* Soft start: GT911 holds the coordinate for ~150 ms after touch-down,
+ * then catches up in ~40 ms -- sent as-is that burst reads as a flick and
+ * Windows' pointer acceleration throws the cursor. The first
+ * TP_SOFT_START_PX of each touch ramp from TP_SOFT_START_GAIN up to full. */
+#define TP_SOFT_START_PX    20
+#define TP_SOFT_START_GAIN  0.3f
 #define WHEEL_NOTCH_PX      24    /* grip line spacing (visual only) */
 /* Scroll direction / speed / inertia / tap-to-click are runtime preferences,
  * see "Preferences" below (Settings > Custom > Touchpad). */
@@ -288,10 +294,12 @@ static void send_wheel_px(int finger_px)
 }
 
 /* Pad finger motion -> cursor, with the Cursor Speed preference. */
-static void send_move(int dx, int dy)
+/* k = extra gain on top of Cursor Speed (soft start), 1.0 = none. */
+static void send_move(int dx, int dy, float k)
 {
-    float fx = (float)dx * (float)s_cursor_pct / 100.0f + s_move_rem_x;
-    float fy = (float)dy * (float)s_cursor_pct / 100.0f + s_move_rem_y;
+    float g  = (float)s_cursor_pct / 100.0f * k;
+    float fx = (float)dx * g + s_move_rem_x;
+    float fy = (float)dy * g + s_move_rem_y;
     int ix = (int)fx, iy = (int)fy;
     s_move_rem_x = fx - (float)ix;
     s_move_rem_y = fy - (float)iy;
@@ -625,7 +633,10 @@ static void gesture_update(int pad_count, int dx_sum, int dy_sum, int moved)
     }
 
     if (dx_sum == 0 && dy_sum == 0) return;
-    send_move(dx_sum, dy_sum);
+    float k = 1.0f;
+    if (s_pad_travel < TP_SOFT_START_PX)
+        k = TP_SOFT_START_GAIN + (1.0f - TP_SOFT_START_GAIN) * (float)s_pad_travel / (float)TP_SOFT_START_PX;
+    send_move(dx_sum, dy_sum, k);
     s_pad_travel += (uint32_t)(abs(dx_sum) + abs(dy_sum));
 
     if (s_second_touch && !s_dragging && tap_drag_enabled() && s_pad_travel >= TP_TAP_MAX_TRAVEL) {
