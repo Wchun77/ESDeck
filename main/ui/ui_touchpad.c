@@ -433,9 +433,13 @@ static void build_sidebar(lv_obj_t *sidebar)
     lv_obj_set_pos(s_wheel, WHEEL_X, WHEEL_Y);
     lv_obj_set_style_bg_color(s_wheel, lv_color_hex(COL_SURFACE), 0);
     lv_obj_set_style_radius(s_wheel, 8, 0);
-    lv_obj_set_style_clip_corner(s_wheel, true, 0);
+    /* No clip_corner: the grip lines sit in an inner track that never
+     * reaches the rounded corners, and clip_corner makes every redraw of
+     * the strip (press highlight) noticeably more expensive. */
     lv_obj_add_flag(s_wheel, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
-    lv_obj_clear_flag(s_wheel, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    /* Never let a vertical swipe get picked up as a parent scroll (would
+     * steal the press with PRESS_LOST). */
+    lv_obj_clear_flag(s_wheel, LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_SCROLL_CHAIN);
     lv_obj_add_event_cb(s_wheel, wheel_cb, LV_EVENT_ALL, NULL);
 
     /* Grip lines live in a clipped track between the arrows. The grip
@@ -626,7 +630,7 @@ static void build_page(lv_obj_t *scr)
     lv_obj_set_style_border_width(s_pad, 1, 0);
     lv_obj_set_style_border_color(s_pad, lv_color_hex(COL_BORDER), 0);
     lv_obj_add_flag(s_pad, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
-    lv_obj_clear_flag(s_pad, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_clear_flag(s_pad, LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_SCROLL_CHAIN);
     lv_obj_add_event_cb(s_pad, pad_cb, LV_EVENT_ALL, NULL);
     if (has_bg) lv_obj_set_style_bg_opa(s_pad, OPA_SURFACE_ON_BG, 0);
 
@@ -773,6 +777,11 @@ void ui_touchpad_deselect_current(void)
 
 void ui_touchpad_reselect_current(void)
 {
-    if (!s_page) return;
+    /* Only when actually hidden: lv_obj_clear_flag(HIDDEN) invalidates the
+     * whole object even if it was already visible, and leave_settings()
+     * calls this on every wheel / keyboard-button press -- an unconditional
+     * clear meant a full 720x480 page redraw (VSYNC-locked) right at touch
+     * down, so the wheel ignored the first part of a quick swipe. */
+    if (!s_page || !lv_obj_has_flag(s_page, LV_OBJ_FLAG_HIDDEN)) return;
     lv_obj_clear_flag(s_page, LV_OBJ_FLAG_HIDDEN);
 }
