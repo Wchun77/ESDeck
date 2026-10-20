@@ -10,8 +10,7 @@
  *   {
  *       "bg_image": "desk.jpg",
  *       "keyboard_icon": "kb.png",
- *       "sidebar_mode": "hotkeys",          // "none" (default) | "wheel" | "hotkeys"
- *       "hotkeys": [                        // up to TP_HOTKEY_MAX, only for "hotkeys"
+ *       "hotkeys": [                        // up to TP_HOTKEY_MAX
  *           { "label": "Copy", "icon": "copy.png", "keys": ["ctrl", "c"] }
  *       ],
  *       "settings": {
@@ -24,9 +23,10 @@
  * image (under assets/side_icons, same as any side_icon); empty or
  * missing file = LV_SYMBOL_KEYBOARD glyph.
  *
- * Sidebar middle area (between the keyboard button and the gear):
- *   none    -- empty (default)
- *   wheel   -- scroll wheel strip
+ * Sidebar middle area (between the keyboard button and the gear) is picked
+ * on the device (Settings > Custom > Touchpad > Sidebar, NVS -- see
+ * ui_touchpad.h); a "sidebar_mode" field from older configs is ignored.
+ * In Hotkeys mode it shows these, packed from the top:
  *   hotkeys -- up to TP_HOTKEY_MAX buttons, each one key combo. "keys" uses
  *              the same names as a Deck "hotkey" action (modifiers ctrl /
  *              shift / alt / win + one key: a-z, 0-9, punctuation, enter,
@@ -35,15 +35,10 @@
  *              modifier mask and sent through the keyboard report path, so
  *              no PC-side config is involved. Entries whose keys don't parse
  *              are skipped. Button shows icon (assets/side_icons) if the file
- *              exists, else label text. */
+ *              exists, else label text; empty label = the keys themselves
+ *              ("Ctrl+C"). */
 #define TP_HOTKEY_MAX        4
 #define TP_HOTKEY_LABEL_LEN  12
-
-typedef enum {
-    TP_SIDEBAR_NONE = 0,
-    TP_SIDEBAR_WHEEL,
-    TP_SIDEBAR_HOTKEYS,
-} tp_sidebar_mode_t;
 
 typedef struct {
     char    label[TP_HOTKEY_LABEL_LEN];
@@ -55,7 +50,6 @@ typedef struct {
 typedef struct {
     char bg_image[CFG_BG_LEN];         /* content bg, under SD_PATH_ASSETS_BG; empty = flat color */
     char keyboard_icon[UI_SETTINGS_SIDE_ICON_LEN]; /* under SD_PATH_ASSETS_SIDE_ICON; empty = glyph */
-    tp_sidebar_mode_t sidebar_mode;
     tp_hotkey_t       hotkeys[TP_HOTKEY_MAX];
     uint8_t           hotkey_count;
     ui_settings_appearance_t settings; /* Settings overlay's own bg_image + side_icon */

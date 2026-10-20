@@ -13,8 +13,9 @@
  *   - rest          : touchpad surface (single finger, relative motion)
  * Sidebar (above the shared gear button from ui.c):
  *   - top button    : opens the mini keyboard (ui_keyboard_show())
- *   - middle area   : per config sidebar_mode -- empty (default), scroll
- *                     wheel, or up to TP_HOTKEY_MAX hotkey buttons
+ *   - middle area   : per the Sidebar preference -- hotkey buttons from
+ *                     the config (default; none = empty), scroll wheel,
+ *                     or empty
  *
  * Pad gestures: tap = left click, tap + tap = double click, two-finger
  * move = scroll (vertical; horizontal per "2-Finger Swipe"), two-finger
@@ -97,3 +98,17 @@ typedef enum {
 const char *const *ui_touchpad_input_mode_names(void);   /* TP_INPUT_COUNT entries */
 int  ui_touchpad_get_input_mode(void);
 void ui_touchpad_set_input_mode(int mode);
+
+/* Sidebar: what fills the sidebar between the keyboard button and the gear.
+ * Hotkeys come from the selected config (none configured = empty strip).
+ * Setting it rebuilds the sidebar right away when Touchpad mode is up. */
+typedef enum {
+    TP_SIDEBAR_HOTKEYS = 0,   /* default */
+    TP_SIDEBAR_WHEEL,
+    TP_SIDEBAR_EMPTY,
+    TP_SIDEBAR_COUNT,
+} tp_sidebar_mode_t;
+
+const char *const *ui_touchpad_sidebar_mode_names(void); /* TP_SIDEBAR_COUNT entries */
+int  ui_touchpad_get_sidebar_mode(void);
+void ui_touchpad_set_sidebar_mode(int mode);

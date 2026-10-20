@@ -641,11 +641,8 @@ static void item_boot_anim_cb(lv_event_t *e)
  * so Custom's child_count below counts every row, shown or not. */
 /* Touchpad mode's own preferences (Custom > Touchpad), all persisted in
  * NVS by ui_touchpad.c. */
+/* Page 1 (7 rows): how input feels. Page 2: what's on screen. */
 static const setting_node_t s_touchpad_menu[] = {
-    { "Hide Labels",    SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
-      ui_touchpad_get_hide_labels, ui_touchpad_set_hide_labels },
-    { "Hide Buttons",   SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
-      ui_touchpad_get_hide_buttons, ui_touchpad_set_hide_buttons },
     { "Cursor Speed",   SETTING_VALUE,  SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL,
       ui_touchpad_cursor_speed_text, ui_touchpad_cursor_speed_step },
     { "Scroll Speed",   SETTING_VALUE,  SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL,
@@ -662,6 +659,13 @@ static const setting_node_t s_touchpad_menu[] = {
     { "Input Mode",     SETTING_CHOICE, SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL, NULL, NULL,
       ui_touchpad_input_mode_names, TP_INPUT_COUNT,
       ui_touchpad_get_input_mode, ui_touchpad_set_input_mode },
+    { "Sidebar",        SETTING_CHOICE, SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL, NULL, NULL,
+      ui_touchpad_sidebar_mode_names, TP_SIDEBAR_COUNT,
+      ui_touchpad_get_sidebar_mode, ui_touchpad_set_sidebar_mode },
+    { "Hide Buttons",   SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
+      ui_touchpad_get_hide_buttons, ui_touchpad_set_hide_buttons },
+    { "Hide Labels",    SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
+      ui_touchpad_get_hide_labels, ui_touchpad_set_hide_labels },
 };
 
 static const setting_node_t s_custom_menu[] = {

@@ -175,6 +175,7 @@
 #define CFG_NVS_KEY_TPAD_HIDE_BTN "tp_hide_btn"     /* "1" = no L/R buttons, pad fills the area */
 #define CFG_NVS_KEY_TPAD_SWIPE    "tp_swipe"        /* two-finger horizontal: tp_swipe_mode_t */
 #define CFG_NVS_KEY_TPAD_INPUT    "tp_input"        /* "0" = via ESDeckPC, "1" = USB HID keyboard + mouse */
+#define CFG_NVS_KEY_TPAD_SIDEBAR  "tp_sidebar"      /* sidebar middle area: tp_sidebar_mode_t */
 #define CFG_NVS_KEY_BOOT_ANIM "boot_anim"
 
 /* --------------------------------------------------------------------------

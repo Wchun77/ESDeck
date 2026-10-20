@@ -5,6 +5,7 @@
 #include "nvs_manager.h"
 
 #include <string.h>
+#include <ctype.h>         /* toupper */
 #include <stdio.h>
 #include <stdlib.h>
 #include <dirent.h>
@@ -121,17 +122,26 @@ static bool parse_keys(const cJSON *arr, uint8_t *vk_out, uint8_t *mods_out)
     return true;
 }
 
+/* Empty label -> the keys themselves, e.g. ["ctrl","c"] -> "Ctrl+C". */
+static void keys_to_label(const cJSON *arr, char *out, size_t out_size)
+{
+    size_t n = 0;
+    out[0] = '\0';
+    const cJSON *it;
+    cJSON_ArrayForEach(it, arr) {
+        if (!cJSON_IsString(it) || !it->valuestring || !it->valuestring[0]) continue;
+        const char *k = it->valuestring;
+        if (n > 0 && n + 1 < out_size) out[n++] = '+';
+        for (size_t i = 0; k[i] && n + 1 < out_size; i++)
+            out[n++] = (char)(i == 0 ? toupper((unsigned char)k[i]) : k[i]);
+        out[n] = '\0';
+    }
+}
+
+/* Hotkeys array, packed: entries that don't parse (no / bad keys) are
+ * skipped and the ones after move up. */
 static void load_sidebar(const cJSON *root, ui_touchpad_config_t *cfg)
 {
-    cfg->sidebar_mode = TP_SIDEBAR_NONE;
-
-    const cJSON *mode = cJSON_GetObjectItem(root, "sidebar_mode");
-    if (cJSON_IsString(mode) && mode->valuestring) {
-        if      (strcasecmp(mode->valuestring, "wheel")   == 0) cfg->sidebar_mode = TP_SIDEBAR_WHEEL;
-        else if (strcasecmp(mode->valuestring, "hotkeys") == 0) cfg->sidebar_mode = TP_SIDEBAR_HOTKEYS;
-    }
-    if (cfg->sidebar_mode != TP_SIDEBAR_HOTKEYS) return;
-
     const cJSON *arr = cJSON_GetObjectItem(root, "hotkeys");
     if (!cJSON_IsArray(arr)) return;
 
@@ -146,10 +156,12 @@ static void load_sidebar(const cJSON *root, ui_touchpad_config_t *cfg)
         str_field(it, "label", hk->label, sizeof(hk->label));
         str_field(it, "icon",  hk->icon,  sizeof(hk->icon));
 
-        if (!parse_keys(cJSON_GetObjectItem(it, "keys"), &hk->vk, &hk->mods)) {
-            ESP_LOGW(TAG, "hotkey \"%s\": invalid keys, skipped", hk->label);
+        const cJSON *keys = cJSON_GetObjectItem(it, "keys");
+        if (!parse_keys(keys, &hk->vk, &hk->mods)) {
+            ESP_LOGW(TAG, "hotkey \"%s\": no / invalid keys, skipped", hk->label);
             continue;
         }
+        if (!hk->label[0]) keys_to_label(keys, hk->label, sizeof(hk->label));
         cfg->hotkey_count++;
     }
 }

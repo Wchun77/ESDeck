@@ -138,10 +138,12 @@ static lv_obj_t *s_pad        = NULL;
 static bool    s_hide_buttons  = false;   /* pad covers the whole content area */
 static int     s_swipe_mode    = TP_SWIPE_HSCROLL;
 static int     s_input_mode    = TP_INPUT_ESDECKPC;
+static int     s_sidebar_mode  = TP_SIDEBAR_HOTKEYS;
+static lv_obj_t *s_sidebar     = NULL;    /* ui.c's sidebar, kept to rebuild the middle area */
 
 static lv_obj_t *s_kb_cell    = NULL;       /* sidebar: keyboard button cell */
-static lv_obj_t *s_wheel      = NULL;       /* sidebar: wheel strip (sidebar_mode "wheel") */
-static lv_obj_t *s_hk_cont    = NULL;       /* sidebar: hotkey buttons (sidebar_mode "hotkeys") */
+static lv_obj_t *s_wheel      = NULL;       /* sidebar: wheel strip (Sidebar = Wheel) */
+static lv_obj_t *s_hk_cont    = NULL;       /* sidebar: hotkey buttons (Sidebar = Hotkeys) */
 static int       s_hk_down    = -1;         /* hotkey currently held, -1 = none */
 static lv_obj_t *s_wheel_grip = NULL;       /* moving grip lines inside the wheel track */
 
@@ -875,8 +877,34 @@ static void build_hotkeys(lv_obj_t *sidebar)
     }
 }
 
+static void build_wheel(lv_obj_t *sidebar);
+
+/* Middle area per the Sidebar preference. */
+static void build_sidebar_middle(lv_obj_t *sidebar)
+{
+    if (s_sidebar_mode == TP_SIDEBAR_HOTKEYS)    build_hotkeys(sidebar);
+    else if (s_sidebar_mode == TP_SIDEBAR_WHEEL) build_wheel(sidebar);
+}
+
+static void destroy_sidebar_middle(void)
+{
+    hotkey_release();   /* never leave a hotkey combo held on the PC */
+    s_wheel_coast = 0;
+    if (s_wheel) {
+        lv_obj_del(s_wheel);  /* also deletes grip lines */
+        s_wheel = NULL;
+    }
+    if (s_hk_cont) {
+        lv_obj_del(s_hk_cont);
+        s_hk_cont = NULL;
+    }
+    s_wheel_grip = NULL;
+}
+
 static void build_sidebar(lv_obj_t *sidebar)
 {
+    s_sidebar = sidebar;
+
     /* Keyboard button cell -- mirrors the gear cell in ui.c. */
     s_kb_cell = make_plain_obj(sidebar);
     lv_obj_set_size(s_kb_cell, SB_CELL, SB_CELL);
@@ -901,14 +929,11 @@ static void build_sidebar(lv_obj_t *sidebar)
         lv_obj_center(kb_lbl);
     }
 
-    /* Middle area: per sidebar_mode -- default "none" leaves it empty. */
-    if (s_cfg.sidebar_mode == TP_SIDEBAR_HOTKEYS) {
-        build_hotkeys(sidebar);
-        return;
-    }
-    if (s_cfg.sidebar_mode != TP_SIDEBAR_WHEEL) return;
+    build_sidebar_middle(sidebar);
+}
 
-    /* Wheel strip */
+static void build_wheel(lv_obj_t *sidebar)
+{
     s_wheel = make_plain_obj(sidebar);
     lv_obj_set_size(s_wheel, WHEEL_W, WHEEL_H);
     lv_obj_set_pos(s_wheel, WHEEL_X, WHEEL_Y);
@@ -1142,10 +1167,10 @@ void ui_touchpad_enter(lv_obj_t *sidebar)
     ui_touchpad_config_load(&s_cfg);
     ui_settings_apply_appearance(&s_cfg.settings);
 
+    prefs_load();                    /* before the sidebar: Sidebar pref picks its middle */
     build_sidebar(sidebar);
     build_page(lv_scr_act());
     ui_touchpad_get_hide_labels();   /* load from NVS on first enter */
-    prefs_load();
     usb_hid_set_native_input(s_input_mode == TP_INPUT_USB_HID);
     s_move_rem_x = s_move_rem_y = s_wheel_rem = 0;
     apply_hide_labels();
@@ -1188,7 +1213,6 @@ void ui_touchpad_exit(void)
     s_wheel_coast = 0;
     push_buttons();
     usb_hid_tp_flush();
-    hotkey_release();   /* never leave a hotkey combo held on the PC */
 
     if (s_flush_timer) {
         lv_timer_del(s_flush_timer);
@@ -1219,15 +1243,8 @@ void ui_touchpad_exit(void)
         lv_obj_del(s_kb_cell);
         s_kb_cell = NULL;
     }
-    if (s_wheel) {
-        lv_obj_del(s_wheel);  /* also deletes grip lines */
-        s_wheel = NULL;
-    }
-    if (s_hk_cont) {
-        lv_obj_del(s_hk_cont);
-        s_hk_cont = NULL;
-    }
-    s_wheel_grip = NULL;
+    destroy_sidebar_middle();   /* also releases a held hotkey */
+    s_sidebar = NULL;
 
     ESP_LOGI(TAG, "exited touchpad mode");
 }
@@ -1302,6 +1319,8 @@ static void prefs_load(void)
     s_swipe_mode = nvs_get_int(CFG_NVS_KEY_TPAD_SWIPE, TP_SWIPE_HSCROLL);
     if (s_swipe_mode < 0 || s_swipe_mode >= TP_SWIPE_COUNT) s_swipe_mode = TP_SWIPE_HSCROLL;
     s_input_mode = nvs_get_int(CFG_NVS_KEY_TPAD_INPUT, TP_INPUT_ESDECKPC);
+    s_sidebar_mode = nvs_get_int(CFG_NVS_KEY_TPAD_SIDEBAR, TP_SIDEBAR_HOTKEYS);
+    if (s_sidebar_mode < 0 || s_sidebar_mode >= TP_SIDEBAR_COUNT) s_sidebar_mode = TP_SIDEBAR_HOTKEYS;
     if (s_input_mode < 0 || s_input_mode >= TP_INPUT_COUNT) s_input_mode = TP_INPUT_ESDECKPC;
     s_prefs_loaded = true;
 }
@@ -1398,6 +1417,26 @@ void ui_touchpad_set_input_mode(int mode)
     s_input_mode = mode;
     nvs_set_int(CFG_NVS_KEY_TPAD_INPUT, mode);
     usb_hid_set_native_input(mode == TP_INPUT_USB_HID);
+}
+
+static const char *const s_sidebar_names[TP_SIDEBAR_COUNT] = {
+    "Hotkeys", "Wheel", "Empty",
+};
+
+const char *const *ui_touchpad_sidebar_mode_names(void) { return s_sidebar_names; }
+int  ui_touchpad_get_sidebar_mode(void) { prefs_load(); return s_sidebar_mode; }
+
+void ui_touchpad_set_sidebar_mode(int mode)
+{
+    if (mode < 0 || mode >= TP_SIDEBAR_COUNT) return;
+    prefs_load();
+    if (mode == s_sidebar_mode) return;
+    s_sidebar_mode = mode;
+    nvs_set_int(CFG_NVS_KEY_TPAD_SIDEBAR, mode);
+    if (s_sidebar) {   /* Touchpad mode is up: swap the middle area now */
+        destroy_sidebar_middle();
+        build_sidebar_middle(s_sidebar);
+    }
 }
 
 void ui_touchpad_deselect_current(void)
