@@ -117,6 +117,29 @@ void usb_hid_tp_flush(void);
 /* Clear pending motion/wheel (queued button states are kept). */
 void usb_hid_tp_reset_motion(void);
 
+/* Keyboard IN report (ESP -> PC), mini keyboard (ui_keyboard.c):
+ *   { HID_KB_PAGE, HID_KB_CMD_DOWN/UP, vk, mods, 0, 0, 0, 0 }
+ *   vk   : Windows virtual-key code (PC sends it via SendInput as VK, not
+ *          Unicode, so the Windows IME can turn it into Chinese)
+ *   mods : HID_KB_MOD_* held for this key; PC presses them before the key
+ *          down and releases them after the key up
+ * Auto-repeat = repeated DOWN events, generated on the ESP. */
+#define HID_KB_PAGE         0xFC
+#define HID_KB_CMD_DOWN     0x01
+#define HID_KB_CMD_UP       0x02
+#define HID_KB_MOD_SHIFT    0x01
+#define HID_KB_MOD_CTRL     0x02
+#define HID_KB_MOD_ALT      0x04
+#define HID_KB_MOD_WIN      0x08
+
+/* Keyboard event queue -- LVGL thread only. Events are queued and sent in
+ * order by usb_hid_kb_flush() (one report per call); never silently
+ * dropped except when the queue is full, and a full queue always keeps
+ * room for key-ups. */
+bool usb_hid_kb_key(bool down, uint8_t vk, uint8_t mods);
+void usb_hid_kb_flush(void);
+bool usb_hid_kb_pending(void);
+
 void usb_hid_driver_install(void);
 
 void usb_hid_activate(void);

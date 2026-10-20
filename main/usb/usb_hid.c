@@ -763,6 +763,51 @@ void usb_hid_tp_flush(void)
 }
 
 /* -----------------------------------------------------------------------
+ * Keyboard reports (see usb_hid.h). LVGL thread only.
+ * ----------------------------------------------------------------------- */
+#define KB_Q_LEN  32
+
+typedef struct { uint8_t cmd, vk, mods; } kb_evt_t;
+
+static kb_evt_t s_kb_q[KB_Q_LEN];
+static uint8_t  s_kb_head  = 0;
+static uint8_t  s_kb_count = 0;
+
+bool usb_hid_kb_key(bool down, uint8_t vk, uint8_t mods)
+{
+    /* Last slot is reserved for key-ups so a release can always be queued. */
+    uint8_t limit = down ? (KB_Q_LEN - 1) : KB_Q_LEN;
+    if (s_kb_count >= limit) {
+        ESP_LOGW(TAG, "kb queue full, dropped %s vk=0x%02X", down ? "down" : "up", vk);
+        return false;
+    }
+    kb_evt_t *ev = &s_kb_q[(s_kb_head + s_kb_count) % KB_Q_LEN];
+    ev->cmd  = down ? HID_KB_CMD_DOWN : HID_KB_CMD_UP;
+    ev->vk   = vk;
+    ev->mods = mods;
+    s_kb_count++;
+    return true;
+}
+
+bool usb_hid_kb_pending(void) { return s_kb_count > 0; }
+
+void usb_hid_kb_flush(void)
+{
+    if (s_kb_count == 0) return;
+    if (!s_active || !tud_hid_ready()) return;
+
+    const kb_evt_t *ev = &s_kb_q[s_kb_head];
+    uint8_t report[8] = { HID_KB_PAGE, ev->cmd, ev->vk, ev->mods, 0, 0, 0, 0 };
+
+    /* Endpoint may get claimed in between (TinyUSB task) -- keep the event
+     * for the next flush instead of losing it. */
+    if (!tud_hid_report(0, report, sizeof(report))) return;
+
+    s_kb_head = (s_kb_head + 1) % KB_Q_LEN;
+    s_kb_count--;
+}
+
+/* -----------------------------------------------------------------------
  * TinyUSB HID callbacks
  * ----------------------------------------------------------------------- */
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance)

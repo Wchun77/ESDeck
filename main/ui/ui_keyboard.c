@@ -1,4 +1,5 @@
 #include "ui_keyboard.h"
+#include "usb/usb_hid.h"
 #include "lvgl.h"
 #include "esp_log.h"
 #include <stdint.h>
@@ -33,6 +34,9 @@ static const char *TAG = "KB";
 #define KB_PANEL_H   (KB_PAD * 2 + KB_ROWS * KB_STEP - KB_GAP)
 
 #define KB_DOUBLE_TAP_MS  350   /* second tap on a modifier within this = lock */
+#define KB_TIMER_MS        10   /* HID flush + auto-repeat tick */
+#define KB_REPEAT_DELAY_MS 400  /* hold this long before auto-repeat starts */
+#define KB_REPEAT_RATE_MS  35   /* then one repeat per this */
 
 /* Colors */
 #define COL_PANEL      0x1e1e1e
@@ -59,11 +63,14 @@ typedef enum {
     KK_GAP,         /* empty space, no button */
 } key_kind_t;
 
-#define MOD_SHIFT  0x01
-#define MOD_CTRL   0x02
-#define MOD_ALT    0x04
-#define MOD_WIN    0x08
+/* Same bit values as HID_KB_MOD_* in usb_hid.h, so mods can be sent as-is
+ * after masking off MOD_FN. */
+#define MOD_SHIFT  HID_KB_MOD_SHIFT
+#define MOD_CTRL   HID_KB_MOD_CTRL
+#define MOD_ALT    HID_KB_MOD_ALT
+#define MOD_WIN    HID_KB_MOD_WIN
 #define MOD_FN     0x10   /* local layer only, never sent */
+#define MOD_SEND_MASK (MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_WIN)
 
 typedef struct {
     uint8_t      w4;          /* width in quarter units; 0 = end of row */
@@ -155,6 +162,17 @@ static uint32_t         s_cur_col[KB_MAX_KEYS];
 static uint8_t  s_mod_oneshot = 0;    /* released after the next normal key */
 static uint8_t  s_mod_locked  = 0;    /* held until tapped again */
 static uint8_t  s_last_mod_tap     = 0;
+
+/* Currently held (pressed) normal key -- single touch, so at most one. The
+ * vk/mods captured at press time are reused for repeats and the release,
+ * so a modifier/Fn change mid-hold can't produce a mismatched key-up. */
+static bool        s_down        = false;
+static uint8_t     s_down_vk     = 0;
+static uint8_t     s_down_mods   = 0;
+static bool        s_down_repeat = false;   /* this key auto-repeats */
+static uint32_t    s_down_tick   = 0;
+static uint32_t    s_repeat_tick = 0;
+static lv_timer_t *s_timer       = NULL;
 static uint32_t s_last_mod_tap_ms  = 0;
 
 static uint8_t active_mods(void) { return s_mod_oneshot | s_mod_locked; }
@@ -207,57 +225,110 @@ static void refresh_keys(void)
 }
 
 /* -----------------------------------------------------------------------
- * Key handling (UI only for now -- logs what would be sent)
+ * Key handling
+ *
+ * Normal keys send a real down on PRESSED and up on RELEASED/PRESS_LOST
+ * (HID page 0xFC, see usb_hid.h), with auto-repeat generated here while
+ * held -- injected keys get no typematic repeat from Windows. Modifiers
+ * are sticky (tap = next key only, double tap = lock) and travel with
+ * each key event; ESDeckPC wraps the key with the matching modifier
+ * down/up.
  * ----------------------------------------------------------------------- */
-static void send_key(const kb_key_t *k)
+static void key_release(void)
 {
-    uint8_t mods = active_mods();
-    bool    fn   = (mods & MOD_FN) != 0;
-    uint8_t vk   = (fn && k->fn_vk) ? k->fn_vk : k->vk;
-
-    ESP_LOGI(TAG, "key vk=0x%02X%s%s%s%s",
-             vk,
-             (mods & MOD_CTRL)  ? " +Ctrl"  : "",
-             (mods & MOD_SHIFT) ? " +Shift" : "",
-             (mods & MOD_ALT)   ? " +Alt"   : "",
-             (mods & MOD_WIN)   ? " +Win"   : "");
-}
-
-static void key_cb(lv_event_t *e)
-{
-    int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (idx < 0 || idx >= s_key_count) return;
-    const kb_key_t *k = s_def[idx];
-
-    if (k->kind == KK_MOD) {
-        uint32_t now = lv_tick_get();
-        bool double_tap = (s_last_mod_tap == k->mod) &&
-                          (lv_tick_elaps(s_last_mod_tap_ms) < KB_DOUBLE_TAP_MS);
-
-        if (s_mod_locked & k->mod) {
-            s_mod_locked &= (uint8_t)~k->mod;               /* locked -> off */
-        } else if ((s_mod_oneshot & k->mod) && double_tap) {
-            s_mod_oneshot &= (uint8_t)~k->mod;              /* one-shot -> locked */
-            s_mod_locked  |= k->mod;
-        } else if (s_mod_oneshot & k->mod) {
-            s_mod_oneshot &= (uint8_t)~k->mod;              /* one-shot -> off */
-        } else {
-            s_mod_oneshot |= k->mod;                        /* off -> one-shot */
-        }
-
-        s_last_mod_tap    = k->mod;
-        s_last_mod_tap_ms = now;
-        refresh_keys();
-        return;
-    }
-
-    send_key(k);
+    if (!s_down) return;
+    s_down = false;
+    usb_hid_kb_key(false, s_down_vk, s_down_mods);
+    usb_hid_kb_flush();
 
     /* One-shot modifiers apply to exactly one key. */
     s_last_mod_tap = 0;
     if (s_mod_oneshot) {
         s_mod_oneshot = 0;
         refresh_keys();
+    }
+}
+
+static void key_press(const kb_key_t *k)
+{
+    if (s_down) key_release();   /* shouldn't happen with single touch */
+
+    uint8_t mods = active_mods();
+    bool    fn   = (mods & MOD_FN) != 0;
+    uint8_t vk   = (fn && k->fn_vk) ? k->fn_vk : k->vk;
+    if (vk == 0) return;
+
+    s_down        = true;
+    s_down_vk     = vk;
+    s_down_mods   = mods & MOD_SEND_MASK;
+    s_down_repeat = (vk != 0xA0);   /* the IME Shift tap must never repeat */
+    s_down_tick   = lv_tick_get();
+    s_repeat_tick = s_down_tick;
+
+    usb_hid_kb_key(true, s_down_vk, s_down_mods);
+    usb_hid_kb_flush();
+    ESP_LOGD(TAG, "down vk=0x%02X mods=0x%02X", s_down_vk, s_down_mods);
+}
+
+static void mod_cb(lv_event_t *e)
+{
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_key_count) return;
+    const kb_key_t *k = s_def[idx];
+
+    uint32_t now = lv_tick_get();
+    bool double_tap = (s_last_mod_tap == k->mod) &&
+                      (lv_tick_elaps(s_last_mod_tap_ms) < KB_DOUBLE_TAP_MS);
+
+    if (s_mod_locked & k->mod) {
+        s_mod_locked &= (uint8_t)~k->mod;               /* locked -> off */
+    } else if ((s_mod_oneshot & k->mod) && double_tap) {
+        s_mod_oneshot &= (uint8_t)~k->mod;              /* one-shot -> locked */
+        s_mod_locked  |= k->mod;
+    } else if (s_mod_oneshot & k->mod) {
+        s_mod_oneshot &= (uint8_t)~k->mod;              /* one-shot -> off */
+    } else {
+        s_mod_oneshot |= k->mod;                        /* off -> one-shot */
+    }
+
+    s_last_mod_tap    = k->mod;
+    s_last_mod_tap_ms = now;
+    refresh_keys();
+}
+
+static void key_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_key_count) return;
+
+    if (code == LV_EVENT_PRESSED) {
+        key_press(s_def[idx]);
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        key_release();
+    }
+}
+
+/* 10 ms: auto-repeat for the held key + push queued key events out. Keeps
+ * running after the keyboard closes until the queue drains, so a final
+ * key-up is never stranded; then deletes itself. */
+static void kb_timer_cb(lv_timer_t *t)
+{
+    if (s_down && s_down_repeat &&
+        lv_tick_elaps(s_down_tick) >= KB_REPEAT_DELAY_MS &&
+        lv_tick_elaps(s_repeat_tick) >= KB_REPEAT_RATE_MS) {
+        s_repeat_tick = lv_tick_get();
+        /* Only when the queue is empty -- never build up a backlog of
+         * repeats that keeps typing after the finger lifts. */
+        if (!usb_hid_kb_pending())
+            usb_hid_kb_key(true, s_down_vk, s_down_mods);
+    }
+
+    usb_hid_kb_flush();
+
+    if (!s_screen && !usb_hid_kb_pending()) {
+        lv_timer_del(t);
+        s_timer = NULL;
     }
 }
 
@@ -284,7 +355,10 @@ static void build_key(lv_obj_t *panel, const kb_key_t *k, int x, int y)
     lv_obj_set_style_shadow_width(btn, 0, 0);
     lv_obj_set_style_pad_all(btn, 0, 0);
     lv_obj_clear_flag(btn, LV_OBJ_FLAG_PRESS_LOCK);
-    lv_obj_add_event_cb(btn, key_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
+    if (k->kind == KK_MOD)
+        lv_obj_add_event_cb(btn, mod_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
+    else
+        lv_obj_add_event_cb(btn, key_cb, LV_EVENT_ALL, (void *)(intptr_t)idx);
 
     lv_obj_t *lbl = lv_label_create(btn);
     lv_label_set_text_static(lbl, k->lbl);
@@ -318,6 +392,7 @@ static void keyboard_exit_cb(lv_event_t *e)
 {
     (void)e;
     if (!s_screen) return;
+    key_release();          /* never leave a key held on the PC */
     lv_obj_del(s_screen);
     s_screen = NULL;
     s_key_count = 0;
@@ -359,4 +434,6 @@ void ui_keyboard_show(void)
 
     build_keys(panel);
     refresh_keys();
+
+    if (!s_timer) s_timer = lv_timer_create(kb_timer_cb, KB_TIMER_MS, NULL);
 }
