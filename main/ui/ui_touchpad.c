@@ -131,6 +131,7 @@ static lv_obj_t *s_pad        = NULL;
 /* More preferences (see "Preferences" below) */
 static bool    s_hide_buttons  = false;   /* pad covers the whole content area */
 static int     s_swipe_mode    = TP_SWIPE_HSCROLL;
+static int     s_input_mode    = TP_INPUT_ESDECKPC;
 
 static lv_obj_t *s_kb_cell    = NULL;       /* sidebar: keyboard button cell */
 static lv_obj_t *s_wheel      = NULL;       /* sidebar: wheel strip (sidebar_mode "wheel") */
@@ -1134,6 +1135,7 @@ void ui_touchpad_enter(lv_obj_t *sidebar)
     build_page(lv_scr_act());
     ui_touchpad_get_hide_labels();   /* load from NVS on first enter */
     prefs_load();
+    usb_hid_set_native_input(s_input_mode == TP_INPUT_USB_HID);
     s_move_rem_x = s_move_rem_y = s_wheel_rem = 0;
     apply_hide_labels();
     apply_layout();
@@ -1288,6 +1290,8 @@ static void prefs_load(void)
     s_hide_buttons = nvs_get_int(CFG_NVS_KEY_TPAD_HIDE_BTN, 0) != 0;
     s_swipe_mode = nvs_get_int(CFG_NVS_KEY_TPAD_SWIPE, TP_SWIPE_HSCROLL);
     if (s_swipe_mode < 0 || s_swipe_mode >= TP_SWIPE_COUNT) s_swipe_mode = TP_SWIPE_HSCROLL;
+    s_input_mode = nvs_get_int(CFG_NVS_KEY_TPAD_INPUT, TP_INPUT_ESDECKPC);
+    if (s_input_mode < 0 || s_input_mode >= TP_INPUT_COUNT) s_input_mode = TP_INPUT_ESDECKPC;
     s_prefs_loaded = true;
 }
 
@@ -1367,6 +1371,22 @@ void ui_touchpad_set_swipe_mode(int mode)
     prefs_load();
     s_swipe_mode = mode;
     nvs_set_int(CFG_NVS_KEY_TPAD_SWIPE, mode);
+}
+
+static const char *const s_input_names[TP_INPUT_COUNT] = {
+    "ESDeckPC", "USB HID",
+};
+
+const char *const *ui_touchpad_input_mode_names(void) { return s_input_names; }
+int  ui_touchpad_get_input_mode(void) { prefs_load(); return s_input_mode; }
+
+void ui_touchpad_set_input_mode(int mode)
+{
+    if (mode < 0 || mode >= TP_INPUT_COUNT) return;
+    prefs_load();
+    s_input_mode = mode;
+    nvs_set_int(CFG_NVS_KEY_TPAD_INPUT, mode);
+    usb_hid_set_native_input(mode == TP_INPUT_USB_HID);
 }
 
 void ui_touchpad_deselect_current(void)

@@ -659,6 +659,9 @@ static const setting_node_t s_touchpad_menu[] = {
     { "2-Finger Swipe", SETTING_CHOICE, SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL, NULL, NULL,
       ui_touchpad_swipe_mode_names, TP_SWIPE_COUNT,
       ui_touchpad_get_swipe_mode, ui_touchpad_set_swipe_mode },
+    { "Input Mode",     SETTING_CHOICE, SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL, NULL, NULL,
+      ui_touchpad_input_mode_names, TP_INPUT_COUNT,
+      ui_touchpad_get_input_mode, ui_touchpad_set_input_mode },
 };
 
 static const setting_node_t s_custom_menu[] = {
