@@ -1,344 +1,329 @@
 #include "ui_keyboard.h"
-#include "usb/usb_hid.h"
 #include "lvgl.h"
 #include "esp_log.h"
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+
+static const char *TAG = "KB";
 
 #define SCREEN_W    800
 #define SCREEN_H    480
 
 /*
- * Grid constants:
- *   KEY_W / KEY_H = 54
- *   GAP           = 4
- *   STEP          = 58  (KEY_W + GAP)
- *   PAD           = 20
+ * 60% layout, 5 rows x 15 units. Widths are in quarter units (4 = 1u) so
+ * 1.25u / 1.5u / 1.75u / 2.25u keys fit the same grid.
  *
- * Panel size:
- *   W = PAD + 11*STEP + KEY_W + PAD = 732
- *   H = PAD +  3*STEP + KEY_H + PAD = 268
+ *   1u step  = 52 px (48 key + 4 gap)
+ *   key px   = w4 * 13 - KB_GAP
+ *   panel W  = KB_PAD*2 + 15*52 - KB_GAP = 792
+ *   panel H  = KB_PAD*2 +  5*52 - KB_GAP = 272
+ *
+ * Slightly smaller keys than the old 54 px grid -- 15 columns of 54 px
+ * would not fit 800 px.
  */
-#define KB_PAD      20
-#define KB_KEY_W    54
-#define KB_KEY_H    54
-#define KB_GAP      4
-#define KB_STEP     58
-#define KB_COL(n)   (KB_PAD + (n) * KB_STEP)
-#define KB_ROW(n)   (KB_PAD + (n) * KB_STEP)
-#define KB_PANEL_W  (KB_PAD + 11 * KB_STEP + KB_KEY_W + KB_PAD)
-#define KB_PANEL_H  (KB_PAD +  3 * KB_STEP + KB_KEY_H + KB_PAD)
+#define KB_PAD       8
+#define KB_GAP       4
+#define KB_UNIT4     13                                   /* px per quarter unit */
+#define KB_STEP      (KB_UNIT4 * 4)                       /* 52 */
+#define KB_KEY_H     (KB_STEP - KB_GAP)                   /* 48 */
+#define KB_COLS_U    15
+#define KB_ROWS      5
+#define KB_PANEL_W   (KB_PAD * 2 + KB_COLS_U * KB_STEP - KB_GAP)
+#define KB_PANEL_H   (KB_PAD * 2 + KB_ROWS * KB_STEP - KB_GAP)
+
+#define KB_DOUBLE_TAP_MS  350   /* second tap on a modifier within this = lock */
+
+/* Colors */
+#define COL_PANEL      0x1e1e1e
+#define COL_KEY        0x3a3a3a
+#define COL_KEY_MOD    0x2c2c2c    /* modifiers / editing keys */
+#define COL_KEY_PRESS  0x585858
+#define COL_ACTIVE     0x0055cc    /* one-shot modifier */
+#define COL_LOCKED     0x2a7fff    /* locked modifier */
+#define COL_TEXT       0xeeeeee
+#define COL_TEXT_DIM   0xaaaaaa
+
+/* -----------------------------------------------------------------------
+ * Key table
+ *
+ * vk / fn_vk are Windows virtual-key codes -- the PC side will feed them
+ * to SendInput as VK (not Unicode) so the Windows IME can turn them into
+ * Chinese. The "IME" key (old Caps position) sends a plain, non-sticky
+ * Shift tap -- that's what toggles Chinese/English in the Windows IME.
+ * ----------------------------------------------------------------------- */
+typedef enum {
+    KK_NORMAL,      /* plain key: lbl / shift_lbl / fn_lbl */
+    KK_LETTER,      /* a-z: upper case while Shift is active */
+    KK_MOD,         /* sticky modifier, mod = MOD_* bit */
+    KK_GAP,         /* empty space, no button */
+} key_kind_t;
+
+#define MOD_SHIFT  0x01
+#define MOD_CTRL   0x02
+#define MOD_ALT    0x04
+#define MOD_WIN    0x08
+#define MOD_FN     0x10   /* local layer only, never sent */
+
+typedef struct {
+    uint8_t      w4;          /* width in quarter units; 0 = end of row */
+    key_kind_t   kind;
+    uint8_t      vk;
+    const char  *lbl;
+    const char  *shift_lbl;   /* NULL = same as lbl */
+    uint8_t      fn_vk;       /* 0 = no Fn function */
+    const char  *fn_lbl;
+    uint8_t      mod;         /* KK_MOD only */
+} kb_key_t;
+
+#define K(w, vk, l, sl)          { w, KK_NORMAL, vk, l, sl, 0, NULL, 0 }
+#define KF(w, vk, l, sl, fv, fl) { w, KK_NORMAL, vk, l, sl, fv, fl, 0 }
+#define KL(c, vk)                { 4, KK_LETTER, vk, c, NULL, 0, NULL, 0 }
+#define KM(w, vk, l, m)          { w, KK_MOD, vk, l, NULL, 0, NULL, m }
+#define KGAP(w)                  { w, KK_GAP, 0, NULL, NULL, 0, NULL, 0 }
+#define KEND                     { 0 }
+
+static const kb_key_t s_row0[] = {
+    KF(4, 0x1B, "Esc", NULL, 0xC0, "`"),
+    KF(4, '1', "1", "!", 0x70, "F1"),  KF(4, '2', "2", "@", 0x71, "F2"),
+    KF(4, '3', "3", "#", 0x72, "F3"),  KF(4, '4', "4", "$", 0x73, "F4"),
+    KF(4, '5', "5", "%", 0x74, "F5"),  KF(4, '6', "6", "^", 0x75, "F6"),
+    KF(4, '7', "7", "&", 0x76, "F7"),  KF(4, '8', "8", "*", 0x77, "F8"),
+    KF(4, '9', "9", "(", 0x78, "F9"),  KF(4, '0', "0", ")", 0x79, "F10"),
+    KF(4, 0xBD, "-", "_", 0x7A, "F11"), KF(4, 0xBB, "=", "+", 0x7B, "F12"),
+    KF(8, 0x08, LV_SYMBOL_BACKSPACE, NULL, 0x2E, "Del"),
+    KEND
+};
+static const kb_key_t s_row1[] = {
+    K(6, 0x09, "Tab", NULL),
+    KL("q", 'Q'), KL("w", 'W'), KL("e", 'E'), KL("r", 'R'), KL("t", 'T'),
+    KL("y", 'Y'), KL("u", 'U'), KL("i", 'I'), KL("o", 'O'), KL("p", 'P'),
+    K(4, 0xDB, "[", "{"), K(4, 0xDD, "]", "}"),
+    K(6, 0xDC, "\\", "|"),
+    KEND
+};
+static const kb_key_t s_row2[] = {
+    K(7, 0xA0, "IME", NULL),            /* plain Shift tap = IME Chinese/English */
+    KL("a", 'A'), KL("s", 'S'), KL("d", 'D'), KL("f", 'F'), KL("g", 'G'),
+    KL("h", 'H'), KL("j", 'J'), KL("k", 'K'), KL("l", 'L'),
+    K(4, 0xBA, ";", ":"), K(4, 0xDE, "'", "\""),
+    K(9, 0x0D, "Enter", NULL),
+    KEND
+};
+static const kb_key_t s_row3[] = {
+    KM(9, 0xA0, "Shift", MOD_SHIFT),
+    KL("z", 'Z'), KL("x", 'X'), KL("c", 'C'), KL("v", 'V'), KL("b", 'B'),
+    KL("n", 'N'), KL("m", 'M'),
+    K(4, 0xBC, ",", "<"), K(4, 0xBE, ".", ">"), K(4, 0xBF, "/", "?"),
+    KGAP(3),                                              /* up arrow sits right above down */
+    KF(4, 0x26, LV_SYMBOL_UP, NULL, 0x21, "PgUp"),
+    KGAP(4),
+    KEND
+};
+static const kb_key_t s_row4[] = {
+    KM(5, 0xA2, "Ctrl", MOD_CTRL),
+    KM(5, 0x5B, "Win",  MOD_WIN),
+    KM(5, 0xA4, "Alt",  MOD_ALT),
+    K(25, 0x20, "", NULL),
+    KM(4, 0x00, "Fn",   MOD_FN),
+    KM(4, 0xA3, "Ctrl", MOD_CTRL),
+    KF(4, 0x25, LV_SYMBOL_LEFT,  NULL, 0x24, "Home"),
+    KF(4, 0x28, LV_SYMBOL_DOWN,  NULL, 0x22, "PgDn"),
+    KF(4, 0x27, LV_SYMBOL_RIGHT, NULL, 0x23, "End"),
+    KEND
+};
+
+static const kb_key_t *const s_rows[KB_ROWS] = { s_row0, s_row1, s_row2, s_row3, s_row4 };
+
+#define KB_MAX_KEYS  72
 
 /* -----------------------------------------------------------------------
  * State
  * ----------------------------------------------------------------------- */
-static lv_obj_t *s_screen    = NULL;
-static lv_obj_t *s_abc_cont  = NULL;
-static lv_obj_t *s_sym_cont  = NULL;
-static lv_obj_t *s_tab_abc   = NULL;
-static lv_obj_t *s_tab_sym   = NULL;
+static lv_obj_t        *s_screen = NULL;
+static lv_obj_t        *s_btn[KB_MAX_KEYS];
+static lv_obj_t        *s_lbl[KB_MAX_KEYS];
+static const kb_key_t  *s_def[KB_MAX_KEYS];
+static int              s_key_count = 0;
 
-static lv_obj_t *s_shift_btn    = NULL;
-static bool      s_shift_active = false;
-static lv_obj_t *s_letter_lbls[26];
+/* Last applied label text / bg color per key -- refresh_keys() only
+ * touches widgets whose look actually changes, so tapping Ctrl redraws two
+ * buttons instead of invalidating every label on the panel. */
+static const char      *s_cur_txt[KB_MAX_KEYS];
+static uint32_t         s_cur_col[KB_MAX_KEYS];
 
-static lv_obj_t *s_sym_tab_abc      = NULL;
-static lv_obj_t *s_sym_tab_sym      = NULL;
-static lv_obj_t *s_sym_shift_btn    = NULL;
-static bool      s_sym_shift_active = false;
-static lv_obj_t *s_sym_digit_lbls[10];
-static lv_obj_t *s_sym_punct_lbls[10];
+static uint8_t  s_mod_oneshot = 0;    /* released after the next normal key */
+static uint8_t  s_mod_locked  = 0;    /* held until tapped again */
+static uint8_t  s_last_mod_tap     = 0;
+static uint32_t s_last_mod_tap_ms  = 0;
+
+static uint8_t active_mods(void) { return s_mod_oneshot | s_mod_locked; }
 
 /* -----------------------------------------------------------------------
- * Key builder helper
+ * Visual refresh
  * ----------------------------------------------------------------------- */
-static lv_obj_t *kb_btn(lv_obj_t *parent, int x, int y, int w, int h,
-                         const char *text, uint8_t keycode, lv_event_cb_t cb)
+static const char *const s_upper[26] = {
+    "A","B","C","D","E","F","G","H","I","J","K","L","M",
+    "N","O","P","Q","R","S","T","U","V","W","X","Y","Z",
+};
+
+static void set_label(int i, const char *txt)
 {
-    lv_obj_t *btn = lv_btn_create(parent);
+    if (s_cur_txt[i] == txt) return;
+    s_cur_txt[i] = txt;
+    lv_label_set_text_static(s_lbl[i], txt);
+}
+
+static void set_mod_look(int i, uint32_t col, bool locked)
+{
+    if (s_cur_col[i] == col) return;
+    s_cur_col[i] = col;
+    lv_obj_set_style_bg_color(s_btn[i], lv_color_hex(col), 0);
+    lv_obj_set_style_border_width(s_btn[i], locked ? 2 : 0, 0);
+}
+
+static void refresh_keys(void)
+{
+    uint8_t mods  = active_mods();
+    bool    shift = (mods & MOD_SHIFT) != 0;
+    bool    fn    = (mods & MOD_FN) != 0;
+
+    for (int i = 0; i < s_key_count; i++) {
+        const kb_key_t *k = s_def[i];
+
+        if (k->kind == KK_LETTER) {
+            set_label(i, shift ? s_upper[k->vk - 'A'] : k->lbl);
+        } else if (k->kind == KK_NORMAL) {
+            const char *txt = k->lbl;
+            if (fn && k->fn_lbl)            txt = k->fn_lbl;
+            else if (shift && k->shift_lbl) txt = k->shift_lbl;
+            set_label(i, txt);
+        } else if (k->kind == KK_MOD) {
+            if (s_mod_locked & k->mod)       set_mod_look(i, COL_LOCKED, true);
+            else if (s_mod_oneshot & k->mod) set_mod_look(i, COL_ACTIVE, false);
+            else                             set_mod_look(i, COL_KEY_MOD, false);
+        }
+    }
+}
+
+/* -----------------------------------------------------------------------
+ * Key handling (UI only for now -- logs what would be sent)
+ * ----------------------------------------------------------------------- */
+static void send_key(const kb_key_t *k)
+{
+    uint8_t mods = active_mods();
+    bool    fn   = (mods & MOD_FN) != 0;
+    uint8_t vk   = (fn && k->fn_vk) ? k->fn_vk : k->vk;
+
+    ESP_LOGI(TAG, "key vk=0x%02X%s%s%s%s",
+             vk,
+             (mods & MOD_CTRL)  ? " +Ctrl"  : "",
+             (mods & MOD_SHIFT) ? " +Shift" : "",
+             (mods & MOD_ALT)   ? " +Alt"   : "",
+             (mods & MOD_WIN)   ? " +Win"   : "");
+}
+
+static void key_cb(lv_event_t *e)
+{
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_key_count) return;
+    const kb_key_t *k = s_def[idx];
+
+    if (k->kind == KK_MOD) {
+        uint32_t now = lv_tick_get();
+        bool double_tap = (s_last_mod_tap == k->mod) &&
+                          (lv_tick_elaps(s_last_mod_tap_ms) < KB_DOUBLE_TAP_MS);
+
+        if (s_mod_locked & k->mod) {
+            s_mod_locked &= (uint8_t)~k->mod;               /* locked -> off */
+        } else if ((s_mod_oneshot & k->mod) && double_tap) {
+            s_mod_oneshot &= (uint8_t)~k->mod;              /* one-shot -> locked */
+            s_mod_locked  |= k->mod;
+        } else if (s_mod_oneshot & k->mod) {
+            s_mod_oneshot &= (uint8_t)~k->mod;              /* one-shot -> off */
+        } else {
+            s_mod_oneshot |= k->mod;                        /* off -> one-shot */
+        }
+
+        s_last_mod_tap    = k->mod;
+        s_last_mod_tap_ms = now;
+        refresh_keys();
+        return;
+    }
+
+    send_key(k);
+
+    /* One-shot modifiers apply to exactly one key. */
+    s_last_mod_tap = 0;
+    if (s_mod_oneshot) {
+        s_mod_oneshot = 0;
+        refresh_keys();
+    }
+}
+
+/* -----------------------------------------------------------------------
+ * Build
+ * ----------------------------------------------------------------------- */
+static void build_key(lv_obj_t *panel, const kb_key_t *k, int x, int y)
+{
+    if (s_key_count >= KB_MAX_KEYS) return;
+    int idx = s_key_count++;
+
+    bool special = (k->kind == KK_MOD ||
+                    k->vk == 0x1B || k->vk == 0x08 || k->vk == 0x09 || k->vk == 0x0D ||
+                    k->vk == 0xA0);
+
+    lv_obj_t *btn = lv_btn_create(panel);
     lv_obj_set_pos(btn, x, y);
-    lv_obj_set_size(btn, w, h);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x3a3a3a), 0);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x585858), LV_STATE_PRESSED);
+    lv_obj_set_size(btn, k->w4 * KB_UNIT4 - KB_GAP, KB_KEY_H);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(special ? COL_KEY_MOD : COL_KEY), 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(COL_KEY_PRESS), LV_STATE_PRESSED);
     lv_obj_set_style_radius(btn, 6, 0);
     lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
     lv_obj_set_style_pad_all(btn, 0, 0);
-    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, (void *)(uintptr_t)keycode);
     lv_obj_clear_flag(btn, LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_add_event_cb(btn, key_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
 
     lv_obj_t *lbl = lv_label_create(btn);
-    lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_color(lbl, lv_color_hex(0xeeeeee), 0);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+    lv_label_set_text_static(lbl, k->lbl);
+    /* Single characters / symbols a bit larger than word labels. */
+    bool small_word = strlen(k->lbl) > 1 && (unsigned char)k->lbl[0] < 0x80;
+    lv_obj_set_style_text_font(lbl, small_word ? &lv_font_montserrat_14 : &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(special ? COL_TEXT_DIM : COL_TEXT), 0);
     lv_obj_center(lbl);
-    return btn;
+
+    s_btn[idx] = btn;
+    s_lbl[idx] = lbl;
+    s_def[idx] = k;
+    s_cur_txt[idx] = k->lbl;
+    s_cur_col[idx] = special ? COL_KEY_MOD : COL_KEY;
 }
 
-#define KB_KEY(parent, col, row, text, kc, cb) \
-    kb_btn(parent, KB_COL(col), KB_ROW(row), KB_KEY_W, KB_KEY_H, text, kc, cb)
-
-/* -----------------------------------------------------------------------
- * Shift / sym-shift reset helpers
- * ----------------------------------------------------------------------- */
-static void kb_abc_shift_reset(void)
+static void build_keys(lv_obj_t *panel)
 {
-    static const char *lower[] = {
-        "q","w","e","r","t","y","u","i","o","p",
-        "a","s","d","f","g","h","j","k","l",
-        "z","x","c","v","b","n","m"
-    };
-    if (!s_shift_active) return;
-    s_shift_active = false;
-    if (s_shift_btn) lv_obj_clear_state(s_shift_btn, LV_STATE_CHECKED);
-    for (int i = 0; i < 26; i++)
-        if (s_letter_lbls[i]) lv_label_set_text(s_letter_lbls[i], lower[i]);
-}
-
-static void kb_sym_shift_reset(void)
-{
-    static const char *dig[]  = { "1","2","3","4","5","6","7","8","9","0" };
-    static const char *punc[] = { "`","[","]","\\",";","'",",",".","/" };
-    if (!s_sym_shift_active) return;
-    s_sym_shift_active = false;
-    if (s_sym_shift_btn) lv_obj_clear_state(s_sym_shift_btn, LV_STATE_CHECKED);
-    for (int i = 0; i < 10; i++)
-        if (s_sym_digit_lbls[i]) lv_label_set_text(s_sym_digit_lbls[i], dig[i]);
-    for (int i = 0; i < 9; i++)
-        if (s_sym_punct_lbls[i]) lv_label_set_text(s_sym_punct_lbls[i], punc[i]);
-}
-
-/* -----------------------------------------------------------------------
- * Key event callbacks
- * ----------------------------------------------------------------------- */
-static void kb_key_cb(lv_event_t *e)
-{
-    uint8_t keycode  = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
-    uint8_t key_byte = keycode;
-
-    if (s_shift_active) {
-        key_byte |= 0x80;
-        kb_abc_shift_reset();
-    } else if (s_sym_shift_active) {
-        key_byte |= 0x80;
-        kb_sym_shift_reset();
+    s_key_count = 0;
+    for (int r = 0; r < KB_ROWS; r++) {
+        int x = KB_PAD;
+        int y = KB_PAD + r * KB_STEP;
+        for (const kb_key_t *k = s_rows[r]; k->w4; k++) {
+            if (k->kind != KK_GAP) build_key(panel, k, x, y);
+            x += k->w4 * KB_UNIT4;
+        }
     }
-
-    usb_hid_send(0x00, key_byte);
-    ESP_LOGI("KB", "key=0x%02X shift=%d", keycode, (key_byte >> 7) & 1);
-}
-
-static void kb_fixed_key_cb(lv_event_t *e)
-{
-    uint8_t keycode = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
-    usb_hid_send(0x00, keycode);
-    ESP_LOGI("KB", "fixed=0x%02X", keycode);
-}
-
-static void kb_shift_cb(lv_event_t *e)
-{
-    static const char *lower[] = {
-        "q","w","e","r","t","y","u","i","o","p",
-        "a","s","d","f","g","h","j","k","l",
-        "z","x","c","v","b","n","m"
-    };
-    static const char *upper[] = {
-        "Q","W","E","R","T","Y","U","I","O","P",
-        "A","S","D","F","G","H","J","K","L",
-        "Z","X","C","V","B","N","M"
-    };
-    s_shift_active = !s_shift_active;
-    if (s_shift_btn) {
-        if (s_shift_active) lv_obj_add_state(s_shift_btn, LV_STATE_CHECKED);
-        else                lv_obj_clear_state(s_shift_btn, LV_STATE_CHECKED);
-    }
-    const char **labels = s_shift_active ? upper : lower;
-    for (int i = 0; i < 26; i++)
-        if (s_letter_lbls[i]) lv_label_set_text(s_letter_lbls[i], labels[i]);
-}
-
-static void kb_sym_shift_cb(lv_event_t *e)
-{
-    static const char *dig_n[]  = { "1","2","3","4","5","6","7","8","9","0" };
-    static const char *dig_s[]  = { "!","@","#","$","%","^","&","*","(",")" };
-    static const char *punc_n[] = { "`","[","]","\\",";","'",",",".","/" };
-    static const char *punc_s[] = { "~","{","}","|",":","\""," <",">","?" };
-
-    s_sym_shift_active = !s_sym_shift_active;
-    if (s_sym_shift_btn) {
-        if (s_sym_shift_active) lv_obj_add_state(s_sym_shift_btn, LV_STATE_CHECKED);
-        else                    lv_obj_clear_state(s_sym_shift_btn, LV_STATE_CHECKED);
-    }
-    const char **dl = s_sym_shift_active ? dig_s  : dig_n;
-    const char **pl = s_sym_shift_active ? punc_s : punc_n;
-    for (int i = 0; i < 10; i++)
-        if (s_sym_digit_lbls[i]) lv_label_set_text(s_sym_digit_lbls[i], dl[i]);
-    for (int i = 0; i < 9; i++)
-        if (s_sym_punct_lbls[i]) lv_label_set_text(s_sym_punct_lbls[i], pl[i]);
-}
-
-static void kb_tab_abc_cb(lv_event_t *e)
-{
-    kb_sym_shift_reset();
-    lv_obj_clear_flag(s_abc_cont, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_sym_cont, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_state(s_tab_abc, LV_STATE_CHECKED);
-    lv_obj_clear_state(s_tab_sym, LV_STATE_CHECKED);
-    if (s_sym_tab_abc) lv_obj_add_state(s_sym_tab_abc, LV_STATE_CHECKED);
-    if (s_sym_tab_sym) lv_obj_clear_state(s_sym_tab_sym, LV_STATE_CHECKED);
-}
-
-static void kb_tab_sym_cb(lv_event_t *e)
-{
-    kb_abc_shift_reset();
-    lv_obj_add_flag(s_abc_cont, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_sym_cont, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_state(s_tab_abc, LV_STATE_CHECKED);
-    lv_obj_add_state(s_tab_sym, LV_STATE_CHECKED);
-    if (s_sym_tab_abc) lv_obj_clear_state(s_sym_tab_abc, LV_STATE_CHECKED);
-    if (s_sym_tab_sym) lv_obj_add_state(s_sym_tab_sym, LV_STATE_CHECKED);
 }
 
 static void keyboard_exit_cb(lv_event_t *e)
 {
-    if (s_screen) {
-        lv_obj_del(s_screen);
-        s_screen         = NULL;
-        s_abc_cont       = NULL;
-        s_sym_cont       = NULL;
-        s_tab_abc        = NULL;
-        s_tab_sym        = NULL;
-        s_shift_btn      = NULL;
-        s_shift_active   = false;
-        s_sym_tab_abc    = NULL;
-        s_sym_tab_sym    = NULL;
-        s_sym_shift_btn  = NULL;
-        s_sym_shift_active = false;
-    }
-}
-
-/* -----------------------------------------------------------------------
- * Page builders
- * ----------------------------------------------------------------------- */
-static void kb_build_abc(lv_obj_t *cont)
-{
-    static const uint8_t kc[] = {
-        0x14,0x1A,0x08,0x15,0x17,0x1C,0x18,0x0C,0x12,0x13,
-        0x04,0x16,0x07,0x09,0x0A,0x0B,0x0D,0x0E,0x0F,
-        0x1D,0x1B,0x06,0x19,0x05,0x11,0x10
-    };
-    static const char *lower[] = {
-        "q","w","e","r","t","y","u","i","o","p",
-        "a","s","d","f","g","h","j","k","l",
-        "z","x","c","v","b","n","m"
-    };
-    static const int row0[] = { 1,2,3,4,5,6,7,8,9,10 };
-    static const int row1[] = { 1,2,3,4,5,6,7,8,9 };
-    static const int row2[] = { 2,3,4,5,6,7,8 };
-
-    KB_KEY(cont, 0, 0, "Esc", 0x29, kb_key_cb);
-    for (int i = 0; i < 10; i++) {
-        lv_obj_t *b = kb_btn(cont, KB_COL(row0[i]), KB_ROW(0),
-                             KB_KEY_W, KB_KEY_H, lower[i], kc[i], kb_key_cb);
-        s_letter_lbls[i] = lv_obj_get_child(b, 0);
-    }
-    KB_KEY(cont, 11, 0, LV_SYMBOL_BACKSPACE, 0x2A, kb_fixed_key_cb);
-
-    KB_KEY(cont, 0, 1, "Tab", 0x2B, kb_key_cb);
-    for (int i = 0; i < 9; i++) {
-        lv_obj_t *b = kb_btn(cont, KB_COL(row1[i]), KB_ROW(1),
-                             KB_KEY_W, KB_KEY_H, lower[10+i], kc[10+i], kb_key_cb);
-        s_letter_lbls[10+i] = lv_obj_get_child(b, 0);
-    }
-    kb_btn(cont, KB_COL(10), KB_ROW(1), KB_KEY_W*2+KB_GAP, KB_KEY_H,
-           LV_SYMBOL_NEW_LINE, 0x28, kb_fixed_key_cb);
-
-    s_shift_btn = kb_btn(cont, KB_COL(0), KB_ROW(2), KB_KEY_W*2+KB_GAP, KB_KEY_H,
-                          LV_SYMBOL_UP " Shift", 0x00, kb_shift_cb);
-    lv_obj_add_flag(s_shift_btn, LV_OBJ_FLAG_CHECKABLE);
-    lv_obj_set_style_bg_color(s_shift_btn, lv_color_hex(0x555555), 0);
-    lv_obj_set_style_bg_color(s_shift_btn, lv_color_hex(0x777777), LV_STATE_PRESSED);
-    lv_obj_set_style_bg_color(s_shift_btn, lv_color_hex(0x0055cc), LV_STATE_CHECKED);
-    for (int i = 0; i < 7; i++) {
-        lv_obj_t *b = kb_btn(cont, KB_COL(row2[i]), KB_ROW(2),
-                             KB_KEY_W, KB_KEY_H, lower[19+i], kc[19+i], kb_key_cb);
-        s_letter_lbls[19+i] = lv_obj_get_child(b, 0);
-    }
-    KB_KEY(cont, 10, 2, LV_SYMBOL_UP, 0x52, kb_fixed_key_cb);
-
-    kb_btn(cont, KB_COL(0), KB_ROW(3), KB_KEY_W*7+KB_GAP*6, KB_KEY_H,
-           "Space", 0x2C, kb_fixed_key_cb);
-
-    s_tab_abc = kb_btn(cont, KB_COL(7), KB_ROW(3), KB_KEY_W, KB_KEY_H,
-                        "ABC", 0x00, kb_tab_abc_cb);
-    lv_obj_add_flag(s_tab_abc, LV_OBJ_FLAG_CHECKABLE);
-    lv_obj_add_state(s_tab_abc, LV_STATE_CHECKED);
-    lv_obj_set_style_bg_color(s_tab_abc, lv_color_hex(0x555555), 0);
-    lv_obj_set_style_bg_color(s_tab_abc, lv_color_hex(0x0055cc), LV_STATE_CHECKED);
-
-    s_tab_sym = kb_btn(cont, KB_COL(8), KB_ROW(3), KB_KEY_W, KB_KEY_H,
-                        "!@#", 0x00, kb_tab_sym_cb);
-    lv_obj_add_flag(s_tab_sym, LV_OBJ_FLAG_CHECKABLE);
-    lv_obj_set_style_bg_color(s_tab_sym, lv_color_hex(0x555555), 0);
-    lv_obj_set_style_bg_color(s_tab_sym, lv_color_hex(0x0055cc), LV_STATE_CHECKED);
-
-    KB_KEY(cont,  9, 3, LV_SYMBOL_LEFT,  0x50, kb_fixed_key_cb);
-    KB_KEY(cont, 10, 3, LV_SYMBOL_DOWN,  0x51, kb_fixed_key_cb);
-    KB_KEY(cont, 11, 3, LV_SYMBOL_RIGHT, 0x4F, kb_fixed_key_cb);
-}
-
-static void kb_build_sym(lv_obj_t *cont)
-{
-    static const uint8_t dig_kc[]  = {
-        0x1E,0x1F,0x20,0x21,0x22,0x23,0x24,0x25,0x26,0x27
-    };
-    static const char *dig_n[] = { "1","2","3","4","5","6","7","8","9","0" };
-    static const uint8_t punc_kc[] = {
-        0x35,0x2F,0x30,0x31,0x33,0x34,0x36,0x37,0x38
-    };
-    static const char *punc_n[] = { "`","[","]","\\",";","'",",",".","/" };
-
-    KB_KEY(cont, 0, 0, "Esc", 0x29, kb_key_cb);
-    for (int i = 0; i < 10; i++) {
-        lv_obj_t *b = kb_btn(cont, KB_COL(i+1), KB_ROW(0),
-                             KB_KEY_W, KB_KEY_H, dig_n[i], dig_kc[i], kb_key_cb);
-        s_sym_digit_lbls[i] = lv_obj_get_child(b, 0);
-    }
-    KB_KEY(cont, 11, 0, LV_SYMBOL_BACKSPACE, 0x2A, kb_fixed_key_cb);
-
-    KB_KEY(cont, 0, 1, "Tab", 0x2B, kb_key_cb);
-    for (int i = 0; i < 9; i++) {
-        lv_obj_t *b = kb_btn(cont, KB_COL(i+1), KB_ROW(1),
-                             KB_KEY_W, KB_KEY_H, punc_n[i], punc_kc[i], kb_key_cb);
-        s_sym_punct_lbls[i] = lv_obj_get_child(b, 0);
-    }
-    kb_btn(cont, KB_COL(10), KB_ROW(1), KB_KEY_W*2+KB_GAP, KB_KEY_H,
-           LV_SYMBOL_NEW_LINE, 0x28, kb_fixed_key_cb);
-
-    s_sym_shift_btn = kb_btn(cont, KB_COL(0), KB_ROW(2), KB_KEY_W*2+KB_GAP, KB_KEY_H,
-                              LV_SYMBOL_UP " Shift", 0x00, kb_sym_shift_cb);
-    lv_obj_add_flag(s_sym_shift_btn, LV_OBJ_FLAG_CHECKABLE);
-    lv_obj_set_style_bg_color(s_sym_shift_btn, lv_color_hex(0x555555), 0);
-    lv_obj_set_style_bg_color(s_sym_shift_btn, lv_color_hex(0x777777), LV_STATE_PRESSED);
-    lv_obj_set_style_bg_color(s_sym_shift_btn, lv_color_hex(0x0055cc), LV_STATE_CHECKED);
-    KB_KEY(cont, 10, 2, LV_SYMBOL_UP, 0x52, kb_fixed_key_cb);
-
-    kb_btn(cont, KB_COL(0), KB_ROW(3), KB_KEY_W*7+KB_GAP*6, KB_KEY_H,
-           "Space", 0x2C, kb_fixed_key_cb);
-
-    s_sym_tab_abc = kb_btn(cont, KB_COL(7), KB_ROW(3), KB_KEY_W, KB_KEY_H,
-                            "ABC", 0x00, kb_tab_abc_cb);
-    lv_obj_add_flag(s_sym_tab_abc, LV_OBJ_FLAG_CHECKABLE);
-    lv_obj_set_style_bg_color(s_sym_tab_abc, lv_color_hex(0x555555), 0);
-    lv_obj_set_style_bg_color(s_sym_tab_abc, lv_color_hex(0x0055cc), LV_STATE_CHECKED);
-
-    s_sym_tab_sym = kb_btn(cont, KB_COL(8), KB_ROW(3), KB_KEY_W, KB_KEY_H,
-                            "!@#", 0x00, kb_tab_sym_cb);
-    lv_obj_add_flag(s_sym_tab_sym, LV_OBJ_FLAG_CHECKABLE);
-    lv_obj_add_state(s_sym_tab_sym, LV_STATE_CHECKED);
-    lv_obj_set_style_bg_color(s_sym_tab_sym, lv_color_hex(0x555555), 0);
-    lv_obj_set_style_bg_color(s_sym_tab_sym, lv_color_hex(0x0055cc), LV_STATE_CHECKED);
-
-    KB_KEY(cont,  9, 3, LV_SYMBOL_LEFT,  0x50, kb_fixed_key_cb);
-    KB_KEY(cont, 10, 3, LV_SYMBOL_DOWN,  0x51, kb_fixed_key_cb);
-    KB_KEY(cont, 11, 3, LV_SYMBOL_RIGHT, 0x4F, kb_fixed_key_cb);
+    (void)e;
+    if (!s_screen) return;
+    lv_obj_del(s_screen);
+    s_screen = NULL;
+    s_key_count = 0;
+    /* Nothing stays latched once the keyboard is gone. */
+    s_mod_oneshot = s_mod_locked = 0;
+    s_last_mod_tap = 0;
 }
 
 /* -----------------------------------------------------------------------
@@ -346,6 +331,8 @@ static void kb_build_sym(lv_obj_t *cont)
  * ----------------------------------------------------------------------- */
 void ui_keyboard_show(void)
 {
+    if (s_screen) return;   /* already open */
+
     lv_obj_t *scr = lv_scr_act();
 
     s_screen = lv_obj_create(scr);
@@ -361,30 +348,15 @@ void ui_keyboard_show(void)
     lv_obj_t *panel = lv_obj_create(s_screen);
     lv_obj_set_size(panel, KB_PANEL_W, KB_PANEL_H);
     lv_obj_center(panel);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(0x1e1e1e), 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(COL_PANEL), 0);
     lv_obj_set_style_border_color(panel, lv_color_hex(0x444444), 0);
     lv_obj_set_style_border_width(panel, 1, 0);
     lv_obj_set_style_radius(panel, 12, 0);
     lv_obj_set_style_pad_all(panel, 0, 0);
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    /* Taps on the panel itself (gaps between keys) must not close it. */
     lv_obj_add_event_cb(panel, lv_event_stop_processing, LV_EVENT_CLICKED, NULL);
 
-    s_abc_cont = lv_obj_create(panel);
-    lv_obj_set_size(s_abc_cont, KB_PANEL_W, KB_PANEL_H);
-    lv_obj_set_pos(s_abc_cont, 0, 0);
-    lv_obj_set_style_bg_opa(s_abc_cont, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(s_abc_cont, 0, 0);
-    lv_obj_set_style_pad_all(s_abc_cont, 0, 0);
-    lv_obj_clear_flag(s_abc_cont, LV_OBJ_FLAG_SCROLLABLE);
-    kb_build_abc(s_abc_cont);
-
-    s_sym_cont = lv_obj_create(panel);
-    lv_obj_set_size(s_sym_cont, KB_PANEL_W, KB_PANEL_H);
-    lv_obj_set_pos(s_sym_cont, 0, 0);
-    lv_obj_set_style_bg_opa(s_sym_cont, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(s_sym_cont, 0, 0);
-    lv_obj_set_style_pad_all(s_sym_cont, 0, 0);
-    lv_obj_clear_flag(s_sym_cont, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(s_sym_cont, LV_OBJ_FLAG_HIDDEN);
-    kb_build_sym(s_sym_cont);
+    build_keys(panel);
+    refresh_keys();
 }
