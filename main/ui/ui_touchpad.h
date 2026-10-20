@@ -43,3 +43,22 @@ void ui_touchpad_reselect_current(void);
  * if Touchpad mode is currently built. LVGL thread only. */
 bool ui_touchpad_get_hide_labels(void);
 void ui_touchpad_set_hide_labels(bool hide);
+
+/* Settings > Custom > Touchpad preferences, persisted in NVS
+ * (CFG_NVS_KEY_TPAD_*), take effect immediately. LVGL thread only.
+ *   Cursor / Scroll Speed : 0.50x .. 2.00x in 0.25 steps (default 1.00x),
+ *                           applied on the ESP before sending
+ *   Natural Scroll        : finger down = scroll up (default on)
+ *   Scroll Inertia        : coast after a flick (default on)
+ *   Tap to Click          : tap = left click, two-finger tap = right click,
+ *                           tap-and-drag (default on) */
+const char *ui_touchpad_cursor_speed_text(void);
+void        ui_touchpad_cursor_speed_step(int dir);
+const char *ui_touchpad_scroll_speed_text(void);
+void        ui_touchpad_scroll_speed_step(int dir);
+bool ui_touchpad_get_natural_scroll(void);
+void ui_touchpad_set_natural_scroll(bool on);
+bool ui_touchpad_get_inertia(void);
+void ui_touchpad_set_inertia(bool on);
+bool ui_touchpad_get_tap_click(void);
+void ui_touchpad_set_tap_click(bool on);

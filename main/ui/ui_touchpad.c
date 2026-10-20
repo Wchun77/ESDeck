@@ -59,7 +59,8 @@ static const char *TAG = "TOUCHPAD";
 #define TP_TWO_TAP_MAX_MS   250   /* two-finger tap (right click): shorter than this ... */
 #define TP_TWO_TAP_MAX_TRAVEL 15  /* ... and scrolled less than this (px) */
 #define WHEEL_NOTCH_PX      24    /* grip line spacing (visual only) */
-#define WHEEL_NATURAL       1     /* 1: finger down = scroll up (phone-style) */
+/* Scroll direction / speed / inertia / tap-to-click are runtime preferences,
+ * see "Preferences" below (Settings > Custom > Touchpad). */
 /* Smooth scrolling: raw finger pixels go to the PC (ESDeckPC scales them
  * to fractional WHEEL_DELTA units), instead of whole 120-unit notches. */
 #define WHEEL_ANIM          0     /* grip lines follow the finger; off = no redraw while scrolling */
@@ -103,6 +104,22 @@ static lv_obj_t *s_lbl_hint   = NULL;
 static bool s_hide_labels        = false;
 static bool s_hide_labels_loaded = false;   /* NVS read once, then cached */
 static void apply_hide_labels(void);
+
+/* Preferences (Settings > Custom > Touchpad), loaded from NVS once. */
+#define PREF_SPEED_MIN   50
+#define PREF_SPEED_MAX   200
+#define PREF_SPEED_STEP  25
+
+static bool    s_prefs_loaded  = false;
+static int     s_cursor_pct    = 100;
+static int     s_scroll_pct    = 100;
+static bool    s_natural       = true;
+static bool    s_inertia       = true;
+static bool    s_tap_click     = true;
+static float   s_move_rem_x    = 0;    /* sub-pixel remainders after speed scaling */
+static float   s_move_rem_y    = 0;
+static float   s_wheel_rem     = 0;
+static void    prefs_load(void);
 static lv_obj_t *s_pad        = NULL;
 static lv_obj_t *s_dot        = NULL;       /* finger position indicator */
 
@@ -218,7 +235,22 @@ static void click_right(void)
 /* Finger pixels -> wheel (+ = scroll up, Windows sign). */
 static void send_wheel_px(int finger_px)
 {
-    usb_hid_tp_wheel(WHEEL_NATURAL ? finger_px : -finger_px);
+    float f = (float)finger_px * (float)s_scroll_pct / 100.0f + s_wheel_rem;
+    int   px = (int)f;
+    s_wheel_rem = f - (float)px;
+    if (px == 0) return;
+    usb_hid_tp_wheel(s_natural ? px : -px);
+}
+
+/* Pad finger motion -> cursor, with the Cursor Speed preference. */
+static void send_move(int dx, int dy)
+{
+    float fx = (float)dx * (float)s_cursor_pct / 100.0f + s_move_rem_x;
+    float fy = (float)dy * (float)s_cursor_pct / 100.0f + s_move_rem_y;
+    int ix = (int)fx, iy = (int)fy;
+    s_move_rem_x = fx - (float)ix;
+    s_move_rem_y = fy - (float)iy;
+    if (ix || iy) usb_hid_tp_move(ix, iy);
 }
 
 static void wheel_coast_step(void)
@@ -265,7 +297,7 @@ static void scroll_track(int dy)
 static void scroll_end(bool allow_flick)
 {
 #if WHEEL_INERTIA
-    if (allow_flick &&
+    if (allow_flick && s_inertia &&
         lv_tick_elaps(s_wheel_last_tick) < WHEEL_FLICK_IDLE_MS &&
         (s_wheel_vel > WHEEL_FLICK_MIN || s_wheel_vel < -WHEEL_FLICK_MIN)) {
         s_wheel_coast     = s_wheel_vel;
@@ -388,7 +420,7 @@ static void pad_cb(lv_event_t *e)
 
         if (v.x == 0 && v.y == 0) return;
 
-        usb_hid_tp_move(v.x, v.y);
+        send_move(v.x, v.y);
         s_pad_travel += (uint32_t)(abs(v.x) + abs(v.y));
         pad_move_dot();
 
@@ -406,7 +438,7 @@ static void pad_cb(lv_event_t *e)
         if (s_pad_two) {
             if (!s_pad_two_frozen) scroll_end(code == LV_EVENT_RELEASED);
             /* Quick two-finger tap with (almost) no scrolling = right click. */
-            if (code == LV_EVENT_RELEASED &&
+            if (s_tap_click && code == LV_EVENT_RELEASED &&
                 held < TP_TWO_TAP_MAX_MS && s_pad_two_travel < TP_TWO_TAP_MAX_TRAVEL) {
                 click_right();
                 ESP_LOGI(TAG, "two-finger tap -> right click");
@@ -416,7 +448,7 @@ static void pad_cb(lv_event_t *e)
             return;
         }
 
-        bool     is_tap = (code == LV_EVENT_RELEASED) &&
+        bool     is_tap = s_tap_click && (code == LV_EVENT_RELEASED) &&
                           held < TP_TAP_MAX_MS && s_pad_travel < TP_TAP_MAX_TRAVEL;
 
         if (s_dragging) {
@@ -857,6 +889,8 @@ void ui_touchpad_enter(lv_obj_t *sidebar)
     build_sidebar(sidebar);
     build_page(lv_scr_act());
     ui_touchpad_get_hide_labels();   /* load from NVS on first enter */
+    prefs_load();
+    s_move_rem_x = s_move_rem_y = s_wheel_rem = 0;
     apply_hide_labels();
 
     s_wheel_offset    = 0;
@@ -963,6 +997,95 @@ void ui_touchpad_set_hide_labels(bool hide)
     if (!nvs_manager_set_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_TPAD_HIDE_LBL, hide ? "1" : "0"))
         ESP_LOGW(TAG, "failed to save hide-labels to NVS");
     apply_hide_labels();
+}
+
+/* -----------------------------------------------------------------------
+ * Preferences
+ * ----------------------------------------------------------------------- */
+static int nvs_get_int(const char *key, int def)
+{
+    char v[8] = "";
+    if (!nvs_manager_get_str(CFG_NVS_NAMESPACE, key, v, sizeof(v)) || !v[0]) return def;
+    return atoi(v);
+}
+
+static void nvs_set_int(const char *key, int val)
+{
+    char v[8];
+    snprintf(v, sizeof(v), "%d", val);
+    if (!nvs_manager_set_str(CFG_NVS_NAMESPACE, key, v))
+        ESP_LOGW(TAG, "NVS save failed: %s", key);
+}
+
+static int clamp_speed(int pct)
+{
+    if (pct < PREF_SPEED_MIN) return PREF_SPEED_MIN;
+    if (pct > PREF_SPEED_MAX) return PREF_SPEED_MAX;
+    return pct;
+}
+
+static void prefs_load(void)
+{
+    if (s_prefs_loaded) return;
+    s_cursor_pct = clamp_speed(nvs_get_int(CFG_NVS_KEY_TPAD_CURSOR, 100));
+    s_scroll_pct = clamp_speed(nvs_get_int(CFG_NVS_KEY_TPAD_SCROLL, 100));
+    s_natural    = nvs_get_int(CFG_NVS_KEY_TPAD_NATURAL, 1) != 0;
+    s_inertia    = nvs_get_int(CFG_NVS_KEY_TPAD_INERTIA, 1) != 0;
+    s_tap_click  = nvs_get_int(CFG_NVS_KEY_TPAD_TAP, 1) != 0;
+    s_prefs_loaded = true;
+}
+
+static const char *speed_text(int pct)
+{
+    /* 16 = worst case GCC assumes for an unbounded int ("-21474836.-47x"),
+     * so -Wformat-truncation stays quiet; real values are 0.50x .. 2.00x. */
+    static char buf[16];
+    snprintf(buf, sizeof(buf), "%d.%02dx", pct / 100, pct % 100);
+    return buf;
+}
+
+const char *ui_touchpad_cursor_speed_text(void) { prefs_load(); return speed_text(s_cursor_pct); }
+const char *ui_touchpad_scroll_speed_text(void) { prefs_load(); return speed_text(s_scroll_pct); }
+
+void ui_touchpad_cursor_speed_step(int dir)
+{
+    prefs_load();
+    s_cursor_pct = clamp_speed(s_cursor_pct + dir * PREF_SPEED_STEP);
+    nvs_set_int(CFG_NVS_KEY_TPAD_CURSOR, s_cursor_pct);
+}
+
+void ui_touchpad_scroll_speed_step(int dir)
+{
+    prefs_load();
+    s_scroll_pct = clamp_speed(s_scroll_pct + dir * PREF_SPEED_STEP);
+    nvs_set_int(CFG_NVS_KEY_TPAD_SCROLL, s_scroll_pct);
+}
+
+bool ui_touchpad_get_natural_scroll(void) { prefs_load(); return s_natural; }
+bool ui_touchpad_get_inertia(void)        { prefs_load(); return s_inertia; }
+bool ui_touchpad_get_tap_click(void)      { prefs_load(); return s_tap_click; }
+
+void ui_touchpad_set_natural_scroll(bool on)
+{
+    prefs_load();
+    s_natural = on;
+    nvs_set_int(CFG_NVS_KEY_TPAD_NATURAL, on);
+}
+
+void ui_touchpad_set_inertia(bool on)
+{
+    prefs_load();
+    s_inertia = on;
+    if (!on) s_wheel_coast = 0;
+    nvs_set_int(CFG_NVS_KEY_TPAD_INERTIA, on);
+}
+
+void ui_touchpad_set_tap_click(bool on)
+{
+    prefs_load();
+    s_tap_click = on;
+    if (!on) s_tap_pending = false;   /* drop a tap still waiting out its window */
+    nvs_set_int(CFG_NVS_KEY_TPAD_TAP, on);
 }
 
 void ui_touchpad_deselect_current(void)

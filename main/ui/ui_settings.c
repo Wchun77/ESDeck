@@ -55,6 +55,7 @@ typedef enum {
     SETTING_SUBMENU,
     SETTING_TOGGLE,
     SETTING_LABEL,    /* informational row, not clickable -- see render_current_level() */
+    SETTING_VALUE,    /* "[-] value [+]" stepper -- see render_current_level() */
 } setting_node_type_t;
 
 typedef struct setting_node_s {
@@ -66,6 +67,8 @@ typedef struct setting_node_s {
     int                            child_count;
     bool                        (*get_state_cb)(void);   /* used when type == SETTING_TOGGLE */
     void                        (*set_state_cb)(bool on); /* used when type == SETTING_TOGGLE */
+    const char                 *(*value_text_cb)(void);   /* used when type == SETTING_VALUE */
+    void                        (*value_step_cb)(int dir);/* used when type == SETTING_VALUE: -1 / +1 */
 } setting_node_t;
 
 #define SETTINGS_STACK_MAX 4
@@ -629,11 +632,28 @@ static void item_boot_anim_cb(lv_event_t *e)
  * ----------------------------------------------------------------------- */
 /* Touchpad-only rows live in Custom too; mode_mask hides them elsewhere,
  * so Custom's child_count below counts every row, shown or not. */
+/* Touchpad mode's own preferences (Custom > Touchpad), all persisted in
+ * NVS by ui_touchpad.c. */
+static const setting_node_t s_touchpad_menu[] = {
+    { "Hide Labels",    SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
+      ui_touchpad_get_hide_labels, ui_touchpad_set_hide_labels },
+    { "Cursor Speed",   SETTING_VALUE,  SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL,
+      ui_touchpad_cursor_speed_text, ui_touchpad_cursor_speed_step },
+    { "Scroll Speed",   SETTING_VALUE,  SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL,
+      ui_touchpad_scroll_speed_text, ui_touchpad_scroll_speed_step },
+    { "Natural Scroll", SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
+      ui_touchpad_get_natural_scroll, ui_touchpad_set_natural_scroll },
+    { "Scroll Inertia", SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
+      ui_touchpad_get_inertia, ui_touchpad_set_inertia },
+    { "Tap to Click",   SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
+      ui_touchpad_get_tap_click, ui_touchpad_set_tap_click },
+};
+
 static const setting_node_t s_custom_menu[] = {
     { "Select Config",  SETTING_ACTION, SETMASK_ALL, item_config_cb,    NULL, 0 },
     { "Boot Animation", SETTING_ACTION, SETMASK_ALL, item_boot_anim_cb, NULL, 0 },
-    { "Hide Labels",    SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
-      ui_touchpad_get_hide_labels, ui_touchpad_set_hide_labels },
+    { "Touchpad",       SETTING_SUBMENU, SETMASK_TOUCHPAD, NULL, s_touchpad_menu,
+      (int)(sizeof(s_touchpad_menu) / sizeof(s_touchpad_menu[0])) },
 };
 
 static const setting_node_t s_system_menu[] = {
@@ -734,6 +754,39 @@ static void toggle_switch_cb(lv_event_t *e)
     if (node->set_state_cb) node->set_state_cb(on);
 }
 
+/* SETTING_VALUE "-" / "+" buttons. Row children (render_current_level()):
+ * 0 = name label, 1 = minus, 2 = value label, 3 = plus. The button's own
+ * user data says which direction it steps. */
+static void value_step_btn_cb(lv_event_t *e)
+{
+    const setting_node_t *node = (const setting_node_t *)lv_event_get_user_data(e);
+    lv_obj_t *btn = lv_event_get_target(e);
+    int dir = (int)(intptr_t)lv_obj_get_user_data(btn);
+
+    if (node->value_step_cb) node->value_step_cb(dir);
+
+    lv_obj_t *val = lv_obj_get_child(lv_obj_get_parent(btn), 2);
+    if (val && node->value_text_cb) lv_label_set_text(val, node->value_text_cb());
+}
+
+static lv_obj_t *value_step_btn(lv_obj_t *row, const setting_node_t *node, const char *sym, int dir)
+{
+    lv_obj_t *b = lv_btn_create(row);
+    lv_obj_set_size(b, 40, 36);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x3a3a3a), 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x0055cc), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(b, 6, 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_clear_flag(b, LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_set_user_data(b, (void *)(intptr_t)dir);
+    lv_obj_add_event_cb(b, value_step_btn_cb, LV_EVENT_CLICKED, (void *)node);
+
+    lv_obj_t *l = lv_label_create(b);
+    lv_label_set_text(l, sym);
+    lv_obj_center(l);
+    return b;
+}
+
 /* Close Settings entirely and resume whatever mode is active -- the
  * counterpart to the deselect_current() call in ui_settings_select().
  * Called from the root-level back button (shown as an X, see
@@ -832,6 +885,23 @@ static void render_current_level(void)
             if (node->get_state_cb && node->get_state_cb())
                 lv_obj_add_state(sw, LV_STATE_CHECKED);
             lv_obj_add_event_cb(sw, toggle_switch_cb, LV_EVENT_VALUE_CHANGED, (void *)node);
+        } else if (node->type == SETTING_VALUE) {
+            /* Same non-clickable row as TOGGLE; only - / + react.
+             * Children order matters, see value_step_btn_cb(). */
+            lv_obj_clear_flag(item, LV_OBJ_FLAG_CLICKABLE);
+
+            lv_obj_t *minus = value_step_btn(item, node, LV_SYMBOL_MINUS, -1);
+            lv_obj_t *val = lv_label_create(item);
+            lv_obj_t *plus  = value_step_btn(item, node, LV_SYMBOL_PLUS, +1);
+
+            lv_label_set_text(val, node->value_text_cb ? node->value_text_cb() : "");
+            lv_obj_set_width(val, 64);
+            lv_obj_set_style_text_align(val, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_style_text_font(val, &lv_font_montserrat_16, 0);
+
+            lv_obj_align(plus,  LV_ALIGN_RIGHT_MID, -8, 0);
+            lv_obj_align_to(val, plus, LV_ALIGN_OUT_LEFT_MID, -4, 0);
+            lv_obj_align_to(minus, val, LV_ALIGN_OUT_LEFT_MID, -4, 0);
         } else if (node->type == SETTING_LABEL) {
             /* Purely informational -- same CLICKABLE-clearing reasoning as
              * the TOGGLE row above (lv_btn is clickable by default whether

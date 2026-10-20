@@ -166,6 +166,12 @@
 #define CFG_NVS_KEY_MEDIA     "media_cfg"
 #define CFG_NVS_KEY_TOUCHPAD  "tpad_cfg"
 #define CFG_NVS_KEY_TPAD_HIDE_LBL "tpad_hide_lbl"   /* "1" = hide Touchpad text labels */
+/* Touchpad > Settings > Custom > Touchpad -- see ui_touchpad.c "Preferences" */
+#define CFG_NVS_KEY_TPAD_CURSOR   "tp_cursor"       /* cursor speed, percent: "50".."200" */
+#define CFG_NVS_KEY_TPAD_SCROLL   "tp_scroll"       /* scroll speed, percent: "50".."200" */
+#define CFG_NVS_KEY_TPAD_NATURAL  "tp_natural"      /* "1" = finger down scrolls up */
+#define CFG_NVS_KEY_TPAD_INERTIA  "tp_inertia"      /* "1" = coast after a flick */
+#define CFG_NVS_KEY_TPAD_TAP      "tp_tapclick"     /* "1" = tap / two-finger tap click */
 #define CFG_NVS_KEY_BOOT_ANIM "boot_anim"
 
 /* --------------------------------------------------------------------------
