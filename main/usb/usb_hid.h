@@ -98,11 +98,18 @@
  *   dx/dy : int16 LE, raw touch pixels (PC applies sensitivity)
  *   wheel : int8 finger pixels on the wheel strip, + = scroll up
  *           (Windows sign; PC scales to fractional WHEEL_DELTA units)
- *   btn_mask : HID_TP_BTN_* state after this report */
+ *   btn_mask : HID_TP_BTN_* state after this report
+ * Horizontal wheel goes in its own report type (only sent when there's no
+ * move/wheel/button to send that tick):
+ *   { HID_TP_PAGE, HID_TP_CMD_HWHEEL, hwheel, btn_mask, 0, 0, 0, 0 }
+ *   hwheel : int8 finger pixels, + = scroll right (Windows HWHEEL sign) */
 #define HID_TP_PAGE         0xFD
 #define HID_TP_CMD_MOVE     0x01
+#define HID_TP_CMD_HWHEEL   0x02
 #define HID_TP_BTN_LEFT     0x01
 #define HID_TP_BTN_RIGHT    0x02
+#define HID_TP_BTN_BACK     0x08    /* mouse button 4 / XBUTTON1 */
+#define HID_TP_BTN_FORWARD  0x10    /* mouse button 5 / XBUTTON2 */
 
 /* Touchpad input staging -- LVGL thread only (no locking inside).
  * Motion/wheel are accumulated and button states queued; nothing is sent
@@ -112,6 +119,7 @@
  * matching the IN endpoint's 10 ms bInterval). */
 void usb_hid_tp_move(int dx, int dy);
 void usb_hid_tp_wheel(int pixels);
+void usb_hid_tp_hwheel(int pixels);
 void usb_hid_tp_buttons(uint8_t mask);
 void usb_hid_tp_flush(void);
 /* Clear pending motion/wheel (queued button states are kept). */

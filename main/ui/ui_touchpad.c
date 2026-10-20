@@ -3,7 +3,7 @@
 #include "ui_settings.h"
 #include "ui_keyboard.h"
 #include "usb/usb_hid.h"
-#include "lvgl_port.h"       /* lvgl_port_touch_points() */
+#include "lvgl_port.h"       /* lvgl_port_set_touch_hook(), multi-touch points */
 #include "app_config.h"     /* SD_PATH_ASSETS_BG, CFG_NVS_* */
 #include "nvs_manager/nvs_manager.h"
 #include "lvgl.h"
@@ -28,11 +28,9 @@ static const char *TAG = "TOUCHPAD";
 #define TP_PAD_Y         TP_BTN_BAR_H
 #define TP_PAD_W         (CONTENT_W - TP_MARGIN * 2)
 #define TP_PAD_H         (CONTENT_H - TP_BTN_BAR_H - TP_MARGIN)
-#define TP_DOT_SIZE      28
-/* Finger-position dot. Off for now: every dot move forces an LVGL redraw,
- * which (AVOID_TEAR_MODE_3 waits for VSYNC) appears to slow down and jitter
- * the touch read itself. Set to 1 to bring it back. */
-#define TP_SHOW_DOT      0
+/* "Hide Buttons" preference: pad takes the whole content area. */
+#define TP_PAD_FULL_Y    TP_MARGIN
+#define TP_PAD_FULL_H    (CONTENT_H - TP_MARGIN * 2)
 
 /* Sidebar: keyboard button cell on top (same 80x80 cell / 64x64 button as
  * the gear cell in ui.c), wheel strip between it and the gear cell. */
@@ -56,8 +54,16 @@ static const char *TAG = "TOUCHPAD";
 #define TP_TAP_MAX_MS       200   /* press->release shorter than this ... */
 #define TP_TAP_MAX_TRAVEL   10    /* ... and moved less than this (px) = tap */
 #define TP_DOUBLE_TAP_MS    250   /* window after a tap for tap-and-drag / double tap */
+/* Tap-and-drag (tap, then touch and move = left held). Off: dragging /
+ * selecting is "hold the Left button + move on the pad" only, and a tap
+ * clicks immediately instead of waiting TP_DOUBLE_TAP_MS. Set to 1 to
+ * bring it back -- it only ever applies while Hide Buttons is on. */
+#define TP_TAP_DRAG         0
 #define TP_TWO_TAP_MAX_MS   250   /* two-finger tap (right click): shorter than this ... */
 #define TP_TWO_TAP_MAX_TRAVEL 15  /* ... and scrolled less than this (px) */
+#define TP_MATCH_MAX_PX     150   /* moved less than this between reads = same finger */
+#define TP_AXIS_LOCK_PX     10    /* two-finger travel before locking vertical / horizontal */
+#define TP_SWIPE_TRIGGER_PX 80    /* two-finger horizontal travel for one Back / Forward */
 #define WHEEL_NOTCH_PX      24    /* grip line spacing (visual only) */
 /* Scroll direction / speed / inertia / tap-to-click are runtime preferences,
  * see "Preferences" below (Settings > Custom > Touchpad). */
@@ -121,7 +127,10 @@ static float   s_move_rem_y    = 0;
 static float   s_wheel_rem     = 0;
 static void    prefs_load(void);
 static lv_obj_t *s_pad        = NULL;
-static lv_obj_t *s_dot        = NULL;       /* finger position indicator */
+
+/* More preferences (see "Preferences" below) */
+static bool    s_hide_buttons  = false;   /* pad covers the whole content area */
+static int     s_swipe_mode    = TP_SWIPE_HSCROLL;
 
 static lv_obj_t *s_kb_cell    = NULL;       /* sidebar: keyboard button cell */
 static lv_obj_t *s_wheel      = NULL;       /* sidebar: wheel strip (sidebar_mode "wheel") */
@@ -151,6 +160,14 @@ static bool     s_dragging       = false;
 static bool     s_pad_two        = false;
 static bool     s_pad_two_frozen = false;  /* a finger lifted mid-gesture: ignore the rest */
 static uint32_t s_pad_two_travel = 0;
+static int      s_two_axis       = 0;      /* 0 undecided, 1 vertical, 2 horizontal */
+static int32_t  s_two_sum_x      = 0;      /* travel before the axis is locked */
+static int32_t  s_two_sum_y      = 0;
+static bool     s_swipe_done     = false;  /* Back/Forward already fired this gesture */
+
+/* Pad gesture lifetime (first pad finger down .. last pad finger up) */
+static bool     s_gesture        = false;
+static bool     s_gesture_btn    = false;  /* a L/R button was held during it: no taps */
 
 /* Mouse button state from the L/R buttons */
 static bool     s_left_held      = false;
@@ -162,6 +179,29 @@ static float    s_wheel_vel      = 0;   /* smoothed finger speed, px per 10 ms *
 static uint32_t s_wheel_last_tick = 0;  /* last PRESSING with motion */
 static float    s_wheel_coast    = 0;   /* inertia speed after release, px per tick */
 static float    s_wheel_coast_rem = 0;  /* sub-pixel remainder of coasting */
+static int      s_scroll_axis    = 0;   /* 0 vertical, 1 horizontal -- current scroll / coast */
+
+/* -----------------------------------------------------------------------
+ * Finger tracking
+ *
+ * The content area (L/R buttons + pad) is driven from the raw multi-touch
+ * points (lvgl_port touch hook, tp_touch_hook()), not LVGL events -- LVGL
+ * only sees the first finger, which made "hold Left with one hand, move
+ * on the pad with the other" impossible. Each finger keeps the region it
+ * went down in for its whole life (like LVGL's press-lock); identity across
+ * reads is by nearest position since the controller's point order isn't
+ * stable. Sidebar / Settings / keyboard overlay stay on LVGL events.
+ * ----------------------------------------------------------------------- */
+typedef enum { REG_NONE = 0, REG_LEFT, REG_RIGHT, REG_PAD } tp_region_t;
+
+typedef struct {
+    bool        active;
+    tp_region_t reg;
+    int16_t     x, y;      /* last position (screen coordinates) */
+    int16_t     dx, dy;    /* motion since the previous read */
+} tp_contact_t;
+
+static tp_contact_t s_ct[LVGL_PORT_TOUCH_MAX_POINTS];
 
 /* -----------------------------------------------------------------------
  * Helpers
@@ -239,7 +279,11 @@ static void send_wheel_px(int finger_px)
     int   px = (int)f;
     s_wheel_rem = f - (float)px;
     if (px == 0) return;
-    usb_hid_tp_wheel(s_natural ? px : -px);
+
+    /* Natural: content follows the finger. Vertical: finger down = wheel
+     * up (+). Horizontal: finger right = view moves left = hwheel (-). */
+    if (s_scroll_axis == 0) usb_hid_tp_wheel(s_natural ? px : -px);
+    else                    usb_hid_tp_hwheel(s_natural ? -px : px);
 }
 
 /* Pad finger motion -> cursor, with the Cursor Speed preference. */
@@ -272,8 +316,10 @@ static void wheel_coast_step(void)
 /* Shared smooth-scroll tracking -- used by the sidebar wheel strip and by
  * two-finger scrolling on the pad. begin on touch down, track per move,
  * end on release (starts inertia coasting after a flick). */
-static void scroll_begin(void)
+static void scroll_begin(int axis)
 {
+    s_scroll_axis     = axis;
+    s_wheel_rem       = 0;
     s_wheel_coast     = 0;   /* new touch stops any coasting */
     s_wheel_coast_rem = 0;
     s_wheel_vel       = 0;
@@ -322,154 +368,354 @@ static void flush_timer_cb(lv_timer_t *t)
     usb_hid_kb_flush();   /* sidebar hotkeys go out on the keyboard report path */
 }
 
-static void pad_move_dot(void)
+/* Effective tap-to-click: forced on while the L/R buttons are hidden,
+ * otherwise there would be no way left to click at all. */
+static bool tap_enabled(void)
 {
-    lv_indev_t *indev = lv_indev_get_act();
-    if (!indev || !s_dot) return;
+    return s_tap_click || s_hide_buttons;
+}
 
-    lv_point_t p;
-    lv_indev_get_point(indev, &p);
+/* See TP_TAP_DRAG. */
+static bool tap_drag_enabled(void)
+{
+    return TP_TAP_DRAG && s_hide_buttons && tap_enabled();
+}
 
+static void click_x(uint8_t btn)
+{
+    uint8_t m = current_mask();
+    usb_hid_tp_buttons(m | btn);
+    usb_hid_tp_buttons(m & (uint8_t)~btn);
+}
+
+/* L/R buttons visible or pad stretched over the whole content area. */
+static void apply_layout(void)
+{
+    if (!s_pad || !s_btn_left || !s_btn_right) return;
+
+    if (s_hide_buttons) {
+        lv_obj_add_flag(s_btn_left,  LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_btn_right, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(s_pad, TP_PAD_X, TP_PAD_FULL_Y);
+        lv_obj_set_size(s_pad, TP_PAD_W, TP_PAD_FULL_H);
+    } else {
+        lv_obj_clear_flag(s_btn_left,  LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_btn_right, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(s_pad, TP_PAD_X, TP_PAD_Y);
+        lv_obj_set_size(s_pad, TP_PAD_W, TP_PAD_H);
+    }
+    lv_obj_update_layout(s_pad);   /* region_at() reads the coords right away */
+}
+
+/* Pad / buttons only take input while they're actually what the user
+ * is touching: not under Settings, not under the keyboard overlay. */
+static bool input_enabled(void)
+{
+    return s_page && !lv_obj_has_flag(s_page, LV_OBJ_FLAG_HIDDEN) && !ui_keyboard_is_open();
+}
+
+static bool obj_hit(lv_obj_t *obj, int16_t x, int16_t y)
+{
+    if (!obj || lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) return false;
     lv_area_t a;
-    lv_obj_get_coords(s_pad, &a);
+    lv_obj_get_coords(obj, &a);
+    return x >= a.x1 && x <= a.x2 && y >= a.y1 && y <= a.y2;
+}
 
-    lv_coord_t x = p.x - a.x1 - TP_DOT_SIZE / 2;
-    lv_coord_t y = p.y - a.y1 - TP_DOT_SIZE / 2;
-    lv_obj_set_pos(s_dot, x, y);
+/* Region a finger went down in (screen coordinates). */
+static tp_region_t region_at(int16_t x, int16_t y)
+{
+    if (!input_enabled()) return REG_NONE;
+    if (obj_hit(s_btn_left, x, y))  return REG_LEFT;
+    if (obj_hit(s_btn_right, x, y)) return REG_RIGHT;
+    if (obj_hit(s_pad, x, y))       return REG_PAD;
+    return REG_NONE;   /* sidebar, margins -- LVGL's business or nothing */
+}
+
+/* Buttons held = any finger that went down on them is still down. */
+static void update_buttons(void)
+{
+    bool l = false, r = false;
+    for (int i = 0; i < LVGL_PORT_TOUCH_MAX_POINTS; i++) {
+        if (!s_ct[i].active) continue;
+        if (s_ct[i].reg == REG_LEFT)  l = true;
+        if (s_ct[i].reg == REG_RIGHT) r = true;
+    }
+    if (l == s_left_held && r == s_right_held) return;
+
+    if (l != s_left_held && s_btn_left) {
+        if (l) lv_obj_add_state(s_btn_left, LV_STATE_PRESSED);
+        else   lv_obj_clear_state(s_btn_left, LV_STATE_PRESSED);
+        ESP_LOGI(TAG, "L %s", l ? "down" : "up");
+    }
+    if (r != s_right_held && s_btn_right) {
+        if (r) lv_obj_add_state(s_btn_right, LV_STATE_PRESSED);
+        else   lv_obj_clear_state(s_btn_right, LV_STATE_PRESSED);
+        ESP_LOGI(TAG, "R %s", r ? "down" : "up");
+    }
+    s_left_held  = l;
+    s_right_held = r;
+    if (l || r) s_gesture_btn = true;
+    push_buttons();
 }
 
 /* -----------------------------------------------------------------------
- * Event callbacks
+ * Pad gesture (fingers whose region is REG_PAD)
+ *
+ *   one finger   : move; tap = left click (after the double-tap window),
+ *                  tap + tap = double click, tap + touch-and-move = drag
+ *   two fingers  : axis locks on the first TP_AXIS_LOCK_PX of travel
+ *                  vertical   -> scroll (smooth + inertia)
+ *                  horizontal -> per "2-Finger Swipe": horizontal scroll,
+ *                                Back / Forward (once per gesture), or off
+ *                  quick tap  -> right click
+ *   a held L/R button plus a pad finger is just "button + move" -- that's
+ *   how click-and-drag selection works; taps are suppressed meanwhile.
  * ----------------------------------------------------------------------- */
-static void mouse_btn_cb(lv_event_t *e)
+static void gesture_begin(void)
 {
-    lv_event_code_t code = lv_event_get_code(e);
-    const char *name = (const char *)lv_event_get_user_data(e);
+    s_gesture        = true;
+    s_gesture_btn    = s_left_held || s_right_held;
+    s_pad_press_tick = lv_tick_get();
+    s_pad_travel     = 0;
+    s_pad_two        = false;
+    s_pad_two_frozen = false;
+    s_pad_two_travel = 0;
 
-    bool *held = (name[0] == 'L') ? &s_left_held : &s_right_held;
+    /* Touch landed inside the double-tap window: hold the pending tap
+     * back until we know whether this is a drag or a second tap. */
+    s_second_touch = s_tap_pending && tap_drag_enabled();
+    s_tap_pending  = false;
+}
 
-    if (code == LV_EVENT_PRESSED) {
-        *held = true;
-        push_buttons();
-        ESP_LOGI(TAG, "%s down", name);
-    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-        /* PRESS_LOST counts as up too -- a button must never be left
-         * logically held once the finger is gone. */
-        if (!*held) return;
-        *held = false;
-        push_buttons();
-        ESP_LOGI(TAG, "%s up", name);
+static void two_begin(void)
+{
+    s_pad_two    = true;
+    s_two_axis   = 0;
+    s_two_sum_x  = 0;
+    s_two_sum_y  = 0;
+    s_swipe_done = false;
+    if (s_second_touch) {
+        /* A tap was held back for tap-and-drag -- it was a click after all. */
+        click_left();
+        s_second_touch = false;
+    }
+    s_wheel_coast = 0;   /* a new two-finger touch stops any coasting */
+    ESP_LOGI(TAG, "two-finger gesture");
+}
+
+static void two_end(bool flick)
+{
+    if (s_two_axis == 1 || (s_two_axis == 2 && s_swipe_mode == TP_SWIPE_HSCROLL))
+        scroll_end(flick);
+}
+
+static void two_move(int dx, int dy)
+{
+    s_pad_two_travel += (uint32_t)(abs(dx) + abs(dy));
+
+    if (s_two_axis == 0) {
+        s_two_sum_x += dx;
+        s_two_sum_y += dy;
+        int ax = abs(s_two_sum_x), ay = abs(s_two_sum_y);
+        if (ax < TP_AXIS_LOCK_PX && ay < TP_AXIS_LOCK_PX) return;
+
+        s_two_axis = (ay >= ax) ? 1 : 2;
+        if (s_two_axis == 1) {
+            scroll_begin(0);
+            scroll_track(s_two_sum_y);   /* don't lose the travel used to decide */
+        } else if (s_swipe_mode == TP_SWIPE_HSCROLL) {
+            scroll_begin(1);
+            scroll_track(s_two_sum_x);
+        }
+        ESP_LOGI(TAG, "two-finger %s", s_two_axis == 1 ? "vertical" : "horizontal");
+        return;
+    }
+
+    if (s_two_axis == 1) {
+        scroll_track(dy);
+        return;
+    }
+
+    /* horizontal */
+    if (s_swipe_mode == TP_SWIPE_HSCROLL) {
+        scroll_track(dx);
+    } else if (s_swipe_mode == TP_SWIPE_BACK_FWD && !s_swipe_done) {
+        s_two_sum_x += dx;
+        if (s_two_sum_x >= TP_SWIPE_TRIGGER_PX || s_two_sum_x <= -TP_SWIPE_TRIGGER_PX) {
+            /* Same as browsers / macOS: swipe right = back, left = forward. */
+            bool back = s_two_sum_x > 0;
+            click_x(back ? HID_TP_BTN_BACK : HID_TP_BTN_FORWARD);
+            s_swipe_done = true;
+            ESP_LOGI(TAG, "swipe -> %s", back ? "back" : "forward");
+        }
     }
 }
 
-static void pad_cb(lv_event_t *e)
+static void gesture_end(void)
 {
-    lv_event_code_t code = lv_event_get_code(e);
+    uint32_t held = lv_tick_elaps(s_pad_press_tick);
+    s_gesture = false;
 
-    if (code == LV_EVENT_PRESSED) {
-        s_pad_press_tick = lv_tick_get();
-        s_pad_travel     = 0;
-        s_pad_two        = false;
-        s_pad_two_frozen = false;
-        s_pad_two_travel = 0;
-
-        /* Touch landed inside the double-tap window: hold the pending tap
-         * back until we know whether this is a drag or a second tap. */
-        s_second_touch = s_tap_pending;
-        s_tap_pending  = false;
-
-        pad_move_dot();
-        if (s_dot) lv_obj_clear_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
-    }
-    else if (code == LV_EVENT_PRESSING) {
-        lv_indev_t *indev = lv_indev_get_act();
-        if (!indev) return;
-
-        uint8_t pts = lvgl_port_touch_points();
-
-        /* Second finger down -> two-finger scroll for the rest of this
-         * touch. Not while dragging (left button held). */
-        if (!s_pad_two && pts >= 2 && !s_dragging) {
-            s_pad_two = true;
-            if (s_second_touch) {
-                /* A tap was being held back for tap-and-drag -- it was a
-                 * real click after all. */
-                click_left();
-                s_second_touch = false;
-            }
-            scroll_begin();
-            ESP_LOGI(TAG, "two-finger scroll");
+    if (s_pad_two) {
+        if (!s_pad_two_frozen) two_end(true);
+        if (tap_enabled() && !s_gesture_btn &&
+            held < TP_TWO_TAP_MAX_MS && s_pad_two_travel < TP_TWO_TAP_MAX_TRAVEL) {
+            click_right();
+            ESP_LOGI(TAG, "two-finger tap -> right click");
         }
-
-        lv_point_t v;
-        lv_indev_get_vect(indev, &v);
-
-        if (s_pad_two) {
-            if (s_pad_two_frozen) return;
-            if (pts < 2) {
-                /* One finger lifted. LVGL's point 0 may now jump to the
-                 * other finger, so stop here; a fast lift still flicks. */
-                s_pad_two_frozen = true;
-                scroll_end(true);
-                return;
-            }
-            scroll_track(v.y);
-            s_pad_two_travel += (uint32_t)(abs(v.x) + abs(v.y));
-            return;
-        }
-
-        if (v.x == 0 && v.y == 0) return;
-
-        send_move(v.x, v.y);
-        s_pad_travel += (uint32_t)(abs(v.x) + abs(v.y));
-        pad_move_dot();
-
-        if (s_second_touch && !s_dragging && s_pad_travel >= TP_TAP_MAX_TRAVEL) {
-            s_dragging = true;
-            push_buttons();
-            ESP_LOGI(TAG, "drag start");
-        }
-    }
-    else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-        if (s_dot) lv_obj_add_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
-
-        uint32_t held  = lv_tick_elaps(s_pad_press_tick);
-
-        if (s_pad_two) {
-            if (!s_pad_two_frozen) scroll_end(code == LV_EVENT_RELEASED);
-            /* Quick two-finger tap with (almost) no scrolling = right click. */
-            if (s_tap_click && code == LV_EVENT_RELEASED &&
-                held < TP_TWO_TAP_MAX_MS && s_pad_two_travel < TP_TWO_TAP_MAX_TRAVEL) {
-                click_right();
-                ESP_LOGI(TAG, "two-finger tap -> right click");
-            }
-            s_pad_two      = false;
-            s_second_touch = false;
-            return;
-        }
-
-        bool     is_tap = s_tap_click && (code == LV_EVENT_RELEASED) &&
-                          held < TP_TAP_MAX_MS && s_pad_travel < TP_TAP_MAX_TRAVEL;
-
-        if (s_dragging) {
-            s_dragging = false;
-            push_buttons();
-            ESP_LOGI(TAG, "drag end");
-        } else if (s_second_touch) {
-            /* First tap was held back; this touch didn't become a drag. */
-            click_left();
-            if (is_tap) {
-                click_left();
-                ESP_LOGI(TAG, "double click");
-            } else {
-                ESP_LOGI(TAG, "click");
-            }
-        } else if (is_tap) {
-            s_tap_pending = true;
-            s_tap_tick    = lv_tick_get();
-        }
+        s_pad_two      = false;
         s_second_touch = false;
+        return;
     }
+
+    bool is_tap = tap_enabled() && !s_gesture_btn &&
+                  held < TP_TAP_MAX_MS && s_pad_travel < TP_TAP_MAX_TRAVEL;
+
+    if (s_dragging) {
+        s_dragging = false;
+        push_buttons();
+        ESP_LOGI(TAG, "drag end");
+    } else if (s_second_touch) {
+        /* First tap was held back; this touch didn't become a drag. */
+        click_left();
+        if (is_tap) {
+            click_left();
+            ESP_LOGI(TAG, "double click");
+        } else {
+            ESP_LOGI(TAG, "click");
+        }
+    } else if (is_tap && tap_drag_enabled()) {
+        /* Wait out the double-tap window: a touch inside it may still
+         * become a drag (flush_timer_cb() clicks if it doesn't). */
+        s_tap_pending = true;
+        s_tap_tick    = lv_tick_get();
+    } else if (is_tap) {
+        click_left();   /* no tap-and-drag: click now; two taps = double click */
+        ESP_LOGI(TAG, "click");
+    }
+    s_second_touch = false;
+}
+
+/* One read's worth of pad fingers. */
+static void gesture_update(int pad_count, int dx_sum, int dy_sum, int moved)
+{
+    if (!s_gesture) {
+        if (pad_count == 0) return;
+        gesture_begin();
+    }
+    if (pad_count == 0) {
+        gesture_end();
+        return;
+    }
+
+    if (!s_pad_two && pad_count >= 2 && !s_dragging) two_begin();
+
+    if (s_pad_two) {
+        if (s_pad_two_frozen) return;
+        if (pad_count < 2) {
+            /* One finger lifted: stop here, a fast lift still flicks. */
+            s_pad_two_frozen = true;
+            two_end(true);
+            return;
+        }
+        if (moved) two_move(dx_sum / moved, dy_sum / moved);   /* average of both fingers */
+        return;
+    }
+
+    if (dx_sum == 0 && dy_sum == 0) return;
+    send_move(dx_sum, dy_sum);
+    s_pad_travel += (uint32_t)(abs(dx_sum) + abs(dy_sum));
+
+    if (s_second_touch && !s_dragging && tap_drag_enabled() && s_pad_travel >= TP_TAP_MAX_TRAVEL) {
+        s_dragging = true;
+        push_buttons();
+        ESP_LOGI(TAG, "drag start");
+    }
+}
+
+/* Drop every finger and gesture (Settings / keyboard came up over the
+ * pad): buttons up, no taps fired. Fingers still down stay tracked as
+ * REG_NONE so they can't turn into pad input when the overlay closes. */
+static void input_cancel(void)
+{
+    for (int i = 0; i < LVGL_PORT_TOUCH_MAX_POINTS; i++) s_ct[i].reg = REG_NONE;
+    if (s_gesture) {
+        if (s_pad_two && !s_pad_two_frozen) two_end(false);
+        s_gesture = s_pad_two = s_dragging = s_second_touch = false;
+        push_buttons();
+    }
+    update_buttons();
+}
+
+/* lvgl_port touch hook -- every touch read, LVGL task. */
+static void tp_touch_hook(const lvgl_port_touch_t *t)
+{
+    int n = t->count;
+    bool taken[LVGL_PORT_TOUCH_MAX_POINTS] = { false };
+    bool still[LVGL_PORT_TOUCH_MAX_POINTS] = { false };
+
+    /* 1. Match existing fingers to new points, nearest first. */
+    for (;;) {
+        int best_c = -1, best_p = -1;
+        int32_t best_d = (int32_t)TP_MATCH_MAX_PX * TP_MATCH_MAX_PX;
+        for (int c = 0; c < LVGL_PORT_TOUCH_MAX_POINTS; c++) {
+            if (!s_ct[c].active || still[c]) continue;
+            for (int p = 0; p < n; p++) {
+                if (taken[p]) continue;
+                int32_t ddx = (int32_t)t->x[p] - s_ct[c].x;
+                int32_t ddy = (int32_t)t->y[p] - s_ct[c].y;
+                int32_t d = ddx * ddx + ddy * ddy;
+                if (d <= best_d) { best_d = d; best_c = c; best_p = p; }
+            }
+        }
+        if (best_c < 0) break;
+        tp_contact_t *ct = &s_ct[best_c];
+        ct->dx = (int16_t)(t->x[best_p] - ct->x);
+        ct->dy = (int16_t)(t->y[best_p] - ct->y);
+        ct->x  = (int16_t)t->x[best_p];
+        ct->y  = (int16_t)t->y[best_p];
+        still[best_c] = true;
+        taken[best_p] = true;
+    }
+
+    /* 2. Unmatched fingers lifted. */
+    for (int c = 0; c < LVGL_PORT_TOUCH_MAX_POINTS; c++)
+        if (s_ct[c].active && !still[c]) s_ct[c].active = false;
+
+    /* 3. Unmatched points are new fingers: region fixed at touch-down. */
+    for (int p = 0; p < n; p++) {
+        if (taken[p]) continue;
+        for (int c = 0; c < LVGL_PORT_TOUCH_MAX_POINTS; c++) {
+            if (s_ct[c].active) continue;
+            s_ct[c].active = true;
+            s_ct[c].x  = (int16_t)t->x[p];
+            s_ct[c].y  = (int16_t)t->y[p];
+            s_ct[c].dx = s_ct[c].dy = 0;
+            s_ct[c].reg = region_at(s_ct[c].x, s_ct[c].y);
+            break;
+        }
+    }
+
+    if (!input_enabled()) {
+        input_cancel();
+        return;
+    }
+
+    /* 4. Buttons, then the pad gesture. */
+    update_buttons();
+
+    int pad_count = 0, moved = 0, dx_sum = 0, dy_sum = 0;
+    for (int c = 0; c < LVGL_PORT_TOUCH_MAX_POINTS; c++) {
+        if (!s_ct[c].active || s_ct[c].reg != REG_PAD) continue;
+        pad_count++;
+        if (still[c]) {   /* new fingers have no motion yet */
+            dx_sum += s_ct[c].dx;
+            dy_sum += s_ct[c].dy;
+            moved++;
+        }
+    }
+    gesture_update(pad_count, dx_sum, dy_sum, moved);
 }
 
 static void wheel_cb(lv_event_t *e)
@@ -478,7 +724,7 @@ static void wheel_cb(lv_event_t *e)
 
     if (code == LV_EVENT_PRESSED) {
         leave_settings();
-        scroll_begin();
+        scroll_begin(0);
         lv_obj_set_style_bg_color(s_wheel, lv_color_hex(COL_BTN), 0);
     }
     else if (code == LV_EVENT_PRESSING) {
@@ -817,7 +1063,10 @@ static lv_obj_t *build_mouse_btn(lv_coord_t x, const char *text, const char *nam
     lv_obj_set_style_bg_color(btn, lv_color_hex(COL_BTN_PRESSED), LV_STATE_PRESSED);
     lv_obj_set_style_radius(btn, 12, 0);
     lv_obj_set_style_shadow_width(btn, 0, 0);
-    lv_obj_add_event_cb(btn, mouse_btn_cb, LV_EVENT_ALL, (void *)name);
+    /* Driven by the touch engine (finger tracking), not LVGL events --
+     * the pressed look is set by hand in update_buttons(). */
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+    (void)name;
 
     lv_obj_t *lbl = lv_label_create(btn);
     lv_label_set_text(lbl, text);
@@ -833,6 +1082,12 @@ static void build_page(lv_obj_t *scr)
     lv_obj_set_size(s_page, CONTENT_W, CONTENT_H);
     lv_obj_set_pos(s_page, SIDEBAR_W, 0);
     lv_obj_set_style_bg_color(s_page, lv_color_hex(COL_PAGE_BG), 0);
+    /* Content area input comes from the touch engine (tp_touch_hook()).
+     * The page stays clickable on purpose but does nothing: LVGL's own
+     * press (first finger) has to land somewhere, and landing here -- with
+     * scroll chaining / gesture bubbling cut -- keeps a drag on the pad
+     * from ever being picked up as a scroll of the screen behind it. */
+    lv_obj_clear_flag(s_page, LV_OBJ_FLAG_SCROLL_CHAIN | LV_OBJ_FLAG_GESTURE_BUBBLE);
 
     bool has_bg = build_bg();
 
@@ -852,9 +1107,7 @@ static void build_page(lv_obj_t *scr)
     lv_obj_set_style_radius(s_pad, 12, 0);
     lv_obj_set_style_border_width(s_pad, 1, 0);
     lv_obj_set_style_border_color(s_pad, lv_color_hex(COL_BORDER), 0);
-    lv_obj_add_flag(s_pad, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
-    lv_obj_clear_flag(s_pad, LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_SCROLL_CHAIN);
-    lv_obj_add_event_cb(s_pad, pad_cb, LV_EVENT_ALL, NULL);
+    lv_obj_clear_flag(s_pad, LV_OBJ_FLAG_CLICKABLE);   /* touch engine, see tp_touch_hook() */
     if (has_bg) lv_obj_set_style_bg_opa(s_pad, OPA_SURFACE_ON_BG, 0);
 
     lv_obj_t *hint = lv_label_create(s_pad);
@@ -864,15 +1117,6 @@ static void build_page(lv_obj_t *scr)
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_20, 0);
     lv_obj_center(hint);
 
-#if TP_SHOW_DOT
-    s_dot = make_plain_obj(s_pad);
-    lv_obj_set_size(s_dot, TP_DOT_SIZE, TP_DOT_SIZE);
-    lv_obj_set_style_radius(s_dot, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(s_dot, lv_color_hex(COL_ACCENT), 0);
-    lv_obj_set_style_bg_opa(s_dot, LV_OPA_60, 0);
-    lv_obj_clear_flag(s_dot, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
-#endif
 }
 
 /* -----------------------------------------------------------------------
@@ -892,6 +1136,7 @@ void ui_touchpad_enter(lv_obj_t *sidebar)
     prefs_load();
     s_move_rem_x = s_move_rem_y = s_wheel_rem = 0;
     apply_hide_labels();
+    apply_layout();
 
     s_wheel_offset    = 0;
     s_wheel_vel       = 0;
@@ -906,6 +1151,10 @@ void ui_touchpad_enter(lv_obj_t *sidebar)
     usb_hid_tp_reset_motion();
     push_buttons();   /* state 0 -- no-op unless an old release is still queued */
 
+    memset(s_ct, 0, sizeof(s_ct));
+    s_gesture = false;
+    lvgl_port_set_touch_hook(tp_touch_hook);
+
     set_fast_touch_read(true);
     s_flush_timer = lv_timer_create(flush_timer_cb, TP_FLUSH_PERIOD_MS, NULL);
 
@@ -917,6 +1166,10 @@ void ui_touchpad_exit(void)
     /* Release anything held and try to get it out now. If the endpoint is
      * busy the release stays queued and goes out on the next enter; the
      * PC side also releases everything on disconnect. */
+    lvgl_port_set_touch_hook(NULL);
+    memset(s_ct, 0, sizeof(s_ct));
+    s_gesture = false;
+
     s_tap_pending = s_second_touch = s_dragging = false;
     s_left_held = s_right_held = false;
     s_wheel_coast = 0;
@@ -940,7 +1193,7 @@ void ui_touchpad_exit(void)
         lv_obj_del(s_page);   /* also deletes bg img/mask, buttons, pad, dot */
         s_page = NULL;
     }
-    s_bg_img = s_bg_mask = s_btn_left = s_btn_right = s_pad = s_dot = NULL;
+    s_bg_img = s_bg_mask = s_btn_left = s_btn_right = s_pad = NULL;
     s_lbl_left = s_lbl_right = s_lbl_hint = NULL;
 
     if (s_bg_data) {
@@ -1032,6 +1285,9 @@ static void prefs_load(void)
     s_natural    = nvs_get_int(CFG_NVS_KEY_TPAD_NATURAL, 1) != 0;
     s_inertia    = nvs_get_int(CFG_NVS_KEY_TPAD_INERTIA, 1) != 0;
     s_tap_click  = nvs_get_int(CFG_NVS_KEY_TPAD_TAP, 1) != 0;
+    s_hide_buttons = nvs_get_int(CFG_NVS_KEY_TPAD_HIDE_BTN, 0) != 0;
+    s_swipe_mode = nvs_get_int(CFG_NVS_KEY_TPAD_SWIPE, TP_SWIPE_HSCROLL);
+    if (s_swipe_mode < 0 || s_swipe_mode >= TP_SWIPE_COUNT) s_swipe_mode = TP_SWIPE_HSCROLL;
     s_prefs_loaded = true;
 }
 
@@ -1086,6 +1342,31 @@ void ui_touchpad_set_tap_click(bool on)
     s_tap_click = on;
     if (!on) s_tap_pending = false;   /* drop a tap still waiting out its window */
     nvs_set_int(CFG_NVS_KEY_TPAD_TAP, on);
+}
+
+bool ui_touchpad_get_hide_buttons(void) { prefs_load(); return s_hide_buttons; }
+
+void ui_touchpad_set_hide_buttons(bool on)
+{
+    prefs_load();
+    s_hide_buttons = on;
+    nvs_set_int(CFG_NVS_KEY_TPAD_HIDE_BTN, on);
+    apply_layout();
+}
+
+static const char *const s_swipe_names[TP_SWIPE_COUNT] = {
+    "Off", "Horizontal Scroll", "Back / Forward",
+};
+
+const char *const *ui_touchpad_swipe_mode_names(void) { return s_swipe_names; }
+int  ui_touchpad_get_swipe_mode(void) { prefs_load(); return s_swipe_mode; }
+
+void ui_touchpad_set_swipe_mode(int mode)
+{
+    if (mode < 0 || mode >= TP_SWIPE_COUNT) return;
+    prefs_load();
+    s_swipe_mode = mode;
+    nvs_set_int(CFG_NVS_KEY_TPAD_SWIPE, mode);
 }
 
 void ui_touchpad_deselect_current(void)

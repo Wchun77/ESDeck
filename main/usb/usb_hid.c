@@ -701,6 +701,7 @@ void usb_hid_media_seek(uint32_t position_ms)
 static int32_t s_tp_dx    = 0;
 static int32_t s_tp_dy    = 0;
 static int32_t s_tp_wheel = 0;
+static int32_t s_tp_hwheel = 0;
 
 static uint8_t s_tp_btn_q[TP_BTN_QUEUE_LEN];
 static uint8_t s_tp_btn_head  = 0;
@@ -709,7 +710,8 @@ static uint8_t s_tp_btn_last  = 0;   /* newest queued (or current) mask */
 
 void usb_hid_tp_move(int dx, int dy)  { s_tp_dx += dx; s_tp_dy += dy; }
 void usb_hid_tp_wheel(int pixels)     { s_tp_wheel += pixels; }
-void usb_hid_tp_reset_motion(void)    { s_tp_dx = s_tp_dy = s_tp_wheel = 0; }
+void usb_hid_tp_hwheel(int pixels)    { s_tp_hwheel += pixels; }
+void usb_hid_tp_reset_motion(void)    { s_tp_dx = s_tp_dy = s_tp_wheel = s_tp_hwheel = 0; }
 
 void usb_hid_tp_buttons(uint8_t mask)
 {
@@ -733,8 +735,17 @@ static int32_t tp_clamp(int32_t v, int32_t lo, int32_t hi)
 void usb_hid_tp_flush(void)
 {
     bool have_btn = s_tp_btn_count > 0;
-    if (!have_btn && s_tp_dx == 0 && s_tp_dy == 0 && s_tp_wheel == 0) return;
+    bool have_move = have_btn || s_tp_dx || s_tp_dy || s_tp_wheel;
+    if (!have_move && s_tp_hwheel == 0) return;
     if (!s_active || !tud_hid_ready()) return;
+
+    if (!have_move) {
+        /* Horizontal wheel only -- its own report type (see usb_hid.h). */
+        int32_t hw = tp_clamp(s_tp_hwheel, INT8_MIN, INT8_MAX);
+        uint8_t hrep[8] = { HID_TP_PAGE, HID_TP_CMD_HWHEEL, (uint8_t)(int8_t)hw, s_tp_btn_last, 0, 0, 0, 0 };
+        if (tud_hid_report(0, hrep, sizeof(hrep))) s_tp_hwheel -= hw;
+        return;
+    }
 
     int32_t dx = tp_clamp(s_tp_dx, INT16_MIN, INT16_MAX);
     int32_t dy = tp_clamp(s_tp_dy, INT16_MIN, INT16_MAX);

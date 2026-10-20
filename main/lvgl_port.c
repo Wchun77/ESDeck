@@ -426,16 +426,24 @@ static lv_disp_t *display_init(esp_lcd_panel_handle_t panel_handle)
     return lv_disp_drv_register(&disp_drv); // Register the display driver
 }
 
-/* Number of fingers seen on the last read (0..LVGL_PORT_TOUCH_POINTS).
- * LVGL itself only ever gets point 0 -- this is just extra information for
- * code that wants to know a second finger is down (Touchpad mode's
- * two-finger scroll). Written/read on the LVGL task only. */
-#define LVGL_PORT_TOUCH_POINTS  2
-static uint8_t s_touch_points = 0;
+/* Every touch read (all points, not just the one LVGL gets) -- see
+ * lvgl_port_touch_t in lvgl_port.h. Written/read on the LVGL task only. */
+static lvgl_port_touch_t      s_touch      = { 0 };
+static lvgl_port_touch_hook_t s_touch_hook = NULL;
 
 uint8_t lvgl_port_touch_points(void)
 {
-    return s_touch_points;
+    return s_touch.count;
+}
+
+const lvgl_port_touch_t *lvgl_port_touch_get(void)
+{
+    return &s_touch;
+}
+
+void lvgl_port_set_touch_hook(lvgl_port_touch_hook_t hook)
+{
+    s_touch_hook = hook;
 }
 
 static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
@@ -443,26 +451,29 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
     esp_lcd_touch_handle_t tp = (esp_lcd_touch_handle_t)indev_drv->user_data; // Get touchpad handle from user data
     assert(tp); // Ensure touchpad handle is valid
 
-    uint16_t touchpad_x[LVGL_PORT_TOUCH_POINTS]; // X coordinates
-    uint16_t touchpad_y[LVGL_PORT_TOUCH_POINTS]; // Y coordinates
     uint8_t touchpad_cnt = 0; // Variable for touch count
 
     /* Read data from touch controller into memory */
     esp_lcd_touch_read_data(tp); // Read data from touch controller
 
-    /* Read up to 2 points; only point 0 drives LVGL (same as before) */
-    bool touchpad_pressed = esp_lcd_touch_get_coordinates(tp, touchpad_x, touchpad_y, NULL,
-                                                          &touchpad_cnt, LVGL_PORT_TOUCH_POINTS);
+    /* Read up to LVGL_PORT_TOUCH_MAX_POINTS points; only point 0 drives
+     * LVGL (same as before), the full set goes to s_touch / the hook. */
+    bool touchpad_pressed = esp_lcd_touch_get_coordinates(tp, s_touch.x, s_touch.y, NULL,
+                                                          &touchpad_cnt, LVGL_PORT_TOUCH_MAX_POINTS);
     if (touchpad_pressed && touchpad_cnt > 0) {
-        data->point.x = touchpad_x[0]; // Set the X coordinate
-        data->point.y = touchpad_y[0]; // Set the Y coordinate
+        if (touchpad_cnt > LVGL_PORT_TOUCH_MAX_POINTS) touchpad_cnt = LVGL_PORT_TOUCH_MAX_POINTS;
+        data->point.x = s_touch.x[0]; // Set the X coordinate
+        data->point.y = s_touch.y[0]; // Set the Y coordinate
         data->state = LV_INDEV_STATE_PRESSED; // Set state to pressed
-        s_touch_points = touchpad_cnt;
-        ESP_LOGD(TAG, "Touch position: %d,%d (%d pts)", touchpad_x[0], touchpad_y[0], touchpad_cnt);
+        s_touch.count = touchpad_cnt;
+        ESP_LOGD(TAG, "Touch position: %d,%d (%d pts)", s_touch.x[0], s_touch.y[0], touchpad_cnt);
     } else {
         data->state = LV_INDEV_STATE_RELEASED; // Set state to released
-        s_touch_points = 0;
+        s_touch.count = 0;
     }
+
+    /* Every read, including "no fingers", so the hook sees releases. */
+    if (s_touch_hook) s_touch_hook(&s_touch);
 }
 
 static lv_indev_t *indev_init(esp_lcd_touch_handle_t tp)

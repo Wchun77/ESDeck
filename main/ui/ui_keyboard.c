@@ -404,6 +404,11 @@ static void keyboard_exit_cb(lv_event_t *e)
 /* -----------------------------------------------------------------------
  * Public
  * ----------------------------------------------------------------------- */
+bool ui_keyboard_is_open(void)
+{
+    return s_screen != NULL;
+}
+
 void ui_keyboard_show(void)
 {
     if (s_screen) return;   /* already open */

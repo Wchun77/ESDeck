@@ -16,8 +16,11 @@
  *   - middle area   : per config sidebar_mode -- empty (default), scroll
  *                     wheel, or up to TP_HOTKEY_MAX hotkey buttons
  *
- * Pad gestures: tap = left click (sent after a 250 ms double-tap window),
- * tap + tap = double click, tap + touch-and-move = drag.
+ * Pad gestures: tap = left click, tap + tap = double click, two-finger
+ * move = scroll (vertical; horizontal per "2-Finger Swipe"), two-finger
+ * tap = right click. Drag / select = hold the Left button + move on the pad
+ * (fingers are tracked per region, see tp_touch_hook()); tap-and-drag is
+ * compiled out (TP_TAP_DRAG).
  * Input goes to the PC as HID_TP_PAGE reports (usb_hid.h); ESDeckPC turns
  * them into SendInput mouse events.
  * ----------------------------------------------------------------------- */
@@ -62,3 +65,20 @@ bool ui_touchpad_get_inertia(void);
 void ui_touchpad_set_inertia(bool on);
 bool ui_touchpad_get_tap_click(void);
 void ui_touchpad_set_tap_click(bool on);
+
+/* Hide Buttons: no Left/Right strip, the pad fills the content area. Tap to
+ * Click is treated as on while hidden (otherwise nothing could click). */
+bool ui_touchpad_get_hide_buttons(void);
+void ui_touchpad_set_hide_buttons(bool on);
+
+/* 2-Finger Swipe: what a horizontal two-finger move does. */
+typedef enum {
+    TP_SWIPE_OFF = 0,
+    TP_SWIPE_HSCROLL,     /* horizontal scroll (default) */
+    TP_SWIPE_BACK_FWD,    /* one Back / Forward (mouse buttons 4/5) per swipe */
+    TP_SWIPE_COUNT,
+} tp_swipe_mode_t;
+
+const char *const *ui_touchpad_swipe_mode_names(void);   /* TP_SWIPE_COUNT entries */
+int  ui_touchpad_get_swipe_mode(void);
+void ui_touchpad_set_swipe_mode(int mode);

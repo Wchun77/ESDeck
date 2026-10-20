@@ -56,6 +56,7 @@ typedef enum {
     SETTING_TOGGLE,
     SETTING_LABEL,    /* informational row, not clickable -- see render_current_level() */
     SETTING_VALUE,    /* "[-] value [+]" stepper -- see render_current_level() */
+    SETTING_CHOICE,   /* row shows current choice; tap = popup list, pick = close */
 } setting_node_type_t;
 
 typedef struct setting_node_s {
@@ -69,6 +70,10 @@ typedef struct setting_node_s {
     void                        (*set_state_cb)(bool on); /* used when type == SETTING_TOGGLE */
     const char                 *(*value_text_cb)(void);   /* used when type == SETTING_VALUE */
     void                        (*value_step_cb)(int dir);/* used when type == SETTING_VALUE: -1 / +1 */
+    const char *const          *(*choice_names_cb)(void); /* used when type == SETTING_CHOICE */
+    int                           choice_count;
+    int                         (*choice_get_cb)(void);
+    void                        (*choice_set_cb)(int idx);
 } setting_node_t;
 
 #define SETTINGS_STACK_MAX 4
@@ -79,7 +84,9 @@ static ui_mode_t  s_mode = UI_MODE_DECK;
 /* Settings page widgets */
 static lv_obj_t *s_panel          = NULL;  /* the Settings "page" shell (right of sidebar, zero padding -- bg/mask attach directly to this, like ui_deck.c's page/btn_cont split) */
 static lv_obj_t *s_content        = NULL;  /* padded flex column inside s_panel, holds header + s_list */
-static lv_obj_t *s_list           = NULL;  /* scrollable item list inside the page */
+static lv_obj_t *s_list           = NULL;  /* item list inside the page (paged, see page_btn_cb) */
+static lv_obj_t *s_pg_up_btn      = NULL;  /* header: previous / next page of s_list */
+static lv_obj_t *s_pg_dn_btn      = NULL;
 static lv_obj_t *s_back_btn       = NULL;
 static lv_obj_t *s_back_lbl       = NULL;  /* back_btn's glyph -- swaps LV_SYMBOL_LEFT/CLOSE with menu depth */
 static lv_obj_t *s_breadcrumb_lbl = NULL;
@@ -637,6 +644,8 @@ static void item_boot_anim_cb(lv_event_t *e)
 static const setting_node_t s_touchpad_menu[] = {
     { "Hide Labels",    SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
       ui_touchpad_get_hide_labels, ui_touchpad_set_hide_labels },
+    { "Hide Buttons",   SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
+      ui_touchpad_get_hide_buttons, ui_touchpad_set_hide_buttons },
     { "Cursor Speed",   SETTING_VALUE,  SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL,
       ui_touchpad_cursor_speed_text, ui_touchpad_cursor_speed_step },
     { "Scroll Speed",   SETTING_VALUE,  SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL,
@@ -647,6 +656,9 @@ static const setting_node_t s_touchpad_menu[] = {
       ui_touchpad_get_inertia, ui_touchpad_set_inertia },
     { "Tap to Click",   SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
       ui_touchpad_get_tap_click, ui_touchpad_set_tap_click },
+    { "2-Finger Swipe", SETTING_CHOICE, SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL, NULL, NULL,
+      ui_touchpad_swipe_mode_names, TP_SWIPE_COUNT,
+      ui_touchpad_get_swipe_mode, ui_touchpad_set_swipe_mode },
 };
 
 static const setting_node_t s_custom_menu[] = {
@@ -703,6 +715,7 @@ static const setting_node_t s_root_menu[] = {
  * Menu navigation / rendering
  * ----------------------------------------------------------------------- */
 static void render_current_level(void);
+static void choice_open(const struct setting_node_s *node);
 
 /* usb_hid_conn_cb_t -- fires once TinyUSB's own ATTACHED/DETACHED event
  * lands (already hopped onto the LVGL task, see usb_hid.c), i.e. this is
@@ -731,6 +744,10 @@ static void generic_item_cb(lv_event_t *e)
 {
     const setting_node_t *node = (const setting_node_t *)lv_event_get_user_data(e);
 
+    if (node->type == SETTING_CHOICE) {
+        choice_open(node);
+        return;
+    }
     if (node->type == SETTING_SUBMENU) {
         if (s_stack_depth + 1 >= SETTINGS_STACK_MAX) return;
         s_stack_depth++;
@@ -767,6 +784,79 @@ static void value_step_btn_cb(lv_event_t *e)
 
     lv_obj_t *val = lv_obj_get_child(lv_obj_get_parent(btn), 2);
     if (val && node->value_text_cb) lv_label_set_text(val, node->value_text_cb());
+}
+
+/* SETTING_CHOICE popup -- same look as the Boot Animation picker. Each
+ * list item carries its index in its own user data; the popup root is
+ * deleted on pick or on a tap outside the box. */
+static const setting_node_t *s_choice_node = NULL;
+
+static void choice_pick_cb(lv_event_t *e)
+{
+    lv_obj_t *btn  = lv_event_get_target(e);
+    int       idx  = (int)(intptr_t)lv_obj_get_user_data(btn);
+    lv_obj_t *root = lv_obj_get_parent(lv_obj_get_parent(btn));   /* root -> box -> item */
+
+    if (s_choice_node && s_choice_node->choice_set_cb) s_choice_node->choice_set_cb(idx);
+    s_choice_node = NULL;
+    lv_obj_del(root);
+    render_current_level();   /* refresh the row's value text */
+}
+
+static void choice_dismiss_cb(lv_event_t *e)
+{
+    s_choice_node = NULL;
+    lv_obj_del(lv_event_get_target(e));
+}
+
+static void choice_open(const setting_node_t *node)
+{
+    const char *const *names = node->choice_names_cb ? node->choice_names_cb() : NULL;
+    if (!names) return;
+    int cur = node->choice_get_cb ? node->choice_get_cb() : -1;
+    s_choice_node = node;
+
+    lv_obj_t *root = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(root, SCREEN_W, SCREEN_H);
+    lv_obj_set_pos(root, 0, 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(root, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(root, 0, 0);
+    lv_obj_set_style_radius(root, 0, 0);
+    lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(root, choice_dismiss_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *box = lv_obj_create(root);
+    lv_obj_set_size(box, 320, LV_SIZE_CONTENT);
+    lv_obj_center(box);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x1e1e1e), 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x444444), 0);
+    lv_obj_set_style_border_width(box, 1, 0);
+    lv_obj_set_style_radius(box, 12, 0);
+    lv_obj_set_style_pad_all(box, 16, 0);
+    lv_obj_set_layout(box, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(box, 8, 0);
+    lv_obj_add_event_cb(box, lv_event_stop_processing, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text(title, node->label);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x888888), 0);
+
+    for (int i = 0; i < node->choice_count; i++) {
+        lv_obj_t *item = lv_btn_create(box);
+        lv_obj_set_width(item, LV_PCT(100));
+        lv_obj_set_style_bg_color(item, (i == cur) ? lv_color_hex(0x2a5a8a) : lv_color_hex(0x2a2a2a), 0);
+        lv_obj_set_style_bg_color(item, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
+        lv_obj_set_style_radius(item, 4, 0);
+        lv_obj_clear_flag(item, LV_OBJ_FLAG_PRESS_LOCK);
+        lv_obj_set_user_data(item, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(item, choice_pick_cb, LV_EVENT_CLICKED, NULL);
+
+        lv_obj_t *lbl = lv_label_create(item);
+        lv_label_set_text(lbl, names[i]);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 4, 0);
+    }
 }
 
 static lv_obj_t *value_step_btn(lv_obj_t *row, const setting_node_t *node, const char *sym, int dir)
@@ -816,6 +906,80 @@ static void back_btn_cb(lv_event_t *e)
     render_current_level();
 }
 
+/* -----------------------------------------------------------------------
+ * List paging -- s_list is never scrolled (a drag redraws the whole list
+ * every frame and the CPU can't keep up). Each level is split into pages
+ * of as many whole rows as fit; only the current page's rows are built,
+ * and the header's up/down buttons switch pages. 8 rows at 7 per page =
+ * page 1 with 7, page 2 with 1.
+ * ----------------------------------------------------------------------- */
+#define SETTINGS_ROW_H     48
+#define SETTINGS_ROW_GAP   8                                  /* s_list pad_row */
+#define SETTINGS_ROW_STEP  (SETTINGS_ROW_H + SETTINGS_ROW_GAP)
+/* s_list height: SCREEN_H - s_content padding (16*2) - header (40) -
+ * s_content row gap (12). Used when the list hasn't been laid out yet. */
+#define SETTINGS_LIST_H    (SCREEN_H - 32 - 40 - 12)
+
+static int                   s_page_idx = 0;
+static int                   s_page_cnt = 1;
+static const setting_node_t *s_page_arr = NULL;   /* level the page index belongs to */
+
+static int rows_per_page(void)
+{
+    lv_coord_t h = lv_obj_get_content_height(s_list);
+    if (h <= 0) h = SETTINGS_LIST_H;
+    int n = (h + SETTINGS_ROW_GAP) / SETTINGS_ROW_STEP;   /* last row needs no gap */
+    return n > 0 ? n : 1;
+}
+
+static void page_btn_set_enabled(lv_obj_t *btn, bool en)
+{
+    if (en) lv_obj_clear_state(btn, LV_STATE_DISABLED);
+    else    lv_obj_add_state(btn, LV_STATE_DISABLED);
+    lv_obj_set_style_text_opa(btn, en ? LV_OPA_COVER : LV_OPA_30, 0);
+}
+
+static void update_page_btns(void)
+{
+    if (!s_pg_up_btn || !s_pg_dn_btn) return;
+    if (s_page_cnt > 1) {
+        lv_obj_clear_flag(s_pg_up_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_pg_dn_btn, LV_OBJ_FLAG_HIDDEN);
+        page_btn_set_enabled(s_pg_up_btn, s_page_idx > 0);
+        page_btn_set_enabled(s_pg_dn_btn, s_page_idx < s_page_cnt - 1);
+    } else {
+        lv_obj_add_flag(s_pg_up_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_pg_dn_btn, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void page_btn_cb(lv_event_t *e)
+{
+    int dir = (int)(intptr_t)lv_event_get_user_data(e);   /* -1 up, +1 down */
+    int idx = s_page_idx + dir;
+    if (idx < 0 || idx >= s_page_cnt) return;
+    s_page_idx = idx;
+    render_current_level();
+}
+
+static lv_obj_t *make_header_btn(lv_obj_t *header, const char *sym)
+{
+    lv_obj_t *b = lv_btn_create(header);
+    lv_obj_set_size(b, 36, 36);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x2a2a2a), 0);
+    lv_obj_set_style_bg_opa(b, LV_OPA_50, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_grad_dir(b, LV_GRAD_DIR_NONE, 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_set_style_outline_width(b, 0, 0);
+    lv_obj_set_style_radius(b, 6, 0);
+    lv_obj_clear_flag(b, LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_t *l = lv_label_create(b);
+    lv_label_set_text(l, sym);
+    lv_obj_center(l);
+    return b;
+}
+
 static void render_current_level(void)
 {
     lv_obj_clean(s_list);
@@ -825,13 +989,32 @@ static void render_current_level(void)
     const setting_node_t *arr   = s_menu_stack[s_stack_depth];
     int                   count = s_menu_stack_count[s_stack_depth];
 
+    /* Paging over the rows actually shown in this mode. Entering a
+     * different level starts at its first page; re-rendering the same
+     * level (toggle, choice pick, HID status refresh) keeps the page. */
+    if (arr != s_page_arr) {
+        s_page_arr = arr;
+        s_page_idx = 0;
+    }
+    int visible = 0;
+    for (int i = 0; i < count; i++)
+        if (arr[i].mode_mask & mode_bit) visible++;
+    int per_page = rows_per_page();
+    s_page_cnt = visible > 0 ? (visible + per_page - 1) / per_page : 1;
+    if (s_page_idx >= s_page_cnt) s_page_idx = s_page_cnt - 1;
+    int first = s_page_idx * per_page;
+    int last  = first + per_page;   /* exclusive */
+
+    int vis_idx = -1;
     for (int i = 0; i < count; i++) {
         const setting_node_t *node = &arr[i];
         if (!(node->mode_mask & mode_bit)) continue;
+        vis_idx++;
+        if (vis_idx < first || vis_idx >= last) continue;
 
         lv_obj_t *item = lv_btn_create(s_list);
         lv_obj_set_width(item, LV_PCT(100));
-        lv_obj_set_height(item, 48);
+        lv_obj_set_height(item, SETTINGS_ROW_H);
         lv_obj_set_style_bg_color(item, lv_color_hex(0x2a2a2a), 0);
         lv_obj_set_style_bg_opa(item, LV_OPA_50, 0);
         lv_obj_set_style_bg_color(item, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
@@ -911,6 +1094,14 @@ static void render_current_level(void)
         } else {
             lv_obj_add_event_cb(item, generic_item_cb, LV_EVENT_CLICKED, (void *)node);
 
+            if (node->type == SETTING_CHOICE) {
+                const char *const *names = node->choice_names_cb ? node->choice_names_cb() : NULL;
+                int cur = node->choice_get_cb ? node->choice_get_cb() : -1;
+                lv_obj_t *val = lv_label_create(item);
+                lv_label_set_text(val, (names && cur >= 0 && cur < node->choice_count) ? names[cur] : "");
+                lv_obj_set_style_text_color(val, lv_color_hex(0x5aa0e0), 0);
+                lv_obj_align(val, LV_ALIGN_RIGHT_MID, -12, 0);
+            }
             if (node->type == SETTING_SUBMENU) {
                 lv_obj_t *chevron = lv_label_create(item);
                 lv_label_set_text(chevron, LV_SYMBOL_RIGHT);
@@ -931,6 +1122,7 @@ static void render_current_level(void)
         lv_label_set_text(s_back_lbl, LV_SYMBOL_LEFT);
     }
     lv_obj_clear_flag(s_back_btn, LV_OBJ_FLAG_HIDDEN);
+    update_page_btns();
 }
 
 /* Standalone decode path -- used only when there's no lazy/LRU pool to
@@ -1272,6 +1464,18 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
     lv_obj_set_style_text_font(s_breadcrumb_lbl, &lv_font_montserrat_20, 0);
     lv_obj_align(s_breadcrumb_lbl, LV_ALIGN_CENTER, 0, 0);
 
+    /* Page buttons, top right -- only shown when the level has more rows
+     * than fit (see update_page_btns()). */
+    s_pg_dn_btn = make_header_btn(header, LV_SYMBOL_DOWN);
+    lv_obj_align(s_pg_dn_btn, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_add_event_cb(s_pg_dn_btn, page_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)1);
+    lv_obj_add_flag(s_pg_dn_btn, LV_OBJ_FLAG_HIDDEN);
+
+    s_pg_up_btn = make_header_btn(header, LV_SYMBOL_UP);
+    lv_obj_align(s_pg_up_btn, LV_ALIGN_RIGHT_MID, -44, 0);
+    lv_obj_add_event_cb(s_pg_up_btn, page_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)-1);
+    lv_obj_add_flag(s_pg_up_btn, LV_OBJ_FLAG_HIDDEN);
+
     /* HID status lives as a System > HID Status row instead (see
      * s_system_menu[] / item_hid_status_cb) -- just register the redraw
      * hook here so that row's color/text stays live while visible. */
@@ -1289,8 +1493,11 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
     lv_obj_set_style_pad_all(s_list, 0, 0);
     lv_obj_set_layout(s_list, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(s_list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(s_list, 8, 0);
-    lv_obj_set_scrollbar_mode(s_list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_pad_row(s_list, SETTINGS_ROW_GAP, 0);
+    /* No scrolling at all (too heavy to redraw) -- one page of rows at a
+     * time, switched by the header buttons (see "List paging"). */
+    lv_obj_clear_flag(s_list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(s_list, LV_SCROLLBAR_MODE_OFF);
 
     s_menu_stack[0]       = s_root_menu;
     s_menu_stack_count[0] = (int)(sizeof(s_root_menu) / sizeof(s_root_menu[0]));

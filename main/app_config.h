@@ -172,6 +172,8 @@
 #define CFG_NVS_KEY_TPAD_NATURAL  "tp_natural"      /* "1" = finger down scrolls up */
 #define CFG_NVS_KEY_TPAD_INERTIA  "tp_inertia"      /* "1" = coast after a flick */
 #define CFG_NVS_KEY_TPAD_TAP      "tp_tapclick"     /* "1" = tap / two-finger tap click */
+#define CFG_NVS_KEY_TPAD_HIDE_BTN "tp_hide_btn"     /* "1" = no L/R buttons, pad fills the area */
+#define CFG_NVS_KEY_TPAD_SWIPE    "tp_swipe"        /* two-finger horizontal: tp_swipe_mode_t */
 #define CFG_NVS_KEY_BOOT_ANIM "boot_anim"
 
 /* --------------------------------------------------------------------------

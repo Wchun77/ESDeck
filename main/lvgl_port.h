@@ -158,10 +158,29 @@ bool lvgl_port_notify_rgb_vsync(void);
 
 TaskHandle_t lvgl_port_get_task_handle(void);
 
-/* Fingers on the panel at the last touch read (0, 1 or 2). LVGL only
- * tracks the first finger; this exposes whether a second one is down.
- * Call from the LVGL task. */
-uint8_t lvgl_port_touch_points(void);
+/* Multi-touch beyond what LVGL sees.
+ *
+ * LVGL's pointer indev only ever gets the first point. Every touch read
+ * also fills an lvgl_port_touch_t with all points (up to
+ * LVGL_PORT_TOUCH_MAX_POINTS; the GT911 itself supports 5 -- raise this to
+ * use more) and, if a hook is set, calls it right after the read, on the
+ * LVGL task, once per read period -- including reads with no finger down,
+ * so the hook sees releases. Point order is whatever the controller
+ * reports: callers that need finger identity must track it themselves
+ * (see Touchpad mode in ui_touchpad.c). All of this is LVGL-task only. */
+#define LVGL_PORT_TOUCH_MAX_POINTS  2
+
+typedef struct {
+    uint8_t  count;                               /* 0 = no finger */
+    uint16_t x[LVGL_PORT_TOUCH_MAX_POINTS];       /* screen coordinates */
+    uint16_t y[LVGL_PORT_TOUCH_MAX_POINTS];
+} lvgl_port_touch_t;
+
+typedef void (*lvgl_port_touch_hook_t)(const lvgl_port_touch_t *touch);
+
+uint8_t                  lvgl_port_touch_points(void);   /* = lvgl_port_touch_get()->count */
+const lvgl_port_touch_t *lvgl_port_touch_get(void);
+void                     lvgl_port_set_touch_hook(lvgl_port_touch_hook_t hook);   /* NULL = none */
 
 #ifdef __cplusplus
 }
