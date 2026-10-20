@@ -16,8 +16,10 @@
  *   - top button    : opens the existing mini keyboard (ui_keyboard_show())
  *   - middle strip  : scroll wheel (drag up/down)
  *
- * UI-only for now: every input is just logged (ESP_LOGI, tag "TOUCHPAD").
- * HID reporting to the PC is a later step.
+ * Pad gestures: tap = left click (sent after a 250 ms double-tap window),
+ * tap + tap = double click, tap + touch-and-move = drag.
+ * Input goes to the PC as HID_TP_PAGE reports (usb_hid.h); ESDeckPC turns
+ * them into SendInput mouse events.
  * ----------------------------------------------------------------------- */
 
 /* Reserved appearance config -- same idea as ui_media_config_t, intended

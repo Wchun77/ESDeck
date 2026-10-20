@@ -2,6 +2,7 @@
 #include "ui.h"
 #include "ui_settings.h"
 #include "ui_keyboard.h"
+#include "usb/usb_hid.h"
 #include "lvgl.h"
 #include "esp_log.h"
 #include <stdlib.h>
@@ -23,6 +24,10 @@ static const char *TAG = "TOUCHPAD";
 #define TP_PAD_W         (CONTENT_W - TP_MARGIN * 2)
 #define TP_PAD_H         (CONTENT_H - TP_BTN_BAR_H - TP_MARGIN)
 #define TP_DOT_SIZE      28
+/* Finger-position dot. Off for now: every dot move forces an LVGL redraw,
+ * which (AVOID_TEAR_MODE_3 waits for VSYNC) appears to slow down and jitter
+ * the touch read itself. Set to 1 to bring it back. */
+#define TP_SHOW_DOT      0
 
 /* Sidebar: keyboard button cell on top (same 80x80 cell / 64x64 button as
  * the gear cell in ui.c), wheel strip between it and the gear cell. */
@@ -34,14 +39,28 @@ static const char *TAG = "TOUCHPAD";
 #define WHEEL_W          SB_BTN
 #define WHEEL_H          (SCREEN_H - SB_CELL - SB_CELL - SB_PAD * 2)
 
+/* Wheel track: grip-line area between the up/down arrows, clipped so the
+ * lines never run under the arrows or leave a gap at either end. */
+#define WHEEL_ARROW_H    32
+#define WHEEL_TRACK_Y    WHEEL_ARROW_H
+#define WHEEL_TRACK_H    (WHEEL_H - WHEEL_ARROW_H * 2)
+
 /* Input tuning */
 #define TP_READ_PERIOD_MS   10    /* touch read period while in this mode (LVGL default here is 30) */
-#define TP_LOG_PERIOD_MS    100   /* throttle for motion logs */
+#define TP_FLUSH_PERIOD_MS  10    /* HID send period = IN endpoint bInterval */
 #define TP_TAP_MAX_MS       200   /* press->release shorter than this ... */
 #define TP_TAP_MAX_TRAVEL   10    /* ... and moved less than this (px) = tap */
-#define WHEEL_NOTCH_PX      24    /* finger travel per wheel notch */
-#define WHEEL_GRIP_LINES    9
-#define WHEEL_NATURAL       1     /* 1: finger up = scroll down (phone-style) */
+#define TP_DOUBLE_TAP_MS    250   /* window after a tap for tap-and-drag / double tap */
+#define WHEEL_NOTCH_PX      24    /* grip line spacing (visual only) */
+#define WHEEL_NATURAL       1     /* 1: finger down = scroll up (phone-style) */
+/* Smooth scrolling: raw finger pixels go to the PC (ESDeckPC scales them
+ * to fractional WHEEL_DELTA units), instead of whole 120-unit notches. */
+#define WHEEL_ANIM          0     /* grip lines follow the finger; off = no redraw while scrolling */
+#define WHEEL_INERTIA       1     /* keep scrolling after a flick, decaying */
+#define WHEEL_FRICTION      0.92f /* coast velocity kept per 10 ms tick */
+#define WHEEL_COAST_MIN     0.3f  /* px per tick below which coasting stops */
+#define WHEEL_FLICK_MIN     1.0f  /* px per tick needed at release to start coasting */
+#define WHEEL_FLICK_IDLE_MS 50    /* finger held still longer than this before release = no flick */
 
 /* Colors -- same palette as the other modes */
 #define COL_PAGE_BG     0x222222
@@ -67,21 +86,34 @@ static lv_obj_t *s_dot        = NULL;       /* finger position indicator */
 
 static lv_obj_t *s_kb_cell    = NULL;       /* sidebar: keyboard button cell */
 static lv_obj_t *s_wheel      = NULL;       /* sidebar: wheel strip */
-static lv_obj_t *s_wheel_grip = NULL;       /* moving grip lines inside the wheel */
+static lv_obj_t *s_wheel_grip = NULL;       /* moving grip lines inside the wheel track */
 
 static lv_indev_t *s_touch_indev   = NULL;
 static uint32_t    s_prev_read_ms  = 0;
+static lv_timer_t *s_flush_timer   = NULL;
 
-/* Pad gesture state */
+/* Pad gesture state
+ *   tap                 : click, delayed by TP_DOUBLE_TAP_MS so a second
+ *                         touch can still turn it into a drag
+ *   tap, then tap       : double click
+ *   tap, then touch+move: drag (left held until the finger lifts) */
 static uint32_t s_pad_press_tick = 0;
 static uint32_t s_pad_travel     = 0;
-static int32_t  s_pad_acc_dx     = 0;
-static int32_t  s_pad_acc_dy     = 0;
-static uint32_t s_pad_log_tick   = 0;
+static bool     s_tap_pending    = false;  /* a tap is waiting out the double-tap window */
+static uint32_t s_tap_tick       = 0;
+static bool     s_second_touch   = false;  /* current touch started inside that window */
+static bool     s_dragging       = false;
+
+/* Mouse button state from the L/R buttons */
+static bool     s_left_held      = false;
+static bool     s_right_held     = false;
 
 /* Wheel state */
-static int32_t  s_wheel_acc_px   = 0;   /* finger travel not yet turned into a notch */
 static int32_t  s_wheel_offset   = 0;   /* visual grip offset, wraps at WHEEL_NOTCH_PX */
+static float    s_wheel_vel      = 0;   /* smoothed finger speed, px per 10 ms */
+static uint32_t s_wheel_last_tick = 0;  /* last PRESSING with motion */
+static float    s_wheel_coast    = 0;   /* inertia speed after release, px per tick */
+static float    s_wheel_coast_rem = 0;  /* sub-pixel remainder of coasting */
 
 /* -----------------------------------------------------------------------
  * Helpers
@@ -123,12 +155,60 @@ static void set_fast_touch_read(bool fast)
     }
 }
 
-static void pad_flush_motion_log(void)
+static uint8_t current_mask(void)
 {
-    if (s_pad_acc_dx == 0 && s_pad_acc_dy == 0) return;
-    ESP_LOGI(TAG, "move dx=%ld dy=%ld", (long)s_pad_acc_dx, (long)s_pad_acc_dy);
-    s_pad_acc_dx = 0;
-    s_pad_acc_dy = 0;
+    uint8_t m = 0;
+    if (s_left_held || s_dragging) m |= HID_TP_BTN_LEFT;
+    if (s_right_held)              m |= HID_TP_BTN_RIGHT;
+    return m;
+}
+
+static void push_buttons(void)
+{
+    usb_hid_tp_buttons(current_mask());
+}
+
+static void click_left(void)
+{
+    uint8_t m = current_mask();
+    usb_hid_tp_buttons(m | HID_TP_BTN_LEFT);
+    usb_hid_tp_buttons(m & (uint8_t)~HID_TP_BTN_LEFT);
+}
+
+/* 10 ms: release a pending tap once its double-tap window has passed,
+ * then send whatever is staged. */
+/* Finger pixels -> wheel (+ = scroll up, Windows sign). */
+static void send_wheel_px(int finger_px)
+{
+    usb_hid_tp_wheel(WHEEL_NATURAL ? finger_px : -finger_px);
+}
+
+static void wheel_coast_step(void)
+{
+    if (s_wheel_coast == 0) return;
+
+    s_wheel_coast_rem += s_wheel_coast;
+    int step = (int)s_wheel_coast_rem;
+    s_wheel_coast_rem -= (float)step;
+    if (step != 0) send_wheel_px(step);
+
+    s_wheel_coast *= WHEEL_FRICTION;
+    if (s_wheel_coast < WHEEL_COAST_MIN && s_wheel_coast > -WHEEL_COAST_MIN) {
+        s_wheel_coast     = 0;
+        s_wheel_coast_rem = 0;
+    }
+}
+
+static void flush_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    wheel_coast_step();
+    if (s_tap_pending && lv_tick_elaps(s_tap_tick) >= TP_DOUBLE_TAP_MS) {
+        s_tap_pending = false;
+        click_left();
+        ESP_LOGI(TAG, "click");
+    }
+    usb_hid_tp_flush();
 }
 
 static void pad_move_dot(void)
@@ -155,11 +235,18 @@ static void mouse_btn_cb(lv_event_t *e)
     lv_event_code_t code = lv_event_get_code(e);
     const char *name = (const char *)lv_event_get_user_data(e);
 
+    bool *held = (name[0] == 'L') ? &s_left_held : &s_right_held;
+
     if (code == LV_EVENT_PRESSED) {
+        *held = true;
+        push_buttons();
         ESP_LOGI(TAG, "%s down", name);
     } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
         /* PRESS_LOST counts as up too -- a button must never be left
          * logically held once the finger is gone. */
+        if (!*held) return;
+        *held = false;
+        push_buttons();
         ESP_LOGI(TAG, "%s up", name);
     }
 }
@@ -170,12 +257,15 @@ static void pad_cb(lv_event_t *e)
 
     if (code == LV_EVENT_PRESSED) {
         s_pad_press_tick = lv_tick_get();
-        s_pad_log_tick   = s_pad_press_tick;
         s_pad_travel     = 0;
-        s_pad_acc_dx     = 0;
-        s_pad_acc_dy     = 0;
+
+        /* Touch landed inside the double-tap window: hold the pending tap
+         * back until we know whether this is a drag or a second tap. */
+        s_second_touch = s_tap_pending;
+        s_tap_pending  = false;
+
         pad_move_dot();
-        lv_obj_clear_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
+        if (s_dot) lv_obj_clear_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
     }
     else if (code == LV_EVENT_PRESSING) {
         lv_indev_t *indev = lv_indev_get_act();
@@ -183,28 +273,43 @@ static void pad_cb(lv_event_t *e)
 
         lv_point_t v;
         lv_indev_get_vect(indev, &v);
-        if (v.x != 0 || v.y != 0) {
-            s_pad_acc_dx += v.x;
-            s_pad_acc_dy += v.y;
-            s_pad_travel += (uint32_t)(abs(v.x) + abs(v.y));
-            pad_move_dot();
-        }
+        if (v.x == 0 && v.y == 0) return;
 
-        if (lv_tick_elaps(s_pad_log_tick) >= TP_LOG_PERIOD_MS) {
-            pad_flush_motion_log();
-            s_pad_log_tick = lv_tick_get();
+        usb_hid_tp_move(v.x, v.y);
+        s_pad_travel += (uint32_t)(abs(v.x) + abs(v.y));
+        pad_move_dot();
+
+        if (s_second_touch && !s_dragging && s_pad_travel >= TP_TAP_MAX_TRAVEL) {
+            s_dragging = true;
+            push_buttons();
+            ESP_LOGI(TAG, "drag start");
         }
     }
     else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-        pad_flush_motion_log();
-        lv_obj_add_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
+        if (s_dot) lv_obj_add_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
 
-        uint32_t held = lv_tick_elaps(s_pad_press_tick);
-        if (code == LV_EVENT_RELEASED &&
-            held < TP_TAP_MAX_MS && s_pad_travel < TP_TAP_MAX_TRAVEL) {
-            ESP_LOGI(TAG, "tap -> left click (%lu ms, %lu px)",
-                     (unsigned long)held, (unsigned long)s_pad_travel);
+        uint32_t held  = lv_tick_elaps(s_pad_press_tick);
+        bool     is_tap = (code == LV_EVENT_RELEASED) &&
+                          held < TP_TAP_MAX_MS && s_pad_travel < TP_TAP_MAX_TRAVEL;
+
+        if (s_dragging) {
+            s_dragging = false;
+            push_buttons();
+            ESP_LOGI(TAG, "drag end");
+        } else if (s_second_touch) {
+            /* First tap was held back; this touch didn't become a drag. */
+            click_left();
+            if (is_tap) {
+                click_left();
+                ESP_LOGI(TAG, "double click");
+            } else {
+                ESP_LOGI(TAG, "click");
+            }
+        } else if (is_tap) {
+            s_tap_pending = true;
+            s_tap_tick    = lv_tick_get();
         }
+        s_second_touch = false;
     }
 }
 
@@ -214,7 +319,10 @@ static void wheel_cb(lv_event_t *e)
 
     if (code == LV_EVENT_PRESSED) {
         leave_settings();
-        s_wheel_acc_px = 0;
+        s_wheel_coast     = 0;   /* touching the wheel stops any coasting */
+        s_wheel_coast_rem = 0;
+        s_wheel_vel       = 0;
+        s_wheel_last_tick = lv_tick_get();
         lv_obj_set_style_bg_color(s_wheel, lv_color_hex(COL_BTN), 0);
     }
     else if (code == LV_EVENT_PRESSING) {
@@ -225,25 +333,35 @@ static void wheel_cb(lv_event_t *e)
         lv_indev_get_vect(indev, &v);
         if (v.y == 0) return;
 
+#if WHEEL_ANIM
         /* Grip lines follow the finger, wrapping every notch, so the strip
-         * reads as a physical wheel turning. */
+         * reads as a physical wheel turning. Costs a redraw per move. */
         s_wheel_offset = (s_wheel_offset + v.y) % WHEEL_NOTCH_PX;
         if (s_wheel_offset < 0) s_wheel_offset += WHEEL_NOTCH_PX;
         lv_obj_set_y(s_wheel_grip, s_wheel_offset - WHEEL_NOTCH_PX);
+#endif
 
-        s_wheel_acc_px += v.y;
-        while (s_wheel_acc_px >= WHEEL_NOTCH_PX || s_wheel_acc_px <= -WHEEL_NOTCH_PX) {
-            int finger_down = (s_wheel_acc_px > 0) ? 1 : -1;
-            s_wheel_acc_px -= finger_down * WHEEL_NOTCH_PX;
+        send_wheel_px(v.y);
 
-            /* Wheel delta sign follows Windows: + = scroll up. */
-            int notch = WHEEL_NATURAL ? finger_down : -finger_down;
-            ESP_LOGI(TAG, "wheel %+d (%s)", notch, notch > 0 ? "up" : "down");
-        }
+        /* Speed estimate for the flick, normalised to px per 10 ms so it
+         * doesn't depend on the actual touch read interval. */
+        uint32_t dt = lv_tick_elaps(s_wheel_last_tick);
+        if (dt == 0) dt = 1;
+        float inst = (float)v.y * 10.0f / (float)dt;
+        s_wheel_vel = s_wheel_vel * 0.5f + inst * 0.5f;
+        s_wheel_last_tick = lv_tick_get();
     }
     else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-        s_wheel_acc_px = 0;
         lv_obj_set_style_bg_color(s_wheel, lv_color_hex(COL_SURFACE), 0);
+#if WHEEL_INERTIA
+        if (code == LV_EVENT_RELEASED &&
+            lv_tick_elaps(s_wheel_last_tick) < WHEEL_FLICK_IDLE_MS &&
+            (s_wheel_vel > WHEEL_FLICK_MIN || s_wheel_vel < -WHEEL_FLICK_MIN)) {
+            s_wheel_coast     = s_wheel_vel;
+            s_wheel_coast_rem = 0;
+        }
+#endif
+        s_wheel_vel = 0;
     }
 }
 
@@ -301,20 +419,30 @@ static void build_sidebar(lv_obj_t *sidebar)
     lv_obj_clear_flag(s_wheel, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_add_event_cb(s_wheel, wheel_cb, LV_EVENT_ALL, NULL);
 
-    /* Grip lines -- one notch taller than needed so shifting by up to one
-     * notch never exposes a gap. Children are not clickable, so presses
-     * still land on s_wheel. */
-    s_wheel_grip = make_plain_obj(s_wheel);
-    lv_obj_set_size(s_wheel_grip, WHEEL_W, WHEEL_GRIP_LINES * WHEEL_NOTCH_PX + WHEEL_NOTCH_PX);
+    /* Grip lines live in a clipped track between the arrows. The grip
+     * container is one notch taller than the track and starts one notch
+     * above it, so shifting it by 0..NOTCH-1 px always keeps the track
+     * fully covered. Nothing in here is clickable -- presses land on
+     * s_wheel. */
+    lv_obj_t *track = make_plain_obj(s_wheel);
+    lv_obj_set_size(track, WHEEL_W, WHEEL_TRACK_H);
+    lv_obj_set_pos(track, 0, WHEEL_TRACK_Y);
+    lv_obj_set_style_bg_opa(track, LV_OPA_TRANSP, 0);
+    lv_obj_clear_flag(track, LV_OBJ_FLAG_CLICKABLE);
+
+    int grip_h     = WHEEL_TRACK_H + WHEEL_NOTCH_PX;
+    int line_count = grip_h / WHEEL_NOTCH_PX + 1;
+
+    s_wheel_grip = make_plain_obj(track);
+    lv_obj_set_size(s_wheel_grip, WHEEL_W, grip_h);
     lv_obj_set_pos(s_wheel_grip, 0, -WHEEL_NOTCH_PX);
     lv_obj_set_style_bg_opa(s_wheel_grip, LV_OPA_TRANSP, 0);
     lv_obj_clear_flag(s_wheel_grip, LV_OBJ_FLAG_CLICKABLE);
 
-    int grip_top = (WHEEL_H - (WHEEL_GRIP_LINES - 1) * WHEEL_NOTCH_PX) / 2;
-    for (int i = 0; i <= WHEEL_GRIP_LINES; i++) {
+    for (int i = 0; i < line_count; i++) {
         lv_obj_t *line = make_plain_obj(s_wheel_grip);
         lv_obj_set_size(line, 28, 3);
-        lv_obj_set_pos(line, (WHEEL_W - 28) / 2, grip_top + i * WHEEL_NOTCH_PX);
+        lv_obj_set_pos(line, (WHEEL_W - 28) / 2, WHEEL_NOTCH_PX / 2 + i * WHEEL_NOTCH_PX);
         lv_obj_set_style_bg_color(line, lv_color_hex(0x3a3a3a), 0);
         lv_obj_set_style_radius(line, 1, 0);
         lv_obj_clear_flag(line, LV_OBJ_FLAG_CLICKABLE);
@@ -398,6 +526,7 @@ static void build_page(lv_obj_t *scr)
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_20, 0);
     lv_obj_center(hint);
 
+#if TP_SHOW_DOT
     s_dot = make_plain_obj(s_pad);
     lv_obj_set_size(s_dot, TP_DOT_SIZE, TP_DOT_SIZE);
     lv_obj_set_style_radius(s_dot, LV_RADIUS_CIRCLE, 0);
@@ -405,6 +534,7 @@ static void build_page(lv_obj_t *scr)
     lv_obj_set_style_bg_opa(s_dot, LV_OPA_60, 0);
     lv_obj_clear_flag(s_dot, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
+#endif
 }
 
 /* -----------------------------------------------------------------------
@@ -421,16 +551,40 @@ void ui_touchpad_enter(lv_obj_t *sidebar)
     build_sidebar(sidebar);
     build_page(lv_scr_act());
 
-    s_wheel_acc_px = 0;
-    s_wheel_offset = 0;
+    s_wheel_offset    = 0;
+    s_wheel_vel       = 0;
+    s_wheel_coast     = 0;
+    s_wheel_coast_rem = 0;
+    s_tap_pending  = false;
+    s_second_touch = false;
+    s_dragging     = false;
+    s_left_held    = false;
+    s_right_held   = false;
+
+    usb_hid_tp_reset_motion();
+    push_buttons();   /* state 0 -- no-op unless an old release is still queued */
 
     set_fast_touch_read(true);
+    s_flush_timer = lv_timer_create(flush_timer_cb, TP_FLUSH_PERIOD_MS, NULL);
 
-    ESP_LOGI(TAG, "entered touchpad mode (UI only, read period %d ms)", TP_READ_PERIOD_MS);
+    ESP_LOGI(TAG, "entered touchpad mode (read period %d ms)", TP_READ_PERIOD_MS);
 }
 
 void ui_touchpad_exit(void)
 {
+    /* Release anything held and try to get it out now. If the endpoint is
+     * busy the release stays queued and goes out on the next enter; the
+     * PC side also releases everything on disconnect. */
+    s_tap_pending = s_second_touch = s_dragging = false;
+    s_left_held = s_right_held = false;
+    s_wheel_coast = 0;
+    push_buttons();
+    usb_hid_tp_flush();
+
+    if (s_flush_timer) {
+        lv_timer_del(s_flush_timer);
+        s_flush_timer = NULL;
+    }
     set_fast_touch_read(false);
 
     if (s_page) {

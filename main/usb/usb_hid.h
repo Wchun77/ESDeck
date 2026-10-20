@@ -22,6 +22,7 @@
 #define HID_MON_BTN_MODE_DECK    0x03
 #define HID_MON_BTN_MODE_MONITOR 0x04
 #define HID_MON_BTN_MODE_MEDIA   0x05
+#define HID_MON_BTN_MODE_TOUCHPAD 0x06
 
 /* Media OUT report command byte (PC -> ESP), continuing after the monitor
  * cmd range above (0x03-0x05). Payload: position_ms(4B LE) +
@@ -89,6 +90,32 @@
  * position_ms(4B LE): { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_SEEK,
  * pos_b0, pos_b1, pos_b2, pos_b3, 0, 0 }. */
 #define HID_MEDIA_BTN_SEEK        0x06
+
+/* Touchpad mode IN report (ESP -> PC). One report type carries everything,
+ * so motion and a button transition that happened together reach the PC
+ * in the right order (PC applies move, then wheel, then button diff):
+ *   { HID_TP_PAGE, HID_TP_CMD_MOVE, dx_lo, dx_hi, dy_lo, dy_hi, wheel, btn_mask }
+ *   dx/dy : int16 LE, raw touch pixels (PC applies sensitivity)
+ *   wheel : int8 finger pixels on the wheel strip, + = scroll up
+ *           (Windows sign; PC scales to fractional WHEEL_DELTA units)
+ *   btn_mask : HID_TP_BTN_* state after this report */
+#define HID_TP_PAGE         0xFD
+#define HID_TP_CMD_MOVE     0x01
+#define HID_TP_BTN_LEFT     0x01
+#define HID_TP_BTN_RIGHT    0x02
+
+/* Touchpad input staging -- LVGL thread only (no locking inside).
+ * Motion/wheel are accumulated and button states queued; nothing is sent
+ * until usb_hid_tp_flush(), which sends at most one report per call and
+ * never drops queued button states (a dropped "up" would leave the PC
+ * button stuck). Call flush periodically (ui_touchpad.c: every 10 ms,
+ * matching the IN endpoint's 10 ms bInterval). */
+void usb_hid_tp_move(int dx, int dy);
+void usb_hid_tp_wheel(int pixels);
+void usb_hid_tp_buttons(uint8_t mask);
+void usb_hid_tp_flush(void);
+/* Clear pending motion/wheel (queued button states are kept). */
+void usb_hid_tp_reset_motion(void);
 
 void usb_hid_driver_install(void);
 

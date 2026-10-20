@@ -629,6 +629,7 @@ void usb_hid_reply_mode(uint8_t mode)
     switch (mode) {
         case 1:  btn = HID_MON_BTN_MODE_MONITOR; name = "monitor"; break;
         case 2:  btn = HID_MON_BTN_MODE_MEDIA;   name = "media";   break;
+        case 3:  btn = HID_MON_BTN_MODE_TOUCHPAD; name = "touchpad"; break;
         default: btn = HID_MON_BTN_MODE_DECK;    name = "deck";    break;
     }
 
@@ -690,6 +691,75 @@ void usb_hid_media_seek(uint32_t position_ms)
     };
     tud_hid_report(0, report, sizeof(report));
     ESP_LOGI(TAG, "media seek sent: %lu ms", (unsigned long)position_ms);
+}
+
+/* -----------------------------------------------------------------------
+ * Touchpad reports (see usb_hid.h). All called from the LVGL thread only.
+ * ----------------------------------------------------------------------- */
+#define TP_BTN_QUEUE_LEN  8
+
+static int32_t s_tp_dx    = 0;
+static int32_t s_tp_dy    = 0;
+static int32_t s_tp_wheel = 0;
+
+static uint8_t s_tp_btn_q[TP_BTN_QUEUE_LEN];
+static uint8_t s_tp_btn_head  = 0;
+static uint8_t s_tp_btn_count = 0;
+static uint8_t s_tp_btn_last  = 0;   /* newest queued (or current) mask */
+
+void usb_hid_tp_move(int dx, int dy)  { s_tp_dx += dx; s_tp_dy += dy; }
+void usb_hid_tp_wheel(int pixels)     { s_tp_wheel += pixels; }
+void usb_hid_tp_reset_motion(void)    { s_tp_dx = s_tp_dy = s_tp_wheel = 0; }
+
+void usb_hid_tp_buttons(uint8_t mask)
+{
+    if (mask == s_tp_btn_last) return;
+
+    if (s_tp_btn_count < TP_BTN_QUEUE_LEN) {
+        s_tp_btn_q[(s_tp_btn_head + s_tp_btn_count) % TP_BTN_QUEUE_LEN] = mask;
+        s_tp_btn_count++;
+    } else {
+        /* Full: replace the newest entry so the final state is still right. */
+        s_tp_btn_q[(s_tp_btn_head + s_tp_btn_count - 1) % TP_BTN_QUEUE_LEN] = mask;
+    }
+    s_tp_btn_last = mask;
+}
+
+static int32_t tp_clamp(int32_t v, int32_t lo, int32_t hi)
+{
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+void usb_hid_tp_flush(void)
+{
+    bool have_btn = s_tp_btn_count > 0;
+    if (!have_btn && s_tp_dx == 0 && s_tp_dy == 0 && s_tp_wheel == 0) return;
+    if (!s_active || !tud_hid_ready()) return;
+
+    int32_t dx = tp_clamp(s_tp_dx, INT16_MIN, INT16_MAX);
+    int32_t dy = tp_clamp(s_tp_dy, INT16_MIN, INT16_MAX);
+    int32_t wh = tp_clamp(s_tp_wheel, INT8_MIN, INT8_MAX);
+    uint8_t mask = have_btn ? s_tp_btn_q[s_tp_btn_head] : s_tp_btn_last;
+
+    uint8_t report[8] = {
+        HID_TP_PAGE, HID_TP_CMD_MOVE,
+        (uint8_t)(dx & 0xFF), (uint8_t)((dx >> 8) & 0xFF),
+        (uint8_t)(dy & 0xFF), (uint8_t)((dy >> 8) & 0xFF),
+        (uint8_t)(int8_t)wh, mask
+    };
+
+    /* tud_hid_report() fails if the endpoint got claimed in between (e.g.
+     * a mode reply from the TinyUSB task) -- keep everything for the next
+     * flush instead of losing it. */
+    if (!tud_hid_report(0, report, sizeof(report))) return;
+
+    s_tp_dx    -= dx;
+    s_tp_dy    -= dy;
+    s_tp_wheel -= wh;
+    if (have_btn) {
+        s_tp_btn_head = (s_tp_btn_head + 1) % TP_BTN_QUEUE_LEN;
+        s_tp_btn_count--;
+    }
 }
 
 /* -----------------------------------------------------------------------
