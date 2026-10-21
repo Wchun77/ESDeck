@@ -8,57 +8,13 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "cJSON.h"
+#include "usb/usb_hid.h"   /* HID_ACTION_MAX_LEN */
 
 #define TAG  "[DECK_CFG]"
-
-#define STARTUP_TXT_PATH  "/sdcard/config/deck/startup.txt"
 
 /* --------------------------------------------------------------------------
  * Internal helpers
  * -------------------------------------------------------------------------- */
-static bool apply_startup_txt(void)
-{
-    FILE *f = fopen(STARTUP_TXT_PATH, "r");
-    if (!f) return false;
-
-    char fname[CFG_FNAME_LEN];
-    memset(fname, 0, sizeof(fname));
-
-    size_t n = fread(fname, 1, sizeof(fname) - 1, f);
-    fclose(f);
-
-    if (n == 0) {
-        ESP_LOGW(TAG, "startup.txt is empty, ignoring");
-        remove(STARTUP_TXT_PATH);
-        return false;
-    }
-
-    for (int i = (int)n - 1; i >= 0; i--) {
-        if (fname[i] == '\r' || fname[i] == '\n' || fname[i] == ' ')
-            fname[i] = '\0';
-        else
-            break;
-    }
-
-    if (fname[0] == '\0') {
-        ESP_LOGW(TAG, "startup.txt content empty after trim, ignoring");
-        remove(STARTUP_TXT_PATH);
-        return false;
-    }
-
-    ESP_LOGI(TAG, "startup.txt -> NVS: [%s]", fname);
-
-    bool ok = nvs_manager_set_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_DECK, fname);
-    if (ok) {
-        remove(STARTUP_TXT_PATH);
-        ESP_LOGI(TAG, "startup.txt applied and removed");
-    } else {
-        ESP_LOGE(TAG, "Failed to write NVS from startup.txt");
-    }
-
-    return ok;
-}
-
 static char *read_file(const char *path)
 {
     FILE *f = fopen(path, "r");
@@ -91,6 +47,41 @@ static char *read_file(const char *path)
     return buf;
 }
 
+/* Button's action for the PC: the button object as compact JSON minus
+ * "icon" (display only). label stays so the PC log can name the button;
+ * every other field passes through untouched, so a new action type only
+ * needs an ESDeckPC update. Text is copied byte for byte (cJSON keeps
+ * UTF-8 as is), so Chinese paths survive. NULL if there's no "action". */
+static char *build_action_json(const cJSON *btn_obj, uint16_t *len_out)
+{
+    *len_out = 0;
+    const cJSON *act = cJSON_GetObjectItem(btn_obj, "action");
+    if (!cJSON_IsString(act) || !act->valuestring || !act->valuestring[0]) return NULL;
+
+    cJSON *dup = cJSON_Duplicate(btn_obj, 1);
+    if (!dup) return NULL;
+    cJSON_DeleteItemFromObject(dup, "icon");
+    char *txt = cJSON_PrintUnformatted(dup);
+    cJSON_Delete(dup);
+    if (!txt) return NULL;
+
+    size_t n = strlen(txt);
+    if (n > HID_ACTION_MAX_LEN) {
+        ESP_LOGW(TAG, "action JSON too long (%u B), button disabled", (unsigned)n);
+        cJSON_free(txt);
+        return NULL;
+    }
+
+    char *out = heap_caps_malloc(n + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!out) out = malloc(n + 1);
+    if (out) {
+        memcpy(out, txt, n + 1);
+        *len_out = (uint16_t)n;
+    }
+    cJSON_free(txt);
+    return out;
+}
+
 /* --------------------------------------------------------------------------
  * Public API
  * -------------------------------------------------------------------------- */
@@ -107,8 +98,6 @@ bool ui_deck_config_nvs_load(char *out, size_t out_size)
 bool ui_deck_config_load(deck_cfg_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
-
-    apply_startup_txt();
 
     char json_path[sizeof(UI_DECK_CONFIG_PATH) + 1 + CFG_FNAME_LEN];
     char nvs_fname[CFG_FNAME_LEN];
@@ -215,6 +204,8 @@ bool ui_deck_config_load(deck_cfg_t *cfg)
             cJSON *icon = cJSON_GetObjectItem(btn_obj, "icon");
             if (cJSON_IsString(icon) && icon->valuestring)
                 snprintf(btn->icon, UI_DECK_CONFIG_ICON_LEN, "%s", icon->valuestring);
+
+            btn->action = build_action_json(btn_obj, &btn->action_len);
         }
     }
 
@@ -229,6 +220,8 @@ void ui_deck_config_free(deck_cfg_t *cfg)
     if (cfg->pages) {
         for (int i = 0; i < cfg->page_count; i++) {
             if (cfg->pages[i].buttons) {
+                for (int b = 0; b < cfg->pages[i].button_count; b++)
+                    free(cfg->pages[i].buttons[b].action);
                 free(cfg->pages[i].buttons);
                 cfg->pages[i].buttons = NULL;
             }

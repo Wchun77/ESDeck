@@ -37,13 +37,20 @@
 #define UI_DECK_CONFIG_NAME_LEN     32
 
 #define UI_DECK_CONFIG_PATH           SD_PATH_CONFIG_DECK
-#define UI_DECK_CONFIG_JSON_PREFIX    "esp_"
 
 #define UI_DECK_CONFIG_SIDE_ICON_LEN 32
 
+/* One deck config file holds everything: what the button looks like
+ * (label, icon) and what it does (action, target, keys, ...). The ESP
+ * doesn't interpret the action -- on press it sends `action` (the button
+ * object as compact JSON, minus "icon") to ESDeckPC, which executes it.
+ * action is NULL for a button without an "action" field (e.g. an old
+ * esp_XXXX.json from before this format). */
 typedef struct {
-    char label[UI_DECK_CONFIG_LABEL_LEN];
-    char icon[UI_DECK_CONFIG_ICON_LEN];
+    char      label[UI_DECK_CONFIG_LABEL_LEN];
+    char      icon[UI_DECK_CONFIG_ICON_LEN];
+    char     *action;       /* heap (PSRAM), freed by ui_deck_config_free() */
+    uint16_t  action_len;   /* bytes, no terminator counted */
 } btn_cfg_t;
 
 typedef struct {

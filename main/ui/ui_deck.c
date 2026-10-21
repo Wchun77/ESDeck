@@ -3,6 +3,7 @@
 #include "ui_settings.h"
 #include "ui.h"
 #include "usb/usb_hid.h"
+#include "ui_toast.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
@@ -136,8 +137,17 @@ static void btn_event_cb(lv_event_t *e)
     uintptr_t packed = (uintptr_t)lv_event_get_user_data(e);
     uint8_t   page   = (uint8_t)((packed >> 8) & 0xFF);
     uint8_t   btn    = (uint8_t)(packed & 0xFF);
-    ESP_LOGI("BTN", "page=0x%02X btn=0x%02X", page + 1, btn + 1);
-    usb_hid_send(page + 1, btn + 1);
+    if (page >= s_cfg.page_count || btn >= s_cfg.pages[page].button_count) return;
+
+    const btn_cfg_t *b = &s_cfg.pages[page].buttons[btn];
+    ESP_LOGI("BTN", "page=%d btn=%d \"%s\"", page + 1, btn + 1, b->label);
+    if (!b->action) {
+        /* No "action" in the config -- e.g. an old esp_XXXX.json. */
+        ui_toast_push("No action set", 1, "deck_no_action", NULL);
+        return;
+    }
+    if (!usb_hid_send_action(b->action, b->action_len))
+        ESP_LOGW("BTN", "action not sent (HID inactive or queue full)");
 }
 
 static void sidebar_btn_cb(lv_event_t *e)

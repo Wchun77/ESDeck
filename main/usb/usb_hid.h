@@ -9,6 +9,26 @@
  * Report Count and the PC-side REPORT_SIZE (which adds 1 for Report ID). */
 #define HID_FEATURE_PAYLOAD_SIZE 64
 
+/* Vendor IN report size (ESP -> PC). Every IN report is this long on the
+ * wire, zero-padded; the meaningful bytes of each report type are listed
+ * with it below. PC side reads 65 (adds the report ID byte). */
+#define HID_VENDOR_IN_LEN        64
+
+/* Deck action IN report (ESP -> PC). A Deck button press sends that
+ * button's action as UTF-8 JSON text (label + action fields, as in the
+ * deck config), split into chunks:
+ *   { HID_ACTION_PAGE, msg_id, seq, flags, total_lo, total_hi, data[58] }
+ *   msg_id : +1 per message; a new id makes the PC drop an unfinished one
+ *   seq    : chunk index within the message, from 0
+ *   flags  : HID_ACTION_FLAG_FIRST / _LAST
+ *   total  : whole message length in bytes (uint16 LE)
+ * The PC reassembles all chunks before decoding -- a multi-byte UTF-8
+ * character can be split across two chunks. */
+#define HID_ACTION_PAGE          0xFB
+#define HID_ACTION_FLAG_FIRST    0x01
+#define HID_ACTION_FLAG_LAST     0x02
+#define HID_ACTION_MAX_LEN       4096
+
 /* Monitor OUT report command bytes (PC -> ESP) */
 #define HID_MON_CMD_DATA         0x03
 #define HID_MON_CMD_TIME         0x04
@@ -115,8 +135,8 @@
  * Motion/wheel are accumulated and button states queued; nothing is sent
  * until usb_hid_tp_flush(), which sends at most one report per call and
  * never drops queued button states (a dropped "up" would leave the PC
- * button stuck). Call flush periodically (ui_touchpad.c: every 10 ms,
- * matching the IN endpoint's 10 ms bInterval). */
+ * button stuck). Call flush periodically (ui_touchpad.c: every 10 ms;
+ * the IN endpoint itself polls every 1 ms). */
 void usb_hid_tp_move(int dx, int dy);
 void usb_hid_tp_wheel(int pixels);
 void usb_hid_tp_hwheel(int pixels);
@@ -192,9 +212,10 @@ void usb_hid_force_connect(void);
 typedef void (*usb_hid_conn_cb_t)(bool connected);
 void usb_hid_set_conn_cb(usb_hid_conn_cb_t cb);
 
-/* Send button press IN report */
-void usb_hid_send(uint8_t page, uint8_t btn);
-void usb_hid_release(void);
+/* Queue a Deck action (JSON text; NUL terminator not needed) for sending
+ * as HID_ACTION_PAGE chunks. Copies the data. LVGL thread only. Returns
+ * false if HID isn't active, the queue is full or len is 0 / too long. */
+bool usb_hid_send_action(const char *data, size_t len);
 
 /* Send monitor subscribe / unsubscribe control IN report */
 void usb_hid_monitor_subscribe(void);

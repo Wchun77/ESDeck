@@ -50,7 +50,7 @@ static const char *TAG = "TOUCHPAD";
 
 /* Input tuning */
 #define TP_READ_PERIOD_MS   10    /* touch read period while in this mode (LVGL default here is 30) */
-#define TP_FLUSH_PERIOD_MS  10    /* HID send period = IN endpoint bInterval */
+#define TP_FLUSH_PERIOD_MS  10    /* HID send period (one report per flush) */
 #define TP_TAP_MAX_MS       200   /* press->release shorter than this ... */
 #define TP_TAP_MAX_TRAVEL   10    /* ... and moved less than this (px) = tap */
 #define TP_DOUBLE_TAP_MS    250   /* window after a tap for tap-and-drag / double tap */

@@ -1,6 +1,7 @@
 #include "usb_hid.h"
 #include "esp_log.h"
 #include <string.h>
+#include <stdlib.h>
 #include "tinyusb.h"
 #include "class/hid/hid_device.h"
 #include "freertos/FreeRTOS.h"
@@ -28,6 +29,17 @@ static const char *TAG = "USB_HID";
 
 static bool s_active = false;
 
+/* Every vendor IN report is HID_VENDOR_IN_LEN bytes on the wire (the
+ * descriptor has no variable-length reports): callers build their short
+ * report and this zero-pads it. Same return as tud_hid_n_report() --
+ * false if the endpoint is busy. */
+static bool vendor_send(const uint8_t *data, size_t len)
+{
+    uint8_t buf[HID_VENDOR_IN_LEN] = {0};
+    memcpy(buf, data, len < sizeof(buf) ? len : sizeof(buf));
+    return tud_hid_n_report(HID_ITF_VENDOR, 0, buf, sizeof(buf));
+}
+
 /* Forward decl -- defined near the bottom alongside the toast hookup it
  * exists for, but tusb_cfg (below) needs to reference it by name. */
 static void usb_hid_event_cb(tinyusb_event_t *event, void *arg);
@@ -40,8 +52,10 @@ static usb_hid_conn_cb_t s_conn_cb = NULL;
 /*
  * HID report descriptor — Vendor-defined (Usage Page 0xFF00).
  *
- * IN      report (ESP -> PC): 8 bytes [page, btn, rsv x6]
- * Feature report (PC -> ESP): 8 bytes [cmd, d0..d6]
+ * IN      report (ESP -> PC): 64 bytes [page, btn/cmd, data...], zero-padded
+ *                             (HID_VENDOR_IN_LEN; was 8 -- widened for
+ *                             the chunked Deck action transfer, page 0xFB)
+ * Feature report (PC -> ESP): 64 bytes [cmd, data...]
  *
  * PC sends data via SetReport (Control transfer, Feature type).
  */
@@ -50,12 +64,12 @@ static const uint8_t hid_report_descriptor[] = {
     0x09, 0x01,
     0xA1, 0x01,
 
-    /* IN: 8 bytes */
+    /* IN: 64 bytes (HID_VENDOR_IN_LEN) */
     0x09, 0x02,
     0x15, 0x00,
     0x26, 0xFF, 0x00,
     0x75, 0x08,
-    0x95, 0x08,
+    0x95, 0x40,   /* Report Count = 64 */
     0x81, 0x02,
 
     /* Feature: 64 bytes */
@@ -142,8 +156,10 @@ static const uint8_t hid_input_report_descriptor[] = {
 
 static const uint8_t s_config_desc[] = {
     TUD_CONFIG_DESCRIPTOR(1, 2, 0, TUSB_DESC_TOTAL_LEN, 0, 100),
+    /* 64-byte packets, 1 ms poll: a Deck action (chunked, page 0xFB) of a
+     * few hundred bytes goes out in a few ms. */
     TUD_HID_DESCRIPTOR(HID_ITF_VENDOR, 0, HID_ITF_PROTOCOL_NONE,
-                       sizeof(hid_report_descriptor), 0x81, 16, 10),
+                       sizeof(hid_report_descriptor), 0x81, HID_VENDOR_IN_LEN, 1),
     /* 1 ms poll for the pointer -- real mice use 1..8 ms */
     TUD_HID_DESCRIPTOR(HID_ITF_INPUT, 0, HID_ITF_PROTOCOL_NONE,
                        sizeof(hid_input_report_descriptor), 0x82, 16, 1),
@@ -163,7 +179,9 @@ static const tusb_desc_device_t s_device_desc = {
      * a new PID makes it enumerate the composite device cleanly. ESDeckPC
      * accepts both. */
     .idProduct          = 0x4005,
-    .bcdDevice          = 0x0100,
+    /* 0x0101: vendor IN report widened 8 -> 64 bytes; bumped so Windows
+     * doesn't reuse a cached descriptor set. */
+    .bcdDevice          = 0x0101,
     .iManufacturer      = 0x01,
     .iProduct           = 0x02,
     .iSerialNumber      = 0x03,
@@ -680,25 +698,107 @@ const uint8_t            *usb_hid_get_config_desc(void) { return s_config_desc; 
 /* -----------------------------------------------------------------------
  * IN report helpers
  * ----------------------------------------------------------------------- */
-void usb_hid_send(uint8_t page, uint8_t btn)
+/* -----------------------------------------------------------------------
+ * Deck action transfer (page HID_ACTION_PAGE, see usb_hid.h). LVGL thread
+ * only: usb_hid_send_action() queues a copy, act_timer_cb() sends one
+ * chunk per tick while anything is queued (the endpoint takes one packet
+ * per 1 ms poll anyway), then deletes its timer.
+ * ----------------------------------------------------------------------- */
+#define ACT_QUEUE_LEN   4
+#define ACT_HDR_LEN     6
+#define ACT_CHUNK_LEN   (HID_VENDOR_IN_LEN - ACT_HDR_LEN)
+
+typedef struct {
+    uint8_t *data;
+    uint16_t len;
+    uint8_t  msg_id;
+} act_msg_t;
+
+static act_msg_t   s_act_q[ACT_QUEUE_LEN];
+static uint8_t     s_act_head    = 0;
+static uint8_t     s_act_count   = 0;
+static uint16_t    s_act_off     = 0;    /* bytes of the head message already sent */
+static uint8_t     s_act_seq     = 0;
+static uint8_t     s_act_next_id = 0;
+static lv_timer_t *s_act_timer   = NULL;
+
+static void act_pop(void)
 {
-    if (!s_active || !tud_hid_ready()) return;
-    uint8_t report[8] = { page, btn, 0, 0, 0, 0, 0, 0 };
-    tud_hid_report(0, report, sizeof(report));
+    free(s_act_q[s_act_head].data);
+    s_act_q[s_act_head].data = NULL;
+    s_act_head = (s_act_head + 1) % ACT_QUEUE_LEN;
+    s_act_count--;
+    s_act_off = 0;
+    s_act_seq = 0;
 }
 
-void usb_hid_release(void)
+static void act_timer_cb(lv_timer_t *t)
 {
-    if (!s_active || !tud_hid_ready()) return;
-    uint8_t report[8] = { 0xFF, 0xFF, 0, 0, 0, 0, 0, 0 };
-    tud_hid_report(0, report, sizeof(report));
+    (void)t;
+    if (!s_active) {
+        /* Unplugged / HID off: whatever is queued can't go anywhere. */
+        while (s_act_count) act_pop();
+    }
+    if (s_act_count && tud_hid_n_ready(HID_ITF_VENDOR)) {
+        const act_msg_t *msg = &s_act_q[s_act_head];
+        uint16_t n = msg->len - s_act_off;
+        if (n > ACT_CHUNK_LEN) n = ACT_CHUNK_LEN;
+
+        uint8_t flags = 0;
+        if (s_act_off == 0)            flags |= HID_ACTION_FLAG_FIRST;
+        if (s_act_off + n >= msg->len) flags |= HID_ACTION_FLAG_LAST;
+
+        uint8_t r[HID_VENDOR_IN_LEN] = {
+            HID_ACTION_PAGE, msg->msg_id, s_act_seq, flags,
+            (uint8_t)(msg->len & 0xFF), (uint8_t)(msg->len >> 8),
+        };
+        memcpy(r + ACT_HDR_LEN, msg->data + s_act_off, n);
+
+        if (vendor_send(r, sizeof(r))) {
+            s_act_off += n;
+            s_act_seq++;
+            if (s_act_off >= msg->len) act_pop();
+        }
+    }
+    if (s_act_count == 0 && s_act_timer) {
+        lv_timer_del(s_act_timer);
+        s_act_timer = NULL;
+    }
+}
+
+bool usb_hid_send_action(const char *data, size_t len)
+{
+    if (!s_active || !data || len == 0) return false;
+    if (len > HID_ACTION_MAX_LEN) {
+        ESP_LOGW(TAG, "action too long (%u B), not sent", (unsigned)len);
+        return false;
+    }
+    if (s_act_count >= ACT_QUEUE_LEN) {
+        ESP_LOGW(TAG, "action queue full, dropped");
+        return false;
+    }
+
+    uint8_t *copy = heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!copy) copy = malloc(len);
+    if (!copy) return false;
+    memcpy(copy, data, len);
+
+    act_msg_t *msg = &s_act_q[(s_act_head + s_act_count) % ACT_QUEUE_LEN];
+    msg->data   = copy;
+    msg->len    = (uint16_t)len;
+    msg->msg_id = s_act_next_id++;
+    s_act_count++;
+
+    if (!s_act_timer) s_act_timer = lv_timer_create(act_timer_cb, 1, NULL);
+    act_timer_cb(s_act_timer);   /* first chunk right away if the endpoint is free */
+    return true;
 }
 
 void usb_hid_monitor_subscribe(void)
 {
     if (!s_active || !tud_hid_ready()) return;
     uint8_t report[8] = { HID_MON_PAGE_CTRL, HID_MON_BTN_SUBSCRIBE, 0, 0, 0, 0, 0, 0 };
-    tud_hid_report(0, report, sizeof(report));
+    vendor_send(report, sizeof(report));
     ESP_LOGI(TAG, "monitor subscribe sent");
 }
 
@@ -706,7 +806,7 @@ void usb_hid_monitor_unsubscribe(void)
 {
     if (!s_active || !tud_hid_ready()) return;
     uint8_t report[8] = { HID_MON_PAGE_CTRL, HID_MON_BTN_UNSUBSCRIBE, 0, 0, 0, 0, 0, 0 };
-    tud_hid_report(0, report, sizeof(report));
+    vendor_send(report, sizeof(report));
     ESP_LOGI(TAG, "monitor unsubscribe sent");
 }
 
@@ -724,7 +824,7 @@ void usb_hid_reply_mode(uint8_t mode)
     }
 
     uint8_t report[8] = { HID_MON_PAGE_CTRL, btn, 0, 0, 0, 0, 0, 0 };
-    tud_hid_report(0, report, sizeof(report));
+    vendor_send(report, sizeof(report));
     ESP_LOGI(TAG, "mode reply: %s", name);
 }
 
@@ -732,7 +832,7 @@ void usb_hid_media_subscribe(void)
 {
     if (!s_active || !tud_hid_ready()) return;
     uint8_t report[8] = { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_SUBSCRIBE, 0, 0, 0, 0, 0, 0 };
-    tud_hid_report(0, report, sizeof(report));
+    vendor_send(report, sizeof(report));
     ESP_LOGI(TAG, "media subscribe sent");
 }
 
@@ -740,7 +840,7 @@ void usb_hid_media_unsubscribe(void)
 {
     if (!s_active || !tud_hid_ready()) return;
     uint8_t report[8] = { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_UNSUBSCRIBE, 0, 0, 0, 0, 0, 0 };
-    tud_hid_report(0, report, sizeof(report));
+    vendor_send(report, sizeof(report));
     ESP_LOGI(TAG, "media unsubscribe sent");
 }
 
@@ -748,7 +848,7 @@ void usb_hid_media_play_pause(void)
 {
     if (!s_active || !tud_hid_ready()) return;
     uint8_t report[8] = { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_PLAY_PAUSE, 0, 0, 0, 0, 0, 0 };
-    tud_hid_report(0, report, sizeof(report));
+    vendor_send(report, sizeof(report));
     ESP_LOGI(TAG, "media play/pause sent");
 }
 
@@ -756,7 +856,7 @@ void usb_hid_media_next(void)
 {
     if (!s_active || !tud_hid_ready()) return;
     uint8_t report[8] = { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_NEXT, 0, 0, 0, 0, 0, 0 };
-    tud_hid_report(0, report, sizeof(report));
+    vendor_send(report, sizeof(report));
     ESP_LOGI(TAG, "media next sent");
 }
 
@@ -764,7 +864,7 @@ void usb_hid_media_prev(void)
 {
     if (!s_active || !tud_hid_ready()) return;
     uint8_t report[8] = { HID_MEDIA_PAGE_CTRL, HID_MEDIA_BTN_PREV, 0, 0, 0, 0, 0, 0 };
-    tud_hid_report(0, report, sizeof(report));
+    vendor_send(report, sizeof(report));
     ESP_LOGI(TAG, "media prev sent");
 }
 
@@ -779,7 +879,7 @@ void usb_hid_media_seek(uint32_t position_ms)
         (uint8_t)((position_ms >> 24) & 0xFF),
         0, 0
     };
-    tud_hid_report(0, report, sizeof(report));
+    vendor_send(report, sizeof(report));
     ESP_LOGI(TAG, "media seek sent: %lu ms", (unsigned long)position_ms);
 }
 
@@ -946,7 +1046,7 @@ void usb_hid_tp_flush(void)
         /* Horizontal wheel only -- its own report type (see usb_hid.h). */
         int32_t hw = tp_clamp(s_tp_hwheel, INT8_MIN, INT8_MAX);
         uint8_t hrep[8] = { HID_TP_PAGE, HID_TP_CMD_HWHEEL, (uint8_t)(int8_t)hw, s_tp_btn_last, 0, 0, 0, 0 };
-        if (tud_hid_report(0, hrep, sizeof(hrep))) s_tp_hwheel -= hw;
+        if (vendor_send(hrep, sizeof(hrep))) s_tp_hwheel -= hw;
         return;
     }
 
@@ -962,10 +1062,10 @@ void usb_hid_tp_flush(void)
         (uint8_t)(int8_t)wh, mask
     };
 
-    /* tud_hid_report() fails if the endpoint got claimed in between (e.g.
+    /* vendor_send() fails if the endpoint got claimed in between (e.g.
      * a mode reply from the TinyUSB task) -- keep everything for the next
      * flush instead of losing it. */
-    if (!tud_hid_report(0, report, sizeof(report))) return;
+    if (!vendor_send(report, sizeof(report))) return;
 
     s_tp_dx    -= dx;
     s_tp_dy    -= dy;
@@ -1018,7 +1118,7 @@ void usb_hid_kb_flush(void)
 
     /* Endpoint may get claimed in between (TinyUSB task) -- keep the event
      * for the next flush instead of losing it. */
-    if (!tud_hid_report(0, report, sizeof(report))) return;
+    if (!vendor_send(report, sizeof(report))) return;
 
     s_kb_head = (s_kb_head + 1) % KB_Q_LEN;
     s_kb_count--;
