@@ -45,6 +45,14 @@ void app_main(void)
      * on a normal boot. See dump_manager.h. */
     dump_manager_export();
 
+    /* If a valid update.bin sits on the SD card, ask the user before
+     * anything else -- before the boot animation and before the deck
+     * preload starts reading the SD card. Blocks until answered; "Yes"
+     * reboots the device on success and never returns. On "No" (or a
+     * failed update) the screen is left black with the backlight off,
+     * exactly the state boot_anim_play() expects. */
+    ui_ota_check_and_prompt();
+
     ui_deck_preload_start();   /* load config, kick off background preload task */
 
     /* icon背景預載的task優先權是3,如果跟boot_anim同時跑,會搶走main
@@ -58,11 +66,6 @@ void app_main(void)
     vTaskPrioritySet(NULL, main_task_prio + 3);
     boot_anim_play();     /* animation plays while preload task runs */
     vTaskPrioritySet(NULL, main_task_prio);
-
-    /* If a valid update.bin sits on the SD card, ask the user before
-     * touching anything. Blocks until answered; "Yes" reboots the
-     * device on success and never returns. */
-    ui_ota_check_and_prompt();
 
     ui_deck_preload_wait();
     ESP_LOGI("MAIN", "before usb/ble init - PSRAM free: %d B",

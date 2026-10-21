@@ -37,3 +37,8 @@ CONFIG_LV_DEMO_MUSIC_AUTO_PLAY=y
 
 # Two HID interfaces: 0 = ESDeck vendor HID, 1 = standard keyboard + mouse
 CONFIG_TINYUSB_HID_COUNT=2
+
+# RGB LCD: restart the RGB transfer on every VSYNC, so a frame that drifts
+# (PSRAM starved while flash is erased/written, e.g. OTA) snaps back on the
+# next frame instead of staying shifted. Not the IDF default.
+CONFIG_LCD_RGB_RESTART_IN_VSYNC=y

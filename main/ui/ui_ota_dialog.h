@@ -13,5 +13,8 @@
  * Must be called from a plain task (e.g. app_main), NOT from inside an
  * LVGL event callback, since it blocks on a semaphore that an LVGL
  * button callback signals.
+ *
+ * Called before boot_anim_play(): turns the backlight on for the dialog
+ * and off again before returning (screen left black).
  */
 void ui_ota_check_and_prompt(void);

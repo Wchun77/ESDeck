@@ -1,6 +1,7 @@
 #include "ui_ota_dialog.h"
 #include "ota_manager/ota_manager.h"
 #include "lvgl_port.h"
+#include "waveshare_rgb_lcd_port.h"   /* backlight on/off */
 #include "lvgl.h"
 
 #include "esp_log.h"
@@ -218,6 +219,16 @@ static void on_ota_progress(uint8_t percent, void *user_data)
  * ----------------------------------------------------------------------- */
 static void ota_apply_task(void *arg)
 {
+    /* Make sure the "Updating Firmware" screen is fully on the panel
+     * before any flash erase/write starts: flash and PSRAM share the MSPI
+     * bus, so once erasing begins the LCD can't be fed reliably and a
+     * half-switched frame (old dialog + new screen) would stay visible.
+     * This is a plain task, so it may wait on lvgl_port_task (an
+     * lv_refr_now() from the LVGL event callback only filled one of the
+     * two direct-mode buffers). */
+    lvgl_port_wait_render_idle(1000);
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     bool ok = ota_apply_update(s_result.path, s_result.size,
                                on_ota_erase_done, on_ota_progress, NULL);
 
@@ -258,9 +269,9 @@ static void ota_apply_task(void *arg)
 static void start_update_flow(void)
 {
     build_progress_screen();
-    lv_refr_now(NULL);   /* flush the Updating screen before flash I/O starts,
-                          * otherwise the first flash erase/write races the
-                          * full-screen redraw and tears badly */
+    /* Runs in an LVGL event callback: just build the screen and return so
+     * lvgl_port_task renders it; ota_apply_task waits for that before it
+     * touches flash. */
     xTaskCreate(ota_apply_task, "ota_apply", 8192, NULL, 3, NULL);
 }
 
@@ -281,15 +292,38 @@ void ui_ota_check_and_prompt(void)
         return;
     }
 
+    /* Runs before the boot animation, so the backlight is still off
+     * (waveshare_esp32_s3_rgb_lcd_init() keeps it off until something has
+     * been drawn, to hide the uninitialized framebuffer). Black screen +
+     * dialog first, let LVGL render it, then light up. */
     if (!lvgl_port_lock(-1)) {
         vSemaphoreDelete(s_done_sem);
         s_done_sem = NULL;
         return;
     }
+    lv_obj_t *scr = lv_scr_act();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     build_confirm_dialog();
     lvgl_port_unlock();
+
+    /* Same as boot_anim's custom animation: wait for LVGL to really draw
+     * it, plus a margin -- the VSYNC notify fires per bounce-buffer chunk,
+     * not per whole frame, so "idle" isn't 100% "on the panel" yet. A
+     * fixed short delay wasn't enough: the backlight came on over a
+     * still-white framebuffer for a moment. */
+    lvgl_port_wait_render_idle(1000);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    wavesahre_rgb_lcd_bl_on();
 
     xSemaphoreTake(s_done_sem, portMAX_DELAY);
     vSemaphoreDelete(s_done_sem);
     s_done_sem = NULL;
+
+    /* Declined (or the update failed): dialog is gone, screen is black.
+     * Backlight off again so boot_anim_play() starts from the same state
+     * as a boot without an update file -- it turns the backlight on once
+     * its own first frame is drawn. */
+    vTaskDelay(pdMS_TO_TICKS(100));
+    wavesahre_rgb_lcd_bl_off();
 }

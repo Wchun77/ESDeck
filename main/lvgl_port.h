@@ -147,6 +147,16 @@ bool lvgl_port_lock(int timeout_ms);
  */
 void lvgl_port_unlock(void);
 
+/* Wait until lvgl_port_task has actually drawn everything invalidated so
+ * far (polls the display's dirty-area count / rendering flag), up to
+ * timeout_ms. For a plain task that just built a screen and needs it on
+ * the panel before e.g. turning the backlight on -- lv_refr_now() can't be
+ * used from other tasks here (direct-mode double buffering waits for a
+ * VSYNC notify that only goes to lvgl_port_task). Don't hold the LVGL lock
+ * while calling. Moved here from boot_anim.c so the OTA dialog can use it
+ * too. */
+void lvgl_port_wait_render_idle(uint32_t timeout_ms);
+
 /**
  * @brief Notifies the LVGL task when the transmission of the RGB frame buffer is completed.
  *

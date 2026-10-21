@@ -56,26 +56,7 @@
  * timeout_ms 是安全上限,萬一渲染真的卡住也不會整個卡死在這裡。 */
 static void wait_for_render_idle(uint32_t timeout_ms)
 {
-    lv_disp_t *disp = lv_disp_get_default();
-    if (!disp) return;
-
-    TickType_t start = xTaskGetTickCount();
-    TickType_t limit = pdMS_TO_TICKS(timeout_ms);
-
-    for (;;) {
-        bool idle = false;
-        if (lvgl_port_lock(20)) {
-            idle = (disp->inv_p == 0) && !disp->rendering_in_progress;
-            lvgl_port_unlock();
-        }
-        if (idle) return;
-
-        if ((xTaskGetTickCount() - start) >= limit) {
-            ESP_LOGW(TAG, "wait_for_render_idle: timeout after %u ms", (unsigned)timeout_ms);
-            return;
-        }
-        vTaskDelay(pdMS_TO_TICKS(5));
-    }
+    lvgl_port_wait_render_idle(timeout_ms);   /* see lvgl_port.h */
 }
 
 static lv_obj_t *s_ring1    = NULL;
