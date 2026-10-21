@@ -168,7 +168,7 @@ TaskHandle_t lvgl_port_get_task_handle(void);
  * so the hook sees releases. Point order is whatever the controller
  * reports: callers that need finger identity must track it themselves
  * (see Touchpad mode in ui_touchpad.c). All of this is LVGL-task only. */
-#define LVGL_PORT_TOUCH_MAX_POINTS  2
+#define LVGL_PORT_TOUCH_MAX_POINTS  3   /* finger on a top button + two on the pad; a flat finger can also read as two */
 
 typedef struct {
     uint8_t  count;                               /* 0 = no finger */

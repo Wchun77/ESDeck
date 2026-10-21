@@ -74,6 +74,7 @@ typedef struct setting_node_s {
     int                           choice_count;
     int                         (*choice_get_cb)(void);
     void                        (*choice_set_cb)(int idx);
+    bool                        (*locked_cb)(void);      /* SETTING_TOGGLE, optional: true = shown on and disabled */
 } setting_node_t;
 
 #define SETTINGS_STACK_MAX 4
@@ -652,7 +653,8 @@ static const setting_node_t s_touchpad_menu[] = {
     { "Scroll Inertia", SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
       ui_touchpad_get_inertia, ui_touchpad_set_inertia },
     { "Tap to Click",   SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
-      ui_touchpad_get_tap_click, ui_touchpad_set_tap_click },
+      ui_touchpad_get_tap_click, ui_touchpad_set_tap_click,
+      NULL, NULL, NULL, 0, NULL, NULL, ui_touchpad_tap_click_forced },
     { "2-Finger Swipe", SETTING_CHOICE, SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL, NULL, NULL,
       ui_touchpad_swipe_mode_names, TP_SWIPE_COUNT,
       ui_touchpad_get_swipe_mode, ui_touchpad_set_swipe_mode },
@@ -664,6 +666,12 @@ static const setting_node_t s_touchpad_menu[] = {
       ui_touchpad_get_sidebar_mode, ui_touchpad_set_sidebar_mode },
     { "Hide Buttons",   SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
       ui_touchpad_get_hide_buttons, ui_touchpad_set_hide_buttons },
+    { "Top Left Button",  SETTING_CHOICE, SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL, NULL, NULL,
+      ui_touchpad_btn_func_names, TP_BTNF_COUNT,
+      ui_touchpad_get_btn_left_func, ui_touchpad_set_btn_left_func },
+    { "Top Right Button", SETTING_CHOICE, SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL, NULL, NULL,
+      ui_touchpad_btn_func_names, TP_BTNF_COUNT,
+      ui_touchpad_get_btn_right_func, ui_touchpad_set_btn_right_func },
     { "Hide Labels",    SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
       ui_touchpad_get_hide_labels, ui_touchpad_set_hide_labels },
 };
@@ -1072,8 +1080,16 @@ static void render_current_level(void)
              * theme level via CONFIG_LV_THEME_DEFAULT_TRANSITION_TIME=0
              * in sdkconfig rather than worked around per-widget here.
              * See https://github.com/lvgl/lvgl/issues/3157. */
-            if (node->get_state_cb && node->get_state_cb())
+            if (node->locked_cb && node->locked_cb()) {
+                /* Forced on by another setting (e.g. Tap to Click while no
+                 * top button is Left Click): show the effective state,
+                 * don't let it be switched; the stored value comes back
+                 * once the lock goes away. */
+                lv_obj_add_state(sw, LV_STATE_CHECKED | LV_STATE_DISABLED);
+                lv_label_set_text_fmt(lbl, "%s (always on)", node->label);
+            } else if (node->get_state_cb && node->get_state_cb()) {
                 lv_obj_add_state(sw, LV_STATE_CHECKED);
+            }
             lv_obj_add_event_cb(sw, toggle_switch_cb, LV_EVENT_VALUE_CHANGED, (void *)node);
         } else if (node->type == SETTING_VALUE) {
             /* Same non-clickable row as TOGGLE; only - / + react.

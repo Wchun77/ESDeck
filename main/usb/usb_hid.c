@@ -1220,10 +1220,13 @@ static void kb_flush_native(void)
         if (usage) for (int i = 0; i < 6; i++) if (keys[i] == usage) keys[i] = 0;
         mod &= (uint8_t)~vkmod;
         /* Modifiers were sent along with this key -- with no key left
-         * down they go up too (same as ESDeckPC's KeyboardInput). */
+         * down they go up too (same as ESDeckPC's KeyboardInput). Only for
+         * a real key: releasing a modifier VK (a Touchpad top button set
+         * to Ctrl, say) drops just its own bit, so another modifier still
+         * held stays down. */
         bool any = false;
         for (int i = 0; i < 6; i++) if (keys[i]) any = true;
-        if (!any) mod = 0;
+        if (usage && !any) mod = 0;
     }
 
     if (!tud_hid_n_keyboard_report(HID_ITF_INPUT, RID_KEYBOARD, mod, keys)) return;

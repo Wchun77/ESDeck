@@ -89,6 +89,7 @@ static const char *TAG = "TOUCHPAD";
 #define COL_BTN_PRESSED 0x0055cc
 #define COL_BORDER      0x333333
 #define COL_HINT        0x444444
+#define COL_HINT_ON_BG  0x777777   /* same text, over a bg image */
 #define COL_TEXT        0xcccccc
 #define COL_ACCENT      0x00d4ff
 
@@ -139,6 +140,13 @@ static bool    s_hide_buttons  = false;   /* pad covers the whole content area *
 static int     s_swipe_mode    = TP_SWIPE_HSCROLL;
 static int     s_input_mode    = TP_INPUT_ESDECKPC;
 static int     s_sidebar_mode  = TP_SIDEBAR_HOTKEYS;
+static int     s_btn_func[2]   = { TP_BTNF_LEFT, TP_BTNF_RIGHT };   /* top-left, top-right */
+static uint8_t s_btn_mod_vk[2] = { 0, 0 };   /* modifier VK each top button currently holds down on the PC */
+/* Text on the button / names in the Settings popup, per tp_btn_func_t. */
+static const char *const s_btn_label[TP_BTNF_COUNT] = { "Left", "Right", "Ctrl", "Shift", "Alt" };
+static const char *const s_btn_func_names[TP_BTNF_COUNT] = {
+    "Left Click", "Right Click", "Ctrl", "Shift", "Alt",
+};
 static lv_obj_t *s_sidebar     = NULL;    /* ui.c's sidebar, kept to rebuild the middle area */
 
 static lv_obj_t *s_kb_cell    = NULL;       /* sidebar: keyboard button cell */
@@ -176,7 +184,7 @@ static bool     s_swipe_done     = false;  /* Back/Forward already fired this ge
 
 /* Pad gesture lifetime (first pad finger down .. last pad finger up) */
 static bool     s_gesture        = false;
-static bool     s_gesture_btn    = false;  /* a L/R button was held during it: no taps */
+static bool     s_gesture_btn    = false;  /* a top button set to a mouse button was held: no taps */
 
 /* Mouse button state from the L/R buttons */
 static bool     s_left_held      = false;
@@ -252,12 +260,55 @@ static void set_fast_touch_read(bool fast)
     }
 }
 
+/* Top buttons: s_left_held / s_right_held say the physical button (left
+ * or right one) is held; s_btn_func[] says what that means. */
+static uint8_t btn_func_mouse_bit(int func)
+{
+    if (func == TP_BTNF_LEFT)  return HID_TP_BTN_LEFT;
+    if (func == TP_BTNF_RIGHT) return HID_TP_BTN_RIGHT;
+    return 0;
+}
+
+static uint8_t btn_func_mod_vk(int func)
+{
+    switch (func) {
+    case TP_BTNF_CTRL:  return 0xA2;   /* VK_LCONTROL */
+    case TP_BTNF_SHIFT: return 0xA0;   /* VK_LSHIFT */
+    case TP_BTNF_ALT:   return 0xA4;   /* VK_LMENU */
+    default:            return 0;
+    }
+}
+
+/* A top button acting as a mouse button is held (taps are suppressed then;
+ * a held modifier leaves taps alone -- Ctrl + tap = Ctrl+click). */
+static bool mouse_btn_held(void)
+{
+    return (s_left_held  && btn_func_mouse_bit(s_btn_func[0])) ||
+           (s_right_held && btn_func_mouse_bit(s_btn_func[1]));
+}
+
 static uint8_t current_mask(void)
 {
     uint8_t m = 0;
-    if (s_left_held || s_dragging) m |= HID_TP_BTN_LEFT;
-    if (s_right_held)              m |= HID_TP_BTN_RIGHT;
+    if (s_dragging)   m |= HID_TP_BTN_LEFT;
+    if (s_left_held)  m |= btn_func_mouse_bit(s_btn_func[0]);
+    if (s_right_held) m |= btn_func_mouse_bit(s_btn_func[1]);
     return m;
+}
+
+/* Press / release the modifier keys the top buttons stand for so they
+ * match what's held. Goes through the keyboard queue (vendor or native,
+ * same as the mini keyboard), flushed by the flush timer. */
+static void sync_mod_keys(void)
+{
+    bool held[2] = { s_left_held, s_right_held };
+    for (int i = 0; i < 2; i++) {
+        uint8_t want = held[i] ? btn_func_mod_vk(s_btn_func[i]) : 0;
+        if (want == s_btn_mod_vk[i]) continue;
+        if (s_btn_mod_vk[i]) usb_hid_kb_key(false, s_btn_mod_vk[i], 0);
+        if (want)            usb_hid_kb_key(true, want, 0);
+        s_btn_mod_vk[i] = want;
+    }
 }
 
 static void push_buttons(void)
@@ -379,11 +430,18 @@ static void flush_timer_cb(lv_timer_t *t)
     usb_hid_kb_flush();   /* sidebar hotkeys go out on the keyboard report path */
 }
 
-/* Effective tap-to-click: forced on while the L/R buttons are hidden,
- * otherwise there would be no way left to click at all. */
+/* Tapping is the only way left to click: buttons hidden, or neither top
+ * button is Left Click. */
+static bool tap_forced(void)
+{
+    return s_hide_buttons ||
+           (s_btn_func[0] != TP_BTNF_LEFT && s_btn_func[1] != TP_BTNF_LEFT);
+}
+
+/* Effective tap-to-click (Settings shows the toggle locked on when forced). */
 static bool tap_enabled(void)
 {
-    return s_tap_click || s_hide_buttons;
+    return s_tap_click || tap_forced();
 }
 
 /* See TP_TAP_DRAG. */
@@ -457,16 +515,17 @@ static void update_buttons(void)
     if (l != s_left_held && s_btn_left) {
         if (l) lv_obj_add_state(s_btn_left, LV_STATE_PRESSED);
         else   lv_obj_clear_state(s_btn_left, LV_STATE_PRESSED);
-        ESP_LOGI(TAG, "L %s", l ? "down" : "up");
+        ESP_LOGI(TAG, "top-left %s", l ? "down" : "up");
     }
     if (r != s_right_held && s_btn_right) {
         if (r) lv_obj_add_state(s_btn_right, LV_STATE_PRESSED);
         else   lv_obj_clear_state(s_btn_right, LV_STATE_PRESSED);
-        ESP_LOGI(TAG, "R %s", r ? "down" : "up");
+        ESP_LOGI(TAG, "top-right %s", r ? "down" : "up");
     }
     s_left_held  = l;
     s_right_held = r;
-    if (l || r) s_gesture_btn = true;
+    if (mouse_btn_held()) s_gesture_btn = true;
+    sync_mod_keys();
     push_buttons();
 }
 
@@ -486,7 +545,7 @@ static void update_buttons(void)
 static void gesture_begin(void)
 {
     s_gesture        = true;
-    s_gesture_btn    = s_left_held || s_right_held;
+    s_gesture_btn    = mouse_btn_held();
     s_pad_press_tick = lv_tick_get();
     s_pad_travel     = 0;
     s_pad_two        = false;
@@ -1107,7 +1166,7 @@ static lv_obj_t *build_mouse_btn(lv_coord_t x, const char *text, const char *nam
 
     lv_obj_t *lbl = lv_label_create(btn);
     lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_color(lbl, lv_color_hex(COL_TEXT), 0);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(COL_HINT), 0);   /* same as the "Touchpad" hint */
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_20, 0);
     lv_obj_center(lbl);
     return btn;
@@ -1128,13 +1187,15 @@ static void build_page(lv_obj_t *scr)
 
     bool has_bg = build_bg();
 
-    s_btn_left  = build_mouse_btn(TP_MARGIN,                     "Left",  "L");
-    s_btn_right = build_mouse_btn(TP_MARGIN * 2 + TP_BTN_W,      "Right", "R");
+    s_btn_left  = build_mouse_btn(TP_MARGIN,                s_btn_label[s_btn_func[0]], "L");
+    s_btn_right = build_mouse_btn(TP_MARGIN * 2 + TP_BTN_W, s_btn_label[s_btn_func[1]], "R");
     s_lbl_left  = lv_obj_get_child(s_btn_left, 0);
     s_lbl_right = lv_obj_get_child(s_btn_right, 0);
     if (has_bg) {
         lv_obj_set_style_bg_opa(s_btn_left,  OPA_BTN_ON_BG, 0);
         lv_obj_set_style_bg_opa(s_btn_right, OPA_BTN_ON_BG, 0);
+        lv_obj_set_style_text_color(s_lbl_left,  lv_color_hex(COL_HINT_ON_BG), 0);
+        lv_obj_set_style_text_color(s_lbl_right, lv_color_hex(COL_HINT_ON_BG), 0);
     }
 
     s_pad = make_plain_obj(s_page);
@@ -1150,7 +1211,7 @@ static void build_page(lv_obj_t *scr)
     lv_obj_t *hint = lv_label_create(s_pad);
     s_lbl_hint = hint;
     lv_label_set_text(hint, "Touchpad");
-    lv_obj_set_style_text_color(hint, lv_color_hex(has_bg ? 0x777777 : COL_HINT), 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(has_bg ? COL_HINT_ON_BG : COL_HINT), 0);
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_20, 0);
     lv_obj_center(hint);
 
@@ -1212,7 +1273,9 @@ void ui_touchpad_exit(void)
     s_left_held = s_right_held = false;
     s_wheel_coast = 0;
     push_buttons();
+    sync_mod_keys();      /* a top button held as Ctrl/Shift/Alt: key up */
     usb_hid_tp_flush();
+    usb_hid_kb_flush();
 
     if (s_flush_timer) {
         lv_timer_del(s_flush_timer);
@@ -1319,6 +1382,10 @@ static void prefs_load(void)
     s_swipe_mode = nvs_get_int(CFG_NVS_KEY_TPAD_SWIPE, TP_SWIPE_HSCROLL);
     if (s_swipe_mode < 0 || s_swipe_mode >= TP_SWIPE_COUNT) s_swipe_mode = TP_SWIPE_HSCROLL;
     s_input_mode = nvs_get_int(CFG_NVS_KEY_TPAD_INPUT, TP_INPUT_ESDECKPC);
+    s_btn_func[0] = nvs_get_int(CFG_NVS_KEY_TPAD_BTN_L, TP_BTNF_LEFT);
+    s_btn_func[1] = nvs_get_int(CFG_NVS_KEY_TPAD_BTN_R, TP_BTNF_RIGHT);
+    for (int i = 0; i < 2; i++)
+        if (s_btn_func[i] < 0 || s_btn_func[i] >= TP_BTNF_COUNT) s_btn_func[i] = i ? TP_BTNF_RIGHT : TP_BTNF_LEFT;
     s_sidebar_mode = nvs_get_int(CFG_NVS_KEY_TPAD_SIDEBAR, TP_SIDEBAR_HOTKEYS);
     if (s_sidebar_mode < 0 || s_sidebar_mode >= TP_SIDEBAR_COUNT) s_sidebar_mode = TP_SIDEBAR_HOTKEYS;
     if (s_input_mode < 0 || s_input_mode >= TP_INPUT_COUNT) s_input_mode = TP_INPUT_ESDECKPC;
@@ -1438,6 +1505,25 @@ void ui_touchpad_set_sidebar_mode(int mode)
         build_sidebar_middle(s_sidebar);
     }
 }
+
+const char *const *ui_touchpad_btn_func_names(void) { return s_btn_func_names; }
+int  ui_touchpad_get_btn_left_func(void)  { prefs_load(); return s_btn_func[0]; }
+int  ui_touchpad_get_btn_right_func(void) { prefs_load(); return s_btn_func[1]; }
+bool ui_touchpad_tap_click_forced(void)   { prefs_load(); return tap_forced(); }
+
+static void set_btn_func(int idx, int func)
+{
+    if (func < 0 || func >= TP_BTNF_COUNT) return;
+    prefs_load();
+    if (s_btn_func[idx] == func) return;
+    s_btn_func[idx] = func;
+    nvs_set_int(idx ? CFG_NVS_KEY_TPAD_BTN_R : CFG_NVS_KEY_TPAD_BTN_L, func);
+    lv_obj_t *lbl = idx ? s_lbl_right : s_lbl_left;
+    if (lbl) lv_label_set_text(lbl, s_btn_label[func]);
+}
+
+void ui_touchpad_set_btn_left_func(int func)  { set_btn_func(0, func); }
+void ui_touchpad_set_btn_right_func(int func) { set_btn_func(1, func); }
 
 void ui_touchpad_deselect_current(void)
 {

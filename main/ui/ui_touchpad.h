@@ -112,3 +112,26 @@ typedef enum {
 const char *const *ui_touchpad_sidebar_mode_names(void); /* TP_SIDEBAR_COUNT entries */
 int  ui_touchpad_get_sidebar_mode(void);
 void ui_touchpad_set_sidebar_mode(int mode);
+
+/* Top Left / Top Right Button: what each of the two top buttons does while
+ * held -- a mouse button, or a modifier key held down (Ctrl + tap on the
+ * pad = Ctrl+click). The button shows the function's name. */
+typedef enum {
+    TP_BTNF_LEFT = 0,    /* left mouse button (top-left default) */
+    TP_BTNF_RIGHT,       /* right mouse button (top-right default) */
+    TP_BTNF_CTRL,
+    TP_BTNF_SHIFT,
+    TP_BTNF_ALT,
+    TP_BTNF_COUNT,
+} tp_btn_func_t;
+
+const char *const *ui_touchpad_btn_func_names(void);     /* TP_BTNF_COUNT entries */
+int  ui_touchpad_get_btn_left_func(void);
+void ui_touchpad_set_btn_left_func(int func);
+int  ui_touchpad_get_btn_right_func(void);
+void ui_touchpad_set_btn_right_func(int func);
+
+/* True when tapping is the only way left to click -- buttons hidden, or
+ * neither top button is Left Click -- so Tap to Click is on regardless of
+ * its own setting (Settings shows the toggle locked on). */
+bool ui_touchpad_tap_click_forced(void);
