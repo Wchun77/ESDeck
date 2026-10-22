@@ -78,6 +78,9 @@ typedef struct setting_node_s {
     bool                        (*locked_cb)(void);      /* SETTING_TOGGLE, optional: true = shown on and disabled */
 } setting_node_t;
 
+/* Element count of a static array (menu tables, choice name lists). */
+#define COUNT_OF(a) ((int)(sizeof(a) / sizeof((a)[0])))
+
 #define SETTINGS_STACK_MAX 4
 
 /* Current UI mode */
@@ -461,7 +464,7 @@ static void mode_pick_set(int idx) { if (valid_mode(idx)) switch_to_mode((ui_mod
 
 static const setting_node_t s_mode_pick_node = {
     "Switch Mode", SETTING_CHOICE, SETMASK_ALL, NULL, NULL, 0, NULL, NULL, NULL, NULL,
-    mode_pick_names, (int)(sizeof(s_mode_pick_names) / sizeof(s_mode_pick_names[0])),
+    mode_pick_names, COUNT_OF(s_mode_pick_names),
     mode_pick_get, mode_pick_set,
 };
 
@@ -772,11 +775,13 @@ static const setting_node_t s_custom_menu[] = {
       ui_settings_boot_mode_names, UI_BOOT_MODE_CHOICES,
       ui_settings_get_boot_mode_choice, ui_settings_set_boot_mode_choice },
     { "Touchpad",       SETTING_SUBMENU, SETMASK_TOUCHPAD, NULL, s_touchpad_menu,
-      (int)(sizeof(s_touchpad_menu) / sizeof(s_touchpad_menu[0])) },
+      COUNT_OF(s_touchpad_menu) },
 };
 
 static const setting_node_t s_system_menu[] = {
     { "HID Status", SETTING_ACTION, SETMASK_ALL, item_hid_status_cb, NULL, 0 },
+    { "Toasts",     SETTING_TOGGLE, SETMASK_ALL, NULL, NULL, 0,
+      ui_toast_get_enabled, ui_toast_set_enabled },
     { "Info",       SETTING_ACTION, SETMASK_ALL, item_info_cb,       NULL, 0 },
 };
 
@@ -810,13 +815,14 @@ static const setting_node_t s_mode_menu[] = {
 };
 
 static const setting_node_t s_root_menu[] = {
-    { "System",        SETTING_SUBMENU, SETMASK_ALL,  NULL, s_system_menu, 2 },
+    { "System",        SETTING_SUBMENU, SETMASK_ALL,  NULL, s_system_menu,
+      COUNT_OF(s_system_menu) },
 #if ESDECK_ENABLE_BLE
-    { "Bluetooth",     SETTING_SUBMENU, SETMASK_ALL,  NULL, s_bluetooth_menu, 2 },
+    { "Bluetooth",     SETTING_SUBMENU, SETMASK_ALL,  NULL, s_bluetooth_menu, COUNT_OF(s_bluetooth_menu) },
 #endif
     { "Custom",        SETTING_SUBMENU, SETMASK_ALL,  NULL, s_custom_menu,
-      (int)(sizeof(s_custom_menu) / sizeof(s_custom_menu[0])) },
-    { "Mode",          SETTING_SUBMENU, SETMASK_ALL,  NULL, s_mode_menu, 5 },
+      COUNT_OF(s_custom_menu) },
+    { "Mode",          SETTING_SUBMENU, SETMASK_ALL,  NULL, s_mode_menu, COUNT_OF(s_mode_menu) },
 };
 
 /* -----------------------------------------------------------------------
@@ -1611,7 +1617,7 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
     lv_obj_set_scrollbar_mode(s_list, LV_SCROLLBAR_MODE_OFF);
 
     s_menu_stack[0]       = s_root_menu;
-    s_menu_stack_count[0] = (int)(sizeof(s_root_menu) / sizeof(s_root_menu[0]));
+    s_menu_stack_count[0] = COUNT_OF(s_root_menu);
     s_stack_depth         = 0;
 
     lv_obj_set_style_outline_color(s_gear_btn, lv_color_hex(0x0055cc), 0);

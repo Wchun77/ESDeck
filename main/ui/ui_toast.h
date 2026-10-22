@@ -48,3 +48,9 @@ void ui_toast_init(void);
  * like ui_settings.c's enter_monitor_task() does for its own callbacks. */
 void ui_toast_push(const char *label, int count, const char *merge_key,
                     const lv_font_t *font);
+
+/* Toasts (Settings > System): off = ui_toast_push() shows nothing (the
+ * slide-in animation is heavy on this board). Stored in NVS, default on. A
+ * banner already showing finishes normally. */
+bool ui_toast_get_enabled(void);
+void ui_toast_set_enabled(bool on);

@@ -1,5 +1,7 @@
 #include "ui_toast.h"
 #include "ui.h"
+#include "app_config.h"
+#include "nvs_manager/nvs_manager.h"
 #include "lvgl.h"
 #include <string.h>
 #include <stdio.h>
@@ -218,9 +220,31 @@ static void toast_try_show_next(void)
     toast_start_slide_in();
 }
 
+static bool s_enabled        = true;
+static bool s_enabled_loaded = false;
+
+bool ui_toast_get_enabled(void)
+{
+    if (!s_enabled_loaded) {
+        char v[4] = "";
+        if (nvs_manager_get_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_TOAST, v, sizeof(v)) && v[0])
+            s_enabled = (v[0] != '0');
+        s_enabled_loaded = true;
+    }
+    return s_enabled;
+}
+
+void ui_toast_set_enabled(bool on)
+{
+    s_enabled = on;
+    s_enabled_loaded = true;
+    nvs_manager_set_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_TOAST, on ? "1" : "0");
+}
+
 void ui_toast_push(const char *label, int count, const char *merge_key,
                     const lv_font_t *font)
 {
+    if (!ui_toast_get_enabled()) return;   /* Settings > System > Toasts off */
     if (!s_toast || !s_toast_lbl ||
         !lv_obj_is_valid(s_toast) || !lv_obj_is_valid(s_toast_lbl)) return;
     if (count < 1) count = 1;

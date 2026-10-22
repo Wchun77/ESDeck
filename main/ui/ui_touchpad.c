@@ -143,9 +143,9 @@ static int     s_sidebar_mode  = TP_SIDEBAR_HOTKEYS;
 static int     s_btn_func[2]   = { TP_BTNF_LEFT, TP_BTNF_RIGHT };   /* top-left, top-right */
 static uint8_t s_btn_mod_vk[2] = { 0, 0 };   /* modifier VK each top button currently holds down on the PC */
 /* Text on the button / names in the Settings popup, per tp_btn_func_t. */
-static const char *const s_btn_label[TP_BTNF_COUNT] = { "Left", "Right", "Ctrl", "Shift", "Alt" };
+static const char *const s_btn_label[TP_BTNF_COUNT] = { "Left", "Right", "Ctrl", "Shift", "Alt", "Middle" };
 static const char *const s_btn_func_names[TP_BTNF_COUNT] = {
-    "Left Click", "Right Click", "Ctrl", "Shift", "Alt",
+    "Left Click", "Right Click", "Ctrl", "Shift", "Alt", "Middle Click",
 };
 static lv_obj_t *s_sidebar     = NULL;    /* ui.c's sidebar, kept to rebuild the middle area */
 
@@ -265,7 +265,8 @@ static void set_fast_touch_read(bool fast)
 static uint8_t btn_func_mouse_bit(int func)
 {
     if (func == TP_BTNF_LEFT)  return HID_TP_BTN_LEFT;
-    if (func == TP_BTNF_RIGHT) return HID_TP_BTN_RIGHT;
+    if (func == TP_BTNF_RIGHT)  return HID_TP_BTN_RIGHT;
+    if (func == TP_BTNF_MIDDLE) return HID_TP_BTN_MIDDLE;
     return 0;
 }
 

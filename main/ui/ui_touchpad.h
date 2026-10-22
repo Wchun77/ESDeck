@@ -122,6 +122,7 @@ typedef enum {
     TP_BTNF_CTRL,
     TP_BTNF_SHIFT,
     TP_BTNF_ALT,
+    TP_BTNF_MIDDLE,      /* middle mouse button (appended: values are stored in NVS) */
     TP_BTNF_COUNT,
 } tp_btn_func_t;
 

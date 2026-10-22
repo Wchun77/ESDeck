@@ -159,6 +159,7 @@
 #define HID_TP_CMD_HWHEEL   0x02
 #define HID_TP_BTN_LEFT     0x01
 #define HID_TP_BTN_RIGHT    0x02
+#define HID_TP_BTN_MIDDLE   0x04    /* mouse button 3 */
 #define HID_TP_BTN_BACK     0x08    /* mouse button 4 / XBUTTON1 */
 #define HID_TP_BTN_FORWARD  0x10    /* mouse button 5 / XBUTTON2 */
 

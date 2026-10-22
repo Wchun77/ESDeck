@@ -168,6 +168,7 @@
 #define CFG_NVS_KEY_BOOT_MODE "boot_mode"   /* 0 = Auto (last used mode), 1 + ui_mode_t = that mode */
 #define CFG_NVS_KEY_LAST_MODE "last_mode"   /* ui_mode_t last switched to, for Boot Mode = Auto */
 #define CFG_NVS_KEY_KB_ZHUYIN "kb_zhuyin"   /* "1" = mini keyboard shows Zhuyin on the keys */
+#define CFG_NVS_KEY_TOAST     "toast_on"    /* "0" = no toast banners (default "1") */
 #define CFG_NVS_KEY_TPAD_HIDE_LBL "tpad_hide_lbl"   /* "1" = hide Touchpad text labels */
 /* Touchpad > Settings > Custom > Touchpad -- see ui_touchpad.c "Preferences" */
 #define CFG_NVS_KEY_TPAD_CURSOR   "tp_cursor"       /* cursor speed, percent: "50".."200" */
