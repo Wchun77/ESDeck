@@ -46,6 +46,25 @@ void ui_settings_deselect(void);
 /* Return the current UI mode. */
 ui_mode_t ui_settings_get_mode(void);
 
+/* Boot Mode (Settings > Custom): which mode the device starts in.
+ *   Auto     -- the mode last switched to (remembered in NVS on every mode
+ *               switch while Auto is selected)
+ *   Deck / Monitor / Media / Touchpad -- always that mode
+ * ui_settings_boot_mode() resolves the setting to the mode to start in;
+ * app_main() calls it before anything mode-specific (Deck's preload) and
+ * passes the result to my_ui_init(). NVS only, safe before the UI
+ * exists. */
+ui_mode_t ui_settings_boot_mode(void);
+
+/* Set the current mode without any transition -- only for my_ui_init(),
+ * right before it enters the boot mode. */
+void ui_settings_init_mode(ui_mode_t mode);
+
+#define UI_BOOT_MODE_CHOICES 5   /* Auto + the four modes */
+const char *const *ui_settings_boot_mode_names(void);
+int  ui_settings_get_boot_mode_choice(void);
+void ui_settings_set_boot_mode_choice(int idx);
+
 /* Rebuild Deck mode from the config selected in NVS (after Select Config).
  * Tears down the current deck, shows the switching screen, preloads icons
  * in the background, then builds -- same path as switching into Deck. */

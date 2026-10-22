@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ui_settings.h"   /* ui_mode_t */
+
 #include "lvgl.h"
 
 /* Screen dimensions — shared across all UI modules. */
@@ -7,8 +9,9 @@
 #define SCREEN_H   480
 #define SIDEBAR_W   80
 
-/* Entry point — called once after ui_deck_preload_wait(). */
-void my_ui_init(void);
+/* Build the static UI and enter `mode` (from ui_settings_boot_mode()). For
+ * UI_MODE_DECK, ui_deck_preload_start()/wait() must have run first. */
+void my_ui_init(ui_mode_t mode);
 
 /* Show a full-screen "Switching config..." cover while image decode runs.
  * Deletes any previous cover first, so at most one ever exists. */

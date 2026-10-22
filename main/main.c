@@ -2,6 +2,7 @@
 #include "usb_hid.h"
 #include "ui.h"
 #include "ui_deck.h"
+#include "ui_settings.h"
 #include "ui_ota_dialog.h"
 #include "fs_manager/fs_sd.h"
 #include "usb/usb_manager.h"
@@ -53,7 +54,12 @@ void app_main(void)
      * exactly the state boot_anim_play() expects. */
     ui_ota_check_and_prompt();
 
-    ui_deck_preload_start();   /* load config, kick off background preload task */
+    /* Boot Mode (Settings > Custom): only Deck has heavy assets worth
+     * preloading during the boot animation; the other modes load their
+     * light config when my_ui_init() enters them. */
+    ui_mode_t boot_mode = ui_settings_boot_mode();
+    if (boot_mode == UI_MODE_DECK)
+        ui_deck_preload_start();   /* load config, kick off background preload task */
 
     /* icon背景預載的task優先權是3,如果跟boot_anim同時跑,會搶走main
      * task的CPU,讓JPEG開機動畫的解碼被拖慢(實測從~200ms/幀拖到
@@ -67,7 +73,7 @@ void app_main(void)
     boot_anim_play();     /* animation plays while preload task runs */
     vTaskPrioritySet(NULL, main_task_prio);
 
-    ui_deck_preload_wait();
+    ui_deck_preload_wait();   /* no-op when the preload wasn't started */
     ESP_LOGI("MAIN", "before usb/ble init - PSRAM free: %d B",
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
              
@@ -80,7 +86,7 @@ void app_main(void)
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     if (lvgl_port_lock(-1)) {
-        my_ui_init();
+        my_ui_init(boot_mode);
         lvgl_port_unlock();
     }
 }

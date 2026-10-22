@@ -1,5 +1,8 @@
 #include "ui.h"
 #include "ui_deck.h"
+#include "ui_monitor.h"
+#include "ui_media.h"
+#include "ui_touchpad.h"
 #include "ui_settings.h"
 #include "ui_toast.h"
 #include "ui_font_cjk.h"
@@ -159,7 +162,7 @@ static void cjk_font_preload_task(void *arg)
 /* -----------------------------------------------------------------------
  * Entry point
  * ----------------------------------------------------------------------- */
-void my_ui_init(void)
+void my_ui_init(ui_mode_t mode)
 {
     usb_hid_set_mode_query_cb(mode_query_cb);
 
@@ -181,15 +184,27 @@ void my_ui_init(void)
 #endif
 
     /* Temporary checkpoint -- isolates ui_build_static()+ui_toast_init()'s
-     * own PSRAM cost from ui_deck_build()'s (logged separately below and
-     * in ui_deck.c), to track down where a reported PSRAM regression is
+     * own PSRAM cost from the boot mode's (logged separately below and in
+     * each mode), to track down where a reported PSRAM regression is
      * actually coming from instead of guessing. Remove once that's
      * settled. */
-    ESP_LOGI("UI", "before deck build - PSRAM free: %d B",
+    ESP_LOGI("UI", "before mode build - PSRAM free: %d B",
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
-    deck_cfg_t *cfg = ui_deck_preload_take_cfg();
-    ui_deck_build(s_sidebar, cfg);
+    /* Boot Mode (see ui_settings_boot_mode()). Deck's config + icons were
+     * preloaded during the boot animation; the other modes load their
+     * (light) config on enter. */
+    ui_settings_init_mode(mode);
+    switch (mode) {
+    case UI_MODE_MONITOR:  ui_monitor_enter(s_sidebar);  break;
+    case UI_MODE_MEDIA:    ui_media_enter(s_sidebar);    break;
+    case UI_MODE_TOUCHPAD: ui_touchpad_enter(s_sidebar); break;
+    case UI_MODE_DECK:
+    default:
+        ui_deck_build(s_sidebar, ui_deck_preload_take_cfg());
+        break;
+    }
+    ESP_LOGI("UI", "boot mode: %d", (int)mode);
 
     ESP_LOGI("UI", "init done - PSRAM free: %d B",
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM));

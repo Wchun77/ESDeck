@@ -156,6 +156,62 @@ ui_mode_t ui_settings_get_mode(void)
 }
 
 /* -----------------------------------------------------------------------
+ * Boot Mode
+ * ----------------------------------------------------------------------- */
+#define BOOT_MODE_AUTO 0
+
+static int nvs_get_small_int(const char *key, int def)
+{
+    char v[8] = "";
+    if (!nvs_manager_get_str(CFG_NVS_NAMESPACE, key, v, sizeof(v)) || !v[0]) return def;
+    return atoi(v);
+}
+
+static void nvs_set_small_int(const char *key, int val)
+{
+    char v[8];
+    snprintf(v, sizeof(v), "%d", val);
+    if (!nvs_manager_set_str(CFG_NVS_NAMESPACE, key, v))
+        ESP_LOGW("SETTINGS", "NVS save failed: %s", key);
+}
+
+static bool valid_mode(int m) { return m >= UI_MODE_DECK && m <= UI_MODE_TOUCHPAD; }
+
+int ui_settings_get_boot_mode_choice(void)
+{
+    int c = nvs_get_small_int(CFG_NVS_KEY_BOOT_MODE, BOOT_MODE_AUTO);
+    return (c >= 0 && c < UI_BOOT_MODE_CHOICES) ? c : BOOT_MODE_AUTO;
+}
+
+void ui_settings_set_boot_mode_choice(int idx)
+{
+    if (idx < 0 || idx >= UI_BOOT_MODE_CHOICES) return;
+    nvs_set_small_int(CFG_NVS_KEY_BOOT_MODE, idx);
+    /* Switching to Auto: remember the mode we're in right now, so the next
+     * boot already lands here even without another mode switch. */
+    if (idx == BOOT_MODE_AUTO) nvs_set_small_int(CFG_NVS_KEY_LAST_MODE, s_mode);
+}
+
+static const char *const s_boot_mode_names[UI_BOOT_MODE_CHOICES] = {
+    "Auto (last used)", "Deck", "Monitor", "Media", "Touchpad",
+};
+
+const char *const *ui_settings_boot_mode_names(void) { return s_boot_mode_names; }
+
+ui_mode_t ui_settings_boot_mode(void)
+{
+    int c = ui_settings_get_boot_mode_choice();
+    int m = (c == BOOT_MODE_AUTO) ? nvs_get_small_int(CFG_NVS_KEY_LAST_MODE, UI_MODE_DECK)
+                                  : c - 1;
+    return valid_mode(m) ? (ui_mode_t)m : UI_MODE_DECK;
+}
+
+void ui_settings_init_mode(ui_mode_t mode)
+{
+    s_mode = mode;
+}
+
+/* -----------------------------------------------------------------------
  * Enter tasks -- one per mode, used by both switch_to_mode() and the
  * ui_settings_*_reload() functions. Each runs after the switching screen
  * is up; Monitor/Media/Touchpad have nothing heavy to preload, the delay
@@ -355,6 +411,11 @@ static void switch_to_mode(ui_mode_t target)
     }
 
     s_mode = target;
+
+    /* Boot Mode = Auto remembers the last mode -- one NVS write per switch,
+     * only while Auto is selected. */
+    if (ui_settings_get_boot_mode_choice() == BOOT_MODE_AUTO)
+        nvs_set_small_int(CFG_NVS_KEY_LAST_MODE, target);
 
     /* Setup -- depends only on the mode being entered. */
     switch (target) {
@@ -683,6 +744,9 @@ static const setting_node_t s_touchpad_menu[] = {
 static const setting_node_t s_custom_menu[] = {
     { "Select Config",  SETTING_ACTION, SETMASK_ALL, item_config_cb,    NULL, 0 },
     { "Boot Animation", SETTING_ACTION, SETMASK_ALL, item_boot_anim_cb, NULL, 0 },
+    { "Boot Mode",      SETTING_CHOICE, SETMASK_ALL, NULL, NULL, 0, NULL, NULL, NULL, NULL,
+      ui_settings_boot_mode_names, UI_BOOT_MODE_CHOICES,
+      ui_settings_get_boot_mode_choice, ui_settings_set_boot_mode_choice },
     { "Touchpad",       SETTING_SUBMENU, SETMASK_TOUCHPAD, NULL, s_touchpad_menu,
       (int)(sizeof(s_touchpad_menu) / sizeof(s_touchpad_menu[0])) },
 };
@@ -726,7 +790,8 @@ static const setting_node_t s_root_menu[] = {
 #if ESDECK_ENABLE_BLE
     { "Bluetooth",     SETTING_SUBMENU, SETMASK_ALL,  NULL, s_bluetooth_menu, 2 },
 #endif
-    { "Custom",        SETTING_SUBMENU, SETMASK_ALL,  NULL, s_custom_menu, 3 },
+    { "Custom",        SETTING_SUBMENU, SETMASK_ALL,  NULL, s_custom_menu,
+      (int)(sizeof(s_custom_menu) / sizeof(s_custom_menu[0])) },
     { "Mode",          SETTING_SUBMENU, SETMASK_ALL,  NULL, s_mode_menu, 5 },
 };
 
