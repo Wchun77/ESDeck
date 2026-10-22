@@ -1,7 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
-#include "app_config.h"     /* CFG_FNAME_LEN, CFG_BG_LEN, cfg_scan_result_t -- shared across all three modes' config pickers */
+#include "app_config.h"     /* CFG_FNAME_LEN, CFG_BG_LEN, cfg_scan_result_t -- shared across every mode's config picker */
 #include "ui_settings.h"   /* ui_settings_appearance_t -- reused verbatim for the "settings" object below */
 
 typedef struct {

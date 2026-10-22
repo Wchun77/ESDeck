@@ -1,9 +1,10 @@
 #include "ui_deck_config.h"
+#include "cfg_common.h"
 
 #include "nvs_manager.h"
 
+#include <stdio.h>
 #include <string.h>
-#include <dirent.h>
 #include <sys/stat.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -15,38 +16,6 @@
 /* --------------------------------------------------------------------------
  * Internal helpers
  * -------------------------------------------------------------------------- */
-static char *read_file(const char *path)
-{
-    FILE *f = fopen(path, "r");
-    if (!f) {
-        ESP_LOGE(TAG, "Cannot open: %s", path);
-        return NULL;
-    }
-
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    rewind(f);
-
-    if (sz <= 0) {
-        ESP_LOGE(TAG, "Empty file: %s", path);
-        fclose(f);
-        return NULL;
-    }
-
-    char *buf = heap_caps_malloc((size_t)sz + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!buf) buf = malloc((size_t)sz + 1);
-    if (!buf) {
-        ESP_LOGE(TAG, "OOM reading %s (%ld bytes)", path, sz);
-        fclose(f);
-        return NULL;
-    }
-
-    fread(buf, 1, (size_t)sz, f);
-    buf[sz] = '\0';
-    fclose(f);
-    return buf;
-}
-
 /* Button's action for the PC: the button object as compact JSON minus
  * "icon" (display only). label stays so the PC log can name the button;
  * every other field passes through untouched, so a new action type only
@@ -111,8 +80,11 @@ bool ui_deck_config_load(deck_cfg_t *cfg)
         return false;
     }
 
-    char *buf = read_file(json_path);
-    if (!buf) return false;
+    char *buf = cfg_read_file(json_path);
+    if (!buf) {
+        ESP_LOGE(TAG, "Cannot read: %s", json_path);
+        return false;
+    }
 
     cJSON *root = cJSON_Parse(buf);
     free(buf);
@@ -234,61 +206,7 @@ void ui_deck_config_free(deck_cfg_t *cfg)
 
 deck_scan_result_t ui_deck_config_scan(void)
 {
-    deck_scan_result_t res = { .names = NULL, .count = 0 };
-
-    DIR *dir = opendir(UI_DECK_CONFIG_PATH);
-    if (!dir) {
-        ESP_LOGE(TAG, "Deck config directory not found: %s", UI_DECK_CONFIG_PATH);
-        res.count = -1;
-        return res;
-    }
-
-    /* First pass: count .json files */
-    int total = 0;
-    struct dirent *de;
-    while ((de = readdir(dir)) != NULL) {
-        if (de->d_type != DT_REG) continue;
-        size_t len = strlen(de->d_name);
-        if (len < 5) continue;
-        if (strcmp(de->d_name + len - 5, ".json") != 0) continue;
-        total++;
-    }
-
-    if (total == 0) {
-        closedir(dir);
-        return res;
-    }
-
-    res.names = calloc((size_t)total, sizeof(char *));
-    if (!res.names) {
-        ESP_LOGE(TAG, "OOM allocating scan result");
-        closedir(dir);
-        return res;
-    }
-
-    /* Second pass: copy filenames */
-    rewinddir(dir);
-    int idx = 0;
-    while ((de = readdir(dir)) != NULL && idx < total) {
-        if (de->d_type != DT_REG) continue;
-        size_t len = strlen(de->d_name);
-        if (len < 5) continue;
-        if (strcmp(de->d_name + len - 5, ".json") != 0) continue;
-
-        res.names[idx] = strndup(de->d_name, CFG_FNAME_LEN - 1);
-        if (!res.names[idx]) {
-            ESP_LOGE(TAG, "OOM copying filename");
-            res.count = idx;
-            closedir(dir);
-            return res;
-        }
-        idx++;
-    }
-
-    closedir(dir);
-    res.count = idx;
-    ESP_LOGI(TAG, "Scan found %d JSON file(s) in %s", res.count, UI_DECK_CONFIG_PATH);
-    return res;
+    return cfg_scan_json_dir(UI_DECK_CONFIG_PATH);
 }
 
 void ui_deck_config_scan_free(deck_scan_result_t *res)

@@ -1,11 +1,11 @@
 #include "ui_monitor_config.h"
+#include "cfg_common.h"
 #include "nvs_manager.h"
 #include "esp_log.h"
-#include "esp_heap_caps.h"
 #include "cJSON.h"
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <dirent.h>
 
 #define TAG  "MON_CFG"
 
@@ -38,36 +38,6 @@ static uint32_t parse_hex_color(const char *s, uint32_t fallback)
     unsigned long v = strtoul(s, &end, 16);
     if (end == s) return fallback;
     return (uint32_t)v;
-}
-
-static char *read_file(const char *path)
-{
-    FILE *f = fopen(path, "r");
-    if (!f) return NULL;
-
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    rewind(f);
-
-    if (sz <= 0) { fclose(f); return NULL; }
-
-    char *buf = heap_caps_malloc((size_t)sz + 1,
-                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!buf) buf = malloc((size_t)sz + 1);
-    if (!buf) { fclose(f); return NULL; }
-
-    fread(buf, 1, (size_t)sz, f);
-    buf[sz] = '\0';
-    fclose(f);
-    return buf;
-}
-
-static void str_field(cJSON *obj, const char *key,
-                       char *out, size_t out_size)
-{
-    cJSON *item = cJSON_GetObjectItem(obj, key);
-    if (cJSON_IsString(item) && item->valuestring)
-        snprintf(out, out_size, "%s", item->valuestring);
 }
 
 static uint32_t color_field(cJSON *obj, const char *key, uint32_t fallback)
@@ -126,7 +96,7 @@ void ui_monitor_config_load(monitor_cfg_t *cfg)
     char path[CFG_FNAME_LEN + 24];
     snprintf(path, sizeof(path), "%s/%s", UI_MONITOR_PATH, nvs_fname);
 
-    char *buf = read_file(path);
+    char *buf = cfg_read_file(path);
     if (!buf) {
         ESP_LOGW(TAG, "cannot read %s, using defaults", path);
         return;
@@ -143,11 +113,11 @@ void ui_monitor_config_load(monitor_cfg_t *cfg)
     /* Clock section */
     cJSON *clk = cJSON_GetObjectItem(root, "clock");
     if (cJSON_IsObject(clk)) {
-        str_field(clk, "bg_image",  cfg->clock.bg_image,  CFG_BG_LEN);
-        str_field(clk, "side_icon", cfg->clock.side_icon, MON_CFG_ICON_LEN);
-        str_field(clk, "font_time", cfg->clock.font_time, MON_CFG_FONT_LEN);
-        str_field(clk, "font_sec",  cfg->clock.font_sec,  MON_CFG_FONT_LEN);
-        str_field(clk, "font_date", cfg->clock.font_date, MON_CFG_FONT_LEN);
+        cfg_str_field(clk, "bg_image",  cfg->clock.bg_image,  CFG_BG_LEN);
+        cfg_str_field(clk, "side_icon", cfg->clock.side_icon, MON_CFG_ICON_LEN);
+        cfg_str_field(clk, "font_time", cfg->clock.font_time, MON_CFG_FONT_LEN);
+        cfg_str_field(clk, "font_sec",  cfg->clock.font_sec,  MON_CFG_FONT_LEN);
+        cfg_str_field(clk, "font_date", cfg->clock.font_date, MON_CFG_FONT_LEN);
 
         cfg->clock.col_time  = color_field(clk, "col_time",  MON_CFG_DEF_COL_TIME);
         cfg->clock.col_colon = color_field(clk, "col_colon", MON_CFG_DEF_COL_COLON);
@@ -168,8 +138,8 @@ void ui_monitor_config_load(monitor_cfg_t *cfg)
      * to "clock", so it follows whichever Monitor config is active. */
     cJSON *settings_obj = cJSON_GetObjectItem(root, "settings");
     if (cJSON_IsObject(settings_obj)) {
-        str_field(settings_obj, "bg_image",  cfg->settings.bg_image,  sizeof(cfg->settings.bg_image));
-        str_field(settings_obj, "side_icon", cfg->settings.side_icon, sizeof(cfg->settings.side_icon));
+        cfg_str_field(settings_obj, "bg_image",  cfg->settings.bg_image,  sizeof(cfg->settings.bg_image));
+        cfg_str_field(settings_obj, "side_icon", cfg->settings.side_icon, sizeof(cfg->settings.side_icon));
     }
 
     /* Pages array */
@@ -184,9 +154,9 @@ void ui_monitor_config_load(monitor_cfg_t *cfg)
             if (!cJSON_IsObject(pg)) continue;
 
             mon_page_cfg_t *p = &cfg->pages[i];
-            str_field(pg, "name",      p->name,      MON_PAGE_NAME_LEN);
-            str_field(pg, "bg_image",  p->bg_image,  CFG_BG_LEN);
-            str_field(pg, "side_icon", p->side_icon, MON_CFG_ICON_LEN);
+            cfg_str_field(pg, "name",      p->name,      MON_PAGE_NAME_LEN);
+            cfg_str_field(pg, "bg_image",  p->bg_image,  CFG_BG_LEN);
+            cfg_str_field(pg, "side_icon", p->side_icon, MON_CFG_ICON_LEN);
 
             /* Default page name if absent */
             if (p->name[0] == '\0')
@@ -227,53 +197,7 @@ bool ui_monitor_config_nvs_load(char *out, size_t out_size)
 
 mon_scan_result_t ui_monitor_config_scan(void)
 {
-    mon_scan_result_t res = { .names = NULL, .count = 0 };
-
-    DIR *dir = opendir(UI_MONITOR_PATH);
-    if (!dir) {
-        ESP_LOGE(TAG, "monitor config directory not found: %s", UI_MONITOR_PATH);
-        res.count = -1;
-        return res;
-    }
-
-    int total = 0;
-    struct dirent *de;
-    while ((de = readdir(dir)) != NULL) {
-        if (de->d_type != DT_REG) continue;
-        size_t len = strlen(de->d_name);
-        if (len < 5) continue;
-        if (strcmp(de->d_name + len - 5, ".json") != 0) continue;
-        total++;
-    }
-
-    if (total == 0) { closedir(dir); return res; }
-
-    res.names = calloc((size_t)total, sizeof(char *));
-    if (!res.names) {
-        closedir(dir);
-        return res;
-    }
-
-    rewinddir(dir);
-    int idx = 0;
-    while ((de = readdir(dir)) != NULL && idx < total) {
-        if (de->d_type != DT_REG) continue;
-        size_t len = strlen(de->d_name);
-        if (len < 5) continue;
-        if (strcmp(de->d_name + len - 5, ".json") != 0) continue;
-        res.names[idx] = strndup(de->d_name, CFG_FNAME_LEN - 1);
-        if (!res.names[idx]) {
-            res.count = idx;
-            closedir(dir);
-            return res;
-        }
-        idx++;
-    }
-
-    closedir(dir);
-    res.count = idx;
-    ESP_LOGI(TAG, "scan found %d JSON file(s) in %s", res.count, UI_MONITOR_PATH);
-    return res;
+    return cfg_scan_json_dir(UI_MONITOR_PATH);
 }
 
 void ui_monitor_config_scan_free(mon_scan_result_t *res)
