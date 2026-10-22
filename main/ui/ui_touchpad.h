@@ -84,6 +84,24 @@ const char *const *ui_touchpad_swipe_mode_names(void);   /* TP_SWIPE_COUNT entri
 int  ui_touchpad_get_swipe_mode(void);
 void ui_touchpad_set_swipe_mode(int mode);
 
+/* 3-Finger Swipe: what a three-finger swipe does (one action per swipe).
+ * A quick three-finger tap is always a middle click (with Tap to Click). */
+typedef enum {
+    TP_SWIPE3_OFF = 0,
+    TP_SWIPE3_DESKTOP,    /* left/right = next/previous virtual desktop (Win+Ctrl+Right/Left),
+                           * up = Task View (Win+Tab), down = show desktop (Win+D) (default) */
+    TP_SWIPE3_COUNT,
+} tp_swipe3_mode_t;
+
+const char *const *ui_touchpad_swipe3_mode_names(void);  /* TP_SWIPE3_COUNT entries */
+int  ui_touchpad_get_swipe3_mode(void);
+void ui_touchpad_set_swipe3_mode(int mode);
+
+/* Pinch to Zoom: two fingers spreading / pinching = Ctrl + wheel up / down
+ * (zoom in browsers, Office, image viewers...). */
+bool ui_touchpad_get_pinch_zoom(void);
+void ui_touchpad_set_pinch_zoom(bool on);
+
 /* Input Mode: how touchpad + mini keyboard input reaches the PC.
  *   TP_INPUT_ESDECKPC -- vendor reports, ESDeckPC injects them (default)
  *   TP_INPUT_USB_HID  -- the device's own USB keyboard + mouse interface;

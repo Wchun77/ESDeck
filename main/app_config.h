@@ -178,6 +178,8 @@
 #define CFG_NVS_KEY_TPAD_TAP      "tp_tapclick"     /* "1" = tap / two-finger tap click */
 #define CFG_NVS_KEY_TPAD_HIDE_BTN "tp_hide_btn"     /* "1" = no L/R buttons, pad fills the area */
 #define CFG_NVS_KEY_TPAD_SWIPE    "tp_swipe"        /* two-finger horizontal: tp_swipe_mode_t */
+#define CFG_NVS_KEY_TPAD_SWIPE3   "tp_swipe3"       /* three-finger swipe: tp_swipe3_mode_t */
+#define CFG_NVS_KEY_TPAD_PINCH    "tp_pinch"        /* "1" = two-finger pinch = Ctrl + wheel (zoom) */
 #define CFG_NVS_KEY_TPAD_INPUT    "tp_input"        /* "0" = via ESDeckPC, "1" = USB HID keyboard + mouse */
 #define CFG_NVS_KEY_TPAD_SIDEBAR  "tp_sidebar"      /* sidebar middle area: tp_sidebar_mode_t */
 #define CFG_NVS_KEY_TPAD_BTN_L    "tp_btn_l"        /* top-left button function: tp_btn_func_t */

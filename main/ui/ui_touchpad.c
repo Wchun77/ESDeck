@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>           /* sqrtf: pinch finger distance */
 
 static const char *TAG = "TOUCHPAD";
 
@@ -64,6 +65,11 @@ static const char *TAG = "TOUCHPAD";
 #define TP_MATCH_MAX_PX     150   /* moved less than this between reads = same finger */
 #define TP_AXIS_LOCK_PX     10    /* two-finger travel before locking vertical / horizontal */
 #define TP_SWIPE_TRIGGER_PX 80    /* two-finger horizontal travel for one Back / Forward */
+#define TP_PINCH_LOCK_PX    20    /* finger distance change that can lock a two-finger touch to pinch */
+#define TP_PINCH_STEP_PX    40    /* finger distance change per zoom step (one wheel notch) */
+#define TP_THREE_TAP_MAX_MS     300   /* three-finger tap (middle click): shorter than this ... */
+#define TP_THREE_TAP_MAX_TRAVEL 20    /* ... and moved less than this (px) */
+#define TP_SWIPE3_TRIGGER_PX    80    /* three-finger travel for one swipe action */
 /* Soft start: GT911 holds the coordinate for ~150 ms after touch-down,
  * then catches up in ~40 ms -- sent as-is that burst reads as a flick and
  * Windows' pointer acceleration throws the cursor. The first
@@ -138,6 +144,8 @@ static lv_obj_t *s_pad        = NULL;
 /* More preferences (see "Preferences" below) */
 static bool    s_hide_buttons  = false;   /* pad covers the whole content area */
 static int     s_swipe_mode    = TP_SWIPE_HSCROLL;
+static int     s_swipe3_mode   = TP_SWIPE3_DESKTOP;
+static bool    s_pinch_on      = true;
 static int     s_input_mode    = TP_INPUT_ESDECKPC;
 static int     s_sidebar_mode  = TP_SIDEBAR_HOTKEYS;
 static int     s_btn_func[2]   = { TP_BTNF_LEFT, TP_BTNF_RIGHT };   /* top-left, top-right */
@@ -183,10 +191,27 @@ static bool     s_dragging       = false;
 static bool     s_pad_two        = false;
 static bool     s_pad_two_frozen = false;  /* a finger lifted mid-gesture: ignore the rest */
 static uint32_t s_pad_two_travel = 0;
-static int      s_two_axis       = 0;      /* 0 undecided, 1 vertical, 2 horizontal */
+static int      s_two_axis       = 0;      /* 0 undecided, 1 vertical, 2 horizontal, 3 pinch */
 static int32_t  s_two_sum_x      = 0;      /* travel before the axis is locked */
 static int32_t  s_two_sum_y      = 0;
 static bool     s_swipe_done     = false;  /* Back/Forward already fired this gesture */
+
+/* Pinch (s_two_axis == 3): Ctrl held, one wheel notch per TP_PINCH_STEP_PX
+ * of finger distance change. */
+static int32_t  s_pinch_d0       = -1;     /* finger distance at the start, -1 = not seen yet */
+static int32_t  s_pinch_last     = 0;
+static int32_t  s_pinch_acc      = 0;      /* distance change not yet sent as a notch */
+static bool     s_pinch_ctrl     = false;  /* we pressed Ctrl (not already held by a top button) */
+
+/* Three-finger state for the current touch:
+ *   three finger tap   = middle click
+ *   three finger swipe = per "3-Finger Swipe" (one action per gesture) */
+static bool     s_pad_three        = false;
+static bool     s_pad_three_frozen = false;  /* a finger lifted mid-gesture: ignore the rest */
+static uint32_t s_three_travel     = 0;
+static int32_t  s_three_sum_x      = 0;
+static int32_t  s_three_sum_y      = 0;
+static bool     s_three_done       = false;  /* swipe action already fired this gesture */
 
 /* Pad gesture lifetime (first pad finger down .. last pad finger up) */
 static bool     s_gesture        = false;
@@ -424,10 +449,13 @@ static void scroll_end(bool allow_flick)
     s_wheel_vel = 0;
 }
 
+static void pinch_flush(void);   /* Pad gesture section below */
+
 static void flush_timer_cb(lv_timer_t *t)
 {
     (void)t;
     wheel_coast_step();
+    pinch_flush();   /* zoom steps held back until Ctrl went out */
     if (s_tap_pending && lv_tick_elaps(s_tap_tick) >= TP_DOUBLE_TAP_MS) {
         s_tap_pending = false;
         click_left();
@@ -546,7 +574,10 @@ static void update_buttons(void)
  *                  vertical   -> scroll (smooth + inertia)
  *                  horizontal -> per "2-Finger Swipe": horizontal scroll,
  *                                Back / Forward (once per gesture), or off
+ *                  pinch      -> Ctrl + wheel (zoom), if "Pinch to Zoom"
  *                  quick tap  -> right click
+ *   three fingers: quick tap -> middle click
+ *                  swipe     -> per "3-Finger Swipe" (once per gesture)
  *   a held L/R button plus a pad finger is just "button + move" -- that's
  *   how click-and-drag selection works; taps are suppressed meanwhile.
  * ----------------------------------------------------------------------- */
@@ -559,6 +590,8 @@ static void gesture_begin(void)
     s_pad_two        = false;
     s_pad_two_frozen = false;
     s_pad_two_travel = 0;
+    s_pad_three        = false;
+    s_pad_three_frozen = false;
 
     /* Touch landed inside the double-tap window: hold the pending tap
      * back until we know whether this is a drag or a second tap. */
@@ -573,6 +606,7 @@ static void two_begin(void)
     s_two_sum_x  = 0;
     s_two_sum_y  = 0;
     s_swipe_done = false;
+    s_pinch_d0   = -1;
     if (s_second_touch) {
         /* A tap was held back for tap-and-drag -- it was a click after all. */
         click_left();
@@ -582,20 +616,72 @@ static void two_begin(void)
     ESP_LOGI(TAG, "two-finger gesture");
 }
 
+/* A top button already holds Ctrl: leave it to that button. */
+static bool ctrl_held_by_button(void)
+{
+    return s_btn_mod_vk[0] == 0xA2 || s_btn_mod_vk[1] == 0xA2;
+}
+
+static void pinch_begin(int32_t d)
+{
+    s_two_axis   = 3;
+    s_pinch_acc  = d - s_pinch_d0;   /* don't lose the change used to decide */
+    s_pinch_last = d;
+    s_pinch_ctrl = !ctrl_held_by_button();
+    if (s_pinch_ctrl) usb_hid_kb_key(true, 0xA2, 0);   /* VK_LCONTROL */
+    s_wheel_coast = 0;
+    ESP_LOGI(TAG, "pinch");
+}
+
+/* Flush timer / every move: send whole zoom steps, but only once Ctrl has
+ * actually gone out (keyboard reports go one per flush, after the mouse
+ * report), so the PC never sees a plain wheel. Spread = zoom in = wheel up.
+ * One notch = NATIVE_WHEEL_PX_PER_NOTCH px natively, 24 x ESDeckPC's
+ * WheelPerPixel (5) = 120 via ESDeckPC -- not scaled by Scroll Speed. */
+static void pinch_flush(void)
+{
+    if (s_two_axis != 3 || !s_pad_two) return;
+    if (usb_hid_kb_pending()) return;
+    while (s_pinch_acc >= TP_PINCH_STEP_PX)  { usb_hid_tp_wheel(24);  s_pinch_acc -= TP_PINCH_STEP_PX; }
+    while (s_pinch_acc <= -TP_PINCH_STEP_PX) { usb_hid_tp_wheel(-24); s_pinch_acc += TP_PINCH_STEP_PX; }
+}
+
+static void pinch_end(void)
+{
+    pinch_flush();
+    if (s_pinch_ctrl) usb_hid_kb_key(false, 0xA2, 0);   /* goes out after the last wheel */
+    s_pinch_ctrl = false;
+    s_pinch_acc  = 0;
+}
+
 static void two_end(bool flick)
 {
     if (s_two_axis == 1 || (s_two_axis == 2 && s_swipe_mode == TP_SWIPE_HSCROLL))
         scroll_end(flick);
+    else if (s_two_axis == 3)
+        pinch_end();
 }
 
-static void two_move(int dx, int dy)
+/* d = distance between the two fingers, -1 if not known this read. */
+static void two_move(int dx, int dy, int32_t d)
 {
     s_pad_two_travel += (uint32_t)(abs(dx) + abs(dy));
+    if (d >= 0 && s_pinch_d0 < 0) s_pinch_d0 = d;
 
     if (s_two_axis == 0) {
         s_two_sum_x += dx;
         s_two_sum_y += dy;
         int ax = abs(s_two_sum_x), ay = abs(s_two_sum_y);
+        int pd = (d >= 0 && s_pinch_d0 >= 0) ? abs((int)(d - s_pinch_d0)) : 0;
+        if (ax < TP_AXIS_LOCK_PX && ay < TP_AXIS_LOCK_PX && pd < TP_PINCH_LOCK_PX) return;
+
+        /* Pinch: the distance changed clearly more than the pair moved
+         * (one finger still + one moving = distance x2 the average). */
+        int trans = ax > ay ? ax : ay;
+        if (s_pinch_on && pd >= TP_PINCH_LOCK_PX && pd * 2 > trans * 3) {
+            pinch_begin(d);
+            return;
+        }
         if (ax < TP_AXIS_LOCK_PX && ay < TP_AXIS_LOCK_PX) return;
 
         s_two_axis = (ay >= ax) ? 1 : 2;
@@ -615,6 +701,15 @@ static void two_move(int dx, int dy)
         return;
     }
 
+    if (s_two_axis == 3) {
+        if (d >= 0) {
+            s_pinch_acc += d - s_pinch_last;
+            s_pinch_last = d;
+        }
+        pinch_flush();
+        return;
+    }
+
     /* horizontal */
     if (s_swipe_mode == TP_SWIPE_HSCROLL) {
         scroll_track(dx);
@@ -630,14 +725,77 @@ static void two_move(int dx, int dy)
     }
 }
 
+static void three_begin(void)
+{
+    if (s_pad_two) {
+        /* Third finger joined before the two-finger gesture picked an
+         * axis (checked by the caller): nothing was started, drop it. */
+        s_pad_two = false;
+        s_pad_two_frozen = false;
+    }
+    s_pad_three        = true;
+    s_pad_three_frozen = false;
+    s_three_travel     = 0;
+    s_three_sum_x      = 0;
+    s_three_sum_y      = 0;
+    s_three_done       = false;
+    s_second_touch     = false;
+    s_wheel_coast      = 0;
+    ESP_LOGI(TAG, "three-finger gesture");
+}
+
+static void send_combo(uint8_t vk, uint8_t mods)
+{
+    usb_hid_kb_key(true, vk, mods);
+    usb_hid_kb_key(false, vk, mods);
+}
+
+static void three_move(int dx, int dy)
+{
+    s_three_travel += (uint32_t)(abs(dx) + abs(dy));
+    if (s_three_done || s_swipe3_mode == TP_SWIPE3_OFF) return;
+
+    s_three_sum_x += dx;
+    s_three_sum_y += dy;
+    int ax = abs(s_three_sum_x), ay = abs(s_three_sum_y);
+    if (ax < TP_SWIPE3_TRIGGER_PX && ay < TP_SWIPE3_TRIGGER_PX) return;
+
+    /* Windows precision-touchpad directions: content follows the finger,
+     * so swiping left brings in the desktop on the right. */
+    if (ax >= ay) {
+        bool next = s_three_sum_x < 0;
+        send_combo(next ? 0x27 : 0x25, HID_KB_MOD_CTRL | HID_KB_MOD_WIN);   /* VK_RIGHT / VK_LEFT */
+        ESP_LOGI(TAG, "3-finger swipe -> %s desktop", next ? "next" : "previous");
+    } else if (s_three_sum_y < 0) {
+        send_combo(0x09, HID_KB_MOD_WIN);   /* Win+Tab: Task View */
+        ESP_LOGI(TAG, "3-finger swipe -> task view");
+    } else {
+        send_combo('D', HID_KB_MOD_WIN);    /* Win+D: show desktop */
+        ESP_LOGI(TAG, "3-finger swipe -> show desktop");
+    }
+    s_three_done = true;
+}
+
 static void gesture_end(void)
 {
     uint32_t held = lv_tick_elaps(s_pad_press_tick);
     s_gesture = false;
 
+    if (s_pad_three) {
+        if (tap_enabled() && !s_gesture_btn && !s_three_done &&
+            held < TP_THREE_TAP_MAX_MS && s_three_travel < TP_THREE_TAP_MAX_TRAVEL) {
+            click_x(HID_TP_BTN_MIDDLE);
+            ESP_LOGI(TAG, "three-finger tap -> middle click");
+        }
+        s_pad_three    = false;
+        s_second_touch = false;
+        return;
+    }
+
     if (s_pad_two) {
+        bool pinched = (s_two_axis == 3);
         if (!s_pad_two_frozen) two_end(true);
-        if (tap_enabled() && !s_gesture_btn &&
+        if (tap_enabled() && !s_gesture_btn && !pinched &&
             held < TP_TWO_TAP_MAX_MS && s_pad_two_travel < TP_TWO_TAP_MAX_TRAVEL) {
             click_right();
             ESP_LOGI(TAG, "two-finger tap -> right click");
@@ -675,8 +833,9 @@ static void gesture_end(void)
     s_second_touch = false;
 }
 
-/* One read's worth of pad fingers. */
-static void gesture_update(int pad_count, int dx_sum, int dy_sum, int moved)
+/* One read's worth of pad fingers. pinch_d = distance between the two
+ * pad fingers when there are exactly two, else -1. */
+static void gesture_update(int pad_count, int dx_sum, int dy_sum, int moved, int32_t pinch_d)
 {
     if (!s_gesture) {
         if (pad_count == 0) return;
@@ -684,6 +843,19 @@ static void gesture_update(int pad_count, int dx_sum, int dy_sum, int moved)
     }
     if (pad_count == 0) {
         gesture_end();
+        return;
+    }
+
+    if (!s_pad_three && pad_count >= 3 && !s_dragging && (!s_pad_two || s_two_axis == 0))
+        three_begin();
+
+    if (s_pad_three) {
+        if (s_pad_three_frozen) return;
+        if (pad_count < 3) {
+            s_pad_three_frozen = true;   /* a finger lifted: the gesture is over */
+            return;
+        }
+        if (moved) three_move(dx_sum / moved, dy_sum / moved);
         return;
     }
 
@@ -697,7 +869,7 @@ static void gesture_update(int pad_count, int dx_sum, int dy_sum, int moved)
             two_end(true);
             return;
         }
-        if (moved) two_move(dx_sum / moved, dy_sum / moved);   /* average of both fingers */
+        if (moved) two_move(dx_sum / moved, dy_sum / moved, pinch_d);   /* average of both fingers */
         return;
     }
 
@@ -723,7 +895,7 @@ static void input_cancel(void)
     for (int i = 0; i < LVGL_PORT_TOUCH_MAX_POINTS; i++) s_ct[i].reg = REG_NONE;
     if (s_gesture) {
         if (s_pad_two && !s_pad_two_frozen) two_end(false);
-        s_gesture = s_pad_two = s_dragging = s_second_touch = false;
+        s_gesture = s_pad_two = s_pad_three = s_dragging = s_second_touch = false;
         push_buttons();
     }
     update_buttons();
@@ -787,8 +959,10 @@ static void tp_touch_hook(const lvgl_port_touch_t *t)
     update_buttons();
 
     int pad_count = 0, moved = 0, dx_sum = 0, dy_sum = 0;
+    int pad_idx[2] = { -1, -1 };
     for (int c = 0; c < LVGL_PORT_TOUCH_MAX_POINTS; c++) {
         if (!s_ct[c].active || s_ct[c].reg != REG_PAD) continue;
+        if (pad_count < 2) pad_idx[pad_count] = c;
         pad_count++;
         if (still[c]) {   /* new fingers have no motion yet */
             dx_sum += s_ct[c].dx;
@@ -796,7 +970,13 @@ static void tp_touch_hook(const lvgl_port_touch_t *t)
             moved++;
         }
     }
-    gesture_update(pad_count, dx_sum, dy_sum, moved);
+    int32_t pinch_d = -1;
+    if (pad_count == 2) {
+        float fx = (float)(s_ct[pad_idx[0]].x - s_ct[pad_idx[1]].x);
+        float fy = (float)(s_ct[pad_idx[0]].y - s_ct[pad_idx[1]].y);
+        pinch_d = (int32_t)sqrtf(fx * fx + fy * fy);
+    }
+    gesture_update(pad_count, dx_sum, dy_sum, moved, pinch_d);
 }
 
 static void wheel_cb(lv_event_t *e)
@@ -1275,7 +1455,9 @@ void ui_touchpad_exit(void)
      * PC side also releases everything on disconnect. */
     lvgl_port_set_touch_hook(NULL);
     memset(s_ct, 0, sizeof(s_ct));
-    s_gesture = false;
+    if (s_gesture && s_pad_two && !s_pad_two_frozen && s_two_axis == 3)
+        pinch_end();      /* mid-pinch: Ctrl up */
+    s_gesture = s_pad_two = s_pad_three = false;
 
     s_tap_pending = s_second_touch = s_dragging = false;
     s_left_held = s_right_held = false;
@@ -1389,6 +1571,9 @@ static void prefs_load(void)
     s_hide_buttons = nvs_get_int(CFG_NVS_KEY_TPAD_HIDE_BTN, 0) != 0;
     s_swipe_mode = nvs_get_int(CFG_NVS_KEY_TPAD_SWIPE, TP_SWIPE_HSCROLL);
     if (s_swipe_mode < 0 || s_swipe_mode >= TP_SWIPE_COUNT) s_swipe_mode = TP_SWIPE_HSCROLL;
+    s_swipe3_mode = nvs_get_int(CFG_NVS_KEY_TPAD_SWIPE3, TP_SWIPE3_DESKTOP);
+    if (s_swipe3_mode < 0 || s_swipe3_mode >= TP_SWIPE3_COUNT) s_swipe3_mode = TP_SWIPE3_DESKTOP;
+    s_pinch_on   = nvs_get_int(CFG_NVS_KEY_TPAD_PINCH, 1) != 0;
     s_input_mode = nvs_get_int(CFG_NVS_KEY_TPAD_INPUT, TP_INPUT_ESDECKPC);
     s_btn_func[0] = nvs_get_int(CFG_NVS_KEY_TPAD_BTN_L, TP_BTNF_LEFT);
     s_btn_func[1] = nvs_get_int(CFG_NVS_KEY_TPAD_BTN_R, TP_BTNF_RIGHT);
@@ -1476,6 +1661,30 @@ void ui_touchpad_set_swipe_mode(int mode)
     prefs_load();
     s_swipe_mode = mode;
     nvs_set_int(CFG_NVS_KEY_TPAD_SWIPE, mode);
+}
+
+static const char *const s_swipe3_names[TP_SWIPE3_COUNT] = {
+    "Off", "Switch Desktop",
+};
+
+const char *const *ui_touchpad_swipe3_mode_names(void) { return s_swipe3_names; }
+int  ui_touchpad_get_swipe3_mode(void) { prefs_load(); return s_swipe3_mode; }
+
+void ui_touchpad_set_swipe3_mode(int mode)
+{
+    if (mode < 0 || mode >= TP_SWIPE3_COUNT) return;
+    prefs_load();
+    s_swipe3_mode = mode;
+    nvs_set_int(CFG_NVS_KEY_TPAD_SWIPE3, mode);
+}
+
+bool ui_touchpad_get_pinch_zoom(void) { prefs_load(); return s_pinch_on; }
+
+void ui_touchpad_set_pinch_zoom(bool on)
+{
+    prefs_load();
+    s_pinch_on = on;
+    nvs_set_int(CFG_NVS_KEY_TPAD_PINCH, on ? 1 : 0);
 }
 
 static const char *const s_input_names[TP_INPUT_COUNT] = {
