@@ -142,10 +142,16 @@ static int     s_input_mode    = TP_INPUT_ESDECKPC;
 static int     s_sidebar_mode  = TP_SIDEBAR_HOTKEYS;
 static int     s_btn_func[2]   = { TP_BTNF_LEFT, TP_BTNF_RIGHT };   /* top-left, top-right */
 static uint8_t s_btn_mod_vk[2] = { 0, 0 };   /* modifier VK each top button currently holds down on the PC */
-/* Text on the button / names in the Settings popup, per tp_btn_func_t. */
+/* Text on the button, per tp_btn_func_t. */
 static const char *const s_btn_label[TP_BTNF_COUNT] = { "Left", "Right", "Ctrl", "Shift", "Alt", "Middle" };
-static const char *const s_btn_func_names[TP_BTNF_COUNT] = {
-    "Left Click", "Right Click", "Ctrl", "Shift", "Alt", "Middle Click",
+/* Settings popup order (mouse buttons first, then modifiers). tp_btn_func_t
+ * values are what NVS stores, so the enum keeps its order and the popup maps
+ * row index <-> function through this table instead. */
+static const tp_btn_func_t s_btn_func_order[TP_BTNF_COUNT] = {
+    TP_BTNF_LEFT, TP_BTNF_RIGHT, TP_BTNF_MIDDLE, TP_BTNF_CTRL, TP_BTNF_SHIFT, TP_BTNF_ALT,
+};
+static const char *const s_btn_func_names[TP_BTNF_COUNT] = {   /* in s_btn_func_order order */
+    "Left Click", "Right Click", "Middle Click", "Ctrl", "Shift", "Alt",
 };
 static lv_obj_t *s_sidebar     = NULL;    /* ui.c's sidebar, kept to rebuild the middle area */
 
@@ -1509,8 +1515,17 @@ void ui_touchpad_set_sidebar_mode(int mode)
 }
 
 const char *const *ui_touchpad_btn_func_names(void) { return s_btn_func_names; }
-int  ui_touchpad_get_btn_left_func(void)  { prefs_load(); return s_btn_func[0]; }
-int  ui_touchpad_get_btn_right_func(void) { prefs_load(); return s_btn_func[1]; }
+
+/* tp_btn_func_t -> Settings popup row */
+static int btn_func_row(int func)
+{
+    for (int i = 0; i < TP_BTNF_COUNT; i++)
+        if ((int)s_btn_func_order[i] == func) return i;
+    return 0;
+}
+
+int  ui_touchpad_get_btn_left_func(void)  { prefs_load(); return btn_func_row(s_btn_func[0]); }
+int  ui_touchpad_get_btn_right_func(void) { prefs_load(); return btn_func_row(s_btn_func[1]); }
 bool ui_touchpad_tap_click_forced(void)   { prefs_load(); return tap_forced(); }
 
 static void set_btn_func(int idx, int func)
@@ -1524,8 +1539,14 @@ static void set_btn_func(int idx, int func)
     if (lbl) lv_label_set_text(lbl, s_btn_label[func]);
 }
 
-void ui_touchpad_set_btn_left_func(int func)  { set_btn_func(0, func); }
-void ui_touchpad_set_btn_right_func(int func) { set_btn_func(1, func); }
+void ui_touchpad_set_btn_left_func(int row)
+{
+    if (row >= 0 && row < TP_BTNF_COUNT) set_btn_func(0, s_btn_func_order[row]);
+}
+void ui_touchpad_set_btn_right_func(int row)
+{
+    if (row >= 0 && row < TP_BTNF_COUNT) set_btn_func(1, s_btn_func_order[row]);
+}
 
 void ui_touchpad_deselect_current(void)
 {

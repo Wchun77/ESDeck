@@ -126,11 +126,13 @@ typedef enum {
     TP_BTNF_COUNT,
 } tp_btn_func_t;
 
+/* Settings popup API: indices are popup rows (Left, Right, Middle, Ctrl,
+ * Shift, Alt), not tp_btn_func_t values -- ui_touchpad.c maps between them. */
 const char *const *ui_touchpad_btn_func_names(void);     /* TP_BTNF_COUNT entries */
 int  ui_touchpad_get_btn_left_func(void);
-void ui_touchpad_set_btn_left_func(int func);
+void ui_touchpad_set_btn_left_func(int row);
 int  ui_touchpad_get_btn_right_func(void);
-void ui_touchpad_set_btn_right_func(int func);
+void ui_touchpad_set_btn_right_func(int row);
 
 /* True when tapping is the only way left to click -- buttons hidden, or
  * neither top button is Left Click -- so Tap to Click is on regardless of
