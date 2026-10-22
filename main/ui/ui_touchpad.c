@@ -256,6 +256,15 @@ typedef struct {
 
 static tp_contact_t s_ct[LVGL_PORT_TOUCH_MAX_POINTS];
 
+/* Windows Touchpad (TP_INPUT_PTP): the slot index in s_ct[] is the
+ * contact ID Windows sees -- stable while the finger is down. */
+_Static_assert(HID_PTP_MAX_CONTACTS == LVGL_PORT_TOUCH_MAX_POINTS,
+               "PTP report carries one entry per tracked finger");
+static uint8_t  s_ptp_down     = 0;   /* bit per slot: reported with tip on last frame */
+static uint16_t s_ptp_lx[LVGL_PORT_TOUCH_MAX_POINTS];
+static uint16_t s_ptp_ly[LVGL_PORT_TOUCH_MAX_POINTS];
+static uint8_t  s_ptp_last_btn = 0;
+
 /* -----------------------------------------------------------------------
  * Helpers
  * ----------------------------------------------------------------------- */
@@ -348,11 +357,47 @@ static void sync_mod_keys(void)
     }
 }
 
+static bool ptp_mode(void)
+{
+    return s_input_mode == TP_INPUT_PTP;
+}
+
 static void push_buttons(void)
 {
     uint8_t m = current_mask();
     if (m) s_task_view_open = false;   /* a button went down: Task View picked a window */
+    if (ptp_mode()) return;            /* buttons go in the PTP report (ptp_send_frame()) */
     usb_hid_tp_buttons(m);
+}
+
+/* Windows Touchpad: one PTP frame from the tracked fingers -- every pad
+ * finger down (tip on), plus once each finger that was down last frame
+ * and isn't any more (lifted, or dropped by input_cancel()), with its last
+ * position. Top buttons set to a mouse button ride along as buttons 1-3.
+ * Nothing is sent while nothing is down and the buttons didn't change. */
+static void ptp_send_frame(void)
+{
+    usb_hid_ptp_contact_t c[LVGL_PORT_TOUCH_MAX_POINTS];
+    int n = 0;
+    uint8_t down = 0;
+
+    for (int i = 0; i < LVGL_PORT_TOUCH_MAX_POINTS; i++) {
+        if (!s_ct[i].active || s_ct[i].reg != REG_PAD) continue;
+        s_ptp_lx[i] = (uint16_t)s_ct[i].x;
+        s_ptp_ly[i] = (uint16_t)s_ct[i].y;
+        c[n++] = (usb_hid_ptp_contact_t){ .tip = true, .id = (uint8_t)i, .x = s_ptp_lx[i], .y = s_ptp_ly[i] };
+        down |= (uint8_t)(1u << i);
+    }
+    for (int i = 0; i < LVGL_PORT_TOUCH_MAX_POINTS; i++) {
+        if (!(s_ptp_down & (1u << i)) || (down & (1u << i))) continue;
+        c[n++] = (usb_hid_ptp_contact_t){ .tip = false, .id = (uint8_t)i, .x = s_ptp_lx[i], .y = s_ptp_ly[i] };
+    }
+
+    uint8_t btn = current_mask() & (HID_TP_BTN_LEFT | HID_TP_BTN_RIGHT | HID_TP_BTN_MIDDLE);
+    if (n == 0 && btn == s_ptp_last_btn) return;
+    usb_hid_ptp_report(c, n, btn);
+    s_ptp_down     = down;
+    s_ptp_last_btn = btn;
 }
 
 static void click_left(void)
@@ -914,6 +959,7 @@ static void input_cancel(void)
         push_buttons();
     }
     update_buttons();
+    if (ptp_mode()) ptp_send_frame();   /* fingers that were down: lift */
 }
 
 /* lvgl_port touch hook -- every touch read, LVGL task. */
@@ -972,6 +1018,11 @@ static void tp_touch_hook(const lvgl_port_touch_t *t)
 
     /* 4. Buttons, then the pad gesture. */
     update_buttons();
+
+    if (ptp_mode()) {   /* Windows Touchpad: raw fingers, Windows does the rest */
+        ptp_send_frame();
+        return;
+    }
 
     int pad_count = 0, moved = 0, dx_sum = 0, dy_sum = 0;
     int pad_idx[2] = { -1, -1 };
@@ -1435,7 +1486,8 @@ void ui_touchpad_enter(lv_obj_t *sidebar)
     build_sidebar(sidebar);
     build_page(lv_scr_act());
     ui_touchpad_get_hide_labels();   /* load from NVS on first enter */
-    usb_hid_set_native_input(s_input_mode == TP_INPUT_USB_HID);
+    usb_hid_set_native_input(s_input_mode != TP_INPUT_ESDECKPC);   /* PTP: keyboard on the native interface */
+    usb_hid_set_ptp(s_input_mode == TP_INPUT_PTP);
     s_move_rem_x = s_move_rem_y = s_wheel_rem = 0;
     apply_hide_labels();
     apply_layout();
@@ -1478,6 +1530,7 @@ void ui_touchpad_exit(void)
     s_tap_pending = s_second_touch = s_dragging = false;
     s_left_held = s_right_held = false;
     s_wheel_coast = 0;
+    if (ptp_mode()) ptp_send_frame();   /* lift anything Windows still has down */
     push_buttons();
     sync_mod_keys();      /* a top button held as Ctrl/Shift/Alt: key up */
     usb_hid_tp_flush();
@@ -1704,7 +1757,7 @@ void ui_touchpad_set_pinch_zoom(bool on)
 }
 
 static const char *const s_input_names[TP_INPUT_COUNT] = {
-    "ESDeckPC", "USB HID",
+    "ESDeckPC", "USB HID", "Windows Touchpad",
 };
 
 const char *const *ui_touchpad_input_mode_names(void) { return s_input_names; }
@@ -1714,9 +1767,13 @@ void ui_touchpad_set_input_mode(int mode)
 {
     if (mode < 0 || mode >= TP_INPUT_COUNT) return;
     prefs_load();
+    if (s_input_mode == TP_INPUT_PTP && mode != TP_INPUT_PTP)
+        ptp_send_frame();   /* leaving PTP: lift (Settings is up, so nothing is down anyway) */
     s_input_mode = mode;
     nvs_set_int(CFG_NVS_KEY_TPAD_INPUT, mode);
-    usb_hid_set_native_input(mode == TP_INPUT_USB_HID);
+    usb_hid_set_native_input(mode != TP_INPUT_ESDECKPC);
+    usb_hid_set_ptp(mode == TP_INPUT_PTP);
+    s_ptp_down = s_ptp_last_btn = 0;
 }
 
 static const char *const s_sidebar_names[TP_SIDEBAR_COUNT] = {

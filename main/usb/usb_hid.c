@@ -8,6 +8,7 @@
 #include "freertos/task.h"
 #include "freertos/stream_buffer.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "esp_jpeg_dec.h"
 #include "lvgl.h"
 #include "lvgl_port.h"
@@ -15,16 +16,21 @@
 
 static const char *TAG = "USB_HID";
 
-#define TUSB_DESC_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN * 2)
+#define TUSB_DESC_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN * 3)
 
 /* HID instances / interfaces:
  *   0 = ESDeck vendor HID (Deck / Monitor / Media / time sync / ESDeckPC paths)
  *   1 = standard keyboard (Report ID 1) + mouse (Report ID 2), used when
  *       the input mode is "USB HID" (usb_hid_set_native_input()) -- Windows
  *       sees a real keyboard / mouse: no ESDeckPC needed, works with
- *       elevated windows, UAC and games that reject injected input. */
+ *       elevated windows, UAC and games that reject injected input.
+ *   2 = Windows Precision Touchpad (PTP) -- the "Windows Touchpad" input
+ *       mode: raw finger positions, Windows does cursor / scroll / gestures
+ *       (see "Precision Touchpad" below). Always present; only sends
+ *       reports in that mode. */
 #define HID_ITF_VENDOR   0
 #define HID_ITF_INPUT    1
+#define HID_ITF_PTP      2
 #define RID_KEYBOARD     1
 #define RID_MOUSE        2
 
@@ -155,8 +161,166 @@ static const uint8_t hid_input_report_descriptor[] = {
     0xC0,                   /* End Collection (Application) */
 };
 
+/* -----------------------------------------------------------------------
+ * Precision Touchpad (interface 2) -- report descriptor
+ *
+ * Two top-level collections, as Windows requires:
+ *   Touch Pad      : input report (ID 1) with HID_PTP_MAX_CONTACTS fingers
+ *                    (Confidence, Tip, Contact ID, X, Y) + Scan Time +
+ *                    Contact Count + buttons 1-3; feature reports Contact
+ *                    Count Max / Pad Type (ID 2) and the 256-byte
+ *                    certification blob (ID 3)
+ *   Configuration  : Input Mode (ID 4, host writes 3 = PTP) and the
+ *                    surface / button switches (ID 5)
+ * No mouse collection: before Windows sets Input Mode the pad just stays
+ * quiet (Windows 10+ always switches it).
+ *
+ * X/Y are screen coordinates (0..799, 0..479) over the panel's active
+ * area, 154.2 x 85.9 mm = 6.07 x 3.38 in (physical units 0.01 in), so
+ * Windows' touchpad speed matches the real size. Only fingers on the pad
+ * area are reported (ui_touchpad.c).
+ * ----------------------------------------------------------------------- */
+#define RID_PTP_INPUT    1
+#define RID_PTP_CAPS     2
+#define RID_PTP_HQA      3
+#define RID_PTP_MODE     4
+#define RID_PTP_SWITCH   5
+
+#define PTP_LOG_X_MAX    799
+#define PTP_LOG_Y_MAX    479
+#define PTP_PHYS_X_MAX   607   /* 0.01 in */
+#define PTP_PHYS_Y_MAX   338
+
+#define PTP_FINGER \
+    0x05, 0x0D,             /* Usage Page (Digitizer) */                      \
+    0x09, 0x22,             /* Usage (Finger) */                              \
+    0xA1, 0x02,             /* Collection (Logical) */                        \
+    0x15, 0x00, 0x25, 0x01, /*   Logical 0..1 */                              \
+    0x09, 0x47,             /*   Usage (Confidence) */                        \
+    0x09, 0x42,             /*   Usage (Tip Switch) */                        \
+    0x95, 0x02, 0x75, 0x01, /*   2 x 1 bit */                                 \
+    0x81, 0x02,             /*   Input (Data,Var,Abs) */                      \
+    0x25, 0x03,             /*   Logical max 3 */                             \
+    0x09, 0x51,             /*   Usage (Contact Identifier) */                \
+    0x95, 0x01, 0x75, 0x02, /*   1 x 2 bits */                                \
+    0x81, 0x02,                                                               \
+    0x95, 0x01, 0x75, 0x04, /*   4 bits padding */                            \
+    0x81, 0x03,                                                               \
+    0x05, 0x01,             /*   Usage Page (Generic Desktop) */              \
+    0x15, 0x00,                                                               \
+    0x26, (PTP_LOG_X_MAX & 0xFF), (PTP_LOG_X_MAX >> 8),                       \
+    0x75, 0x10, 0x95, 0x01, /*   1 x 16 bits */                               \
+    0x55, 0x0E,             /*   Unit Exponent (-2) */                        \
+    0x65, 0x13,             /*   Unit (Inch, English Linear) */               \
+    0x35, 0x00,                                                               \
+    0x46, (PTP_PHYS_X_MAX & 0xFF), (PTP_PHYS_X_MAX >> 8),                     \
+    0x09, 0x30,             /*   Usage (X) */                                 \
+    0x81, 0x02,                                                               \
+    0x26, (PTP_LOG_Y_MAX & 0xFF), (PTP_LOG_Y_MAX >> 8),                       \
+    0x46, (PTP_PHYS_Y_MAX & 0xFF), (PTP_PHYS_Y_MAX >> 8),                     \
+    0x09, 0x31,             /*   Usage (Y) */                                 \
+    0x81, 0x02,                                                               \
+    0x55, 0x00, 0x65, 0x00, /*   Unit reset */                                \
+    0x35, 0x00, 0x45, 0x00,                                                   \
+    0xC0                    /* End Collection */
+
+static const uint8_t hid_ptp_report_descriptor[] = {
+    0x05, 0x0D,             /* Usage Page (Digitizer) */
+    0x09, 0x05,             /* Usage (Touch Pad) */
+    0xA1, 0x01,             /* Collection (Application) */
+    0x85, RID_PTP_INPUT,    /*   Report ID */
+    PTP_FINGER,
+    PTP_FINGER,
+    PTP_FINGER,             /*   = HID_PTP_MAX_CONTACTS */
+    0x05, 0x0D,             /*   Usage Page (Digitizer) */
+    0x55, 0x0C,             /*   Unit Exponent (-4) */
+    0x66, 0x01, 0x10,       /*   Unit (Seconds) */
+    0x47, 0xFF, 0xFF, 0x00, 0x00, /* Physical max 65535 */
+    0x27, 0xFF, 0xFF, 0x00, 0x00, /* Logical max 65535 */
+    0x75, 0x10, 0x95, 0x01, /*   1 x 16 bits */
+    0x09, 0x56,             /*   Usage (Scan Time), 100 us units */
+    0x81, 0x02,
+    0x55, 0x00, 0x65, 0x00, /*   Unit reset */
+    0x35, 0x00, 0x45, 0x00,
+    0x09, 0x54,             /*   Usage (Contact Count) */
+    0x25, 0x7F,
+    0x95, 0x01, 0x75, 0x08,
+    0x81, 0x02,
+    0x05, 0x09,             /*   Usage Page (Button) */
+    0x09, 0x01, 0x09, 0x02, 0x09, 0x03,   /* Buttons 1..3 */
+    0x25, 0x01,
+    0x75, 0x01, 0x95, 0x03,
+    0x81, 0x02,
+    0x95, 0x05,             /*   5 bits padding */
+    0x81, 0x03,
+
+    0x05, 0x0D,             /*   Usage Page (Digitizer) */
+    0x85, RID_PTP_CAPS,     /*   Report ID */
+    0x09, 0x55,             /*   Usage (Contact Count Maximum) */
+    0x09, 0x59,             /*   Usage (Pad Type) */
+    0x75, 0x04, 0x95, 0x02, /*   2 x 4 bits */
+    0x25, 0x0F,
+    0xB1, 0x02,             /*   Feature (Data,Var,Abs) */
+
+    0x06, 0x00, 0xFF,       /*   Usage Page (Vendor 0xFF00) */
+    0x85, RID_PTP_HQA,      /*   Report ID */
+    0x09, 0xC5,             /*   Usage (certification status) */
+    0x15, 0x00, 0x26, 0xFF, 0x00,
+    0x75, 0x08,
+    0x96, 0x00, 0x01,       /*   256 x 8 bits */
+    0xB1, 0x02,
+    0xC0,                   /* End Collection */
+
+    0x05, 0x0D,             /* Usage Page (Digitizer) */
+    0x09, 0x0E,             /* Usage (Device Configuration) */
+    0xA1, 0x01,             /* Collection (Application) */
+    0x85, RID_PTP_MODE,     /*   Report ID */
+    0x09, 0x22,             /*   Usage (Finger) */
+    0xA1, 0x02,             /*   Collection (Logical) */
+    0x09, 0x52,             /*     Usage (Input Mode) */
+    0x15, 0x00, 0x25, 0x0A,
+    0x75, 0x08, 0x95, 0x01,
+    0xB1, 0x02,             /*     Feature */
+    0xC0,
+    0x09, 0x22,             /*   Usage (Finger) */
+    0xA1, 0x00,             /*   Collection (Physical) */
+    0x85, RID_PTP_SWITCH,   /*     Report ID */
+    0x09, 0x57,             /*     Usage (Surface Switch) */
+    0x09, 0x58,             /*     Usage (Button Switch) */
+    0x75, 0x01, 0x95, 0x02, 0x25, 0x01,
+    0xB1, 0x02,
+    0x95, 0x06,             /*     6 bits padding */
+    0xB1, 0x03,
+    0xC0,
+    0xC0,                   /* End Collection */
+};
+
+/* Microsoft's default certification blob ("Prior to a device receiving a
+ * 256-byte blob indicating its certification status, it should implement
+ * a default blob as follows"). A certified blob is optional on Windows 10+,
+ * but the 256-byte report has to be there. Needs CFG_TUD_HID_EP_BUFSIZE
+ * >= 257 (set in the top-level CMakeLists.txt). */
+static const uint8_t s_ptp_hqa_blob[256] = {
+    0xfc, 0x28, 0xfe, 0x84, 0x40, 0xcb, 0x9a, 0x87, 0x0d, 0xbe, 0x57, 0x3c, 0xb6, 0x70, 0x09, 0x88,
+    0x07, 0x97, 0x2d, 0x2b, 0xe3, 0x38, 0x34, 0xb6, 0x6c, 0xed, 0xb0, 0xf7, 0xe5, 0x9c, 0xf6, 0xc2,
+    0x2e, 0x84, 0x1b, 0xe8, 0xb4, 0x51, 0x78, 0x43, 0x1f, 0x28, 0x4b, 0x7c, 0x2d, 0x53, 0xaf, 0xfc,
+    0x47, 0x70, 0x1b, 0x59, 0x6f, 0x74, 0x43, 0xc4, 0xf3, 0x47, 0x18, 0x53, 0x1a, 0xa2, 0xa1, 0x71,
+    0xc7, 0x95, 0x0e, 0x31, 0x55, 0x21, 0xd3, 0xb5, 0x1e, 0xe9, 0x0c, 0xba, 0xec, 0xb8, 0x89, 0x19,
+    0x3e, 0xb3, 0xaf, 0x75, 0x81, 0x9d, 0x53, 0xb9, 0x41, 0x57, 0xf4, 0x6d, 0x39, 0x25, 0x29, 0x7c,
+    0x87, 0xd9, 0xb4, 0x98, 0x45, 0x7d, 0xa7, 0x26, 0x9c, 0x65, 0x3b, 0x85, 0x68, 0x89, 0xd7, 0x3b,
+    0xbd, 0xff, 0x14, 0x67, 0xf2, 0x2b, 0xf0, 0x2a, 0x41, 0x54, 0xf0, 0xfd, 0x2c, 0x66, 0x7c, 0xf8,
+    0xc0, 0x8f, 0x33, 0x13, 0x03, 0xf1, 0xd3, 0xc1, 0x0b, 0x89, 0xd9, 0x1b, 0x62, 0xcd, 0x51, 0xb7,
+    0x80, 0xb8, 0xaf, 0x3a, 0x10, 0xc1, 0x8a, 0x5b, 0xe8, 0x8a, 0x56, 0xf0, 0x8c, 0xaa, 0xfa, 0x35,
+    0xe9, 0x42, 0xc4, 0xd8, 0x55, 0xc3, 0x38, 0xcc, 0x2b, 0x53, 0x5c, 0x69, 0x52, 0xd5, 0xc8, 0x73,
+    0x02, 0x38, 0x7c, 0x73, 0xb6, 0x41, 0xe7, 0xff, 0x05, 0xd8, 0x2b, 0x79, 0x9a, 0xe2, 0x34, 0x60,
+    0x8f, 0xa3, 0x32, 0x1f, 0x09, 0x78, 0x62, 0xbc, 0x80, 0xe3, 0x0f, 0xbd, 0x65, 0x20, 0x08, 0x13,
+    0xc1, 0xe2, 0xee, 0x53, 0x2d, 0x86, 0x7e, 0xa7, 0x5a, 0xc5, 0xd3, 0x7d, 0x98, 0xbe, 0x31, 0x48,
+    0x1f, 0xfb, 0xda, 0xaf, 0xa2, 0xa8, 0x6a, 0x89, 0xd6, 0xbf, 0xf2, 0xd3, 0x32, 0x2a, 0x9a, 0xe4,
+    0xcf, 0x17, 0xb7, 0xb8, 0xf4, 0xe1, 0x33, 0x08, 0x24, 0x8b, 0xc4, 0x43, 0xa5, 0xe5, 0x24, 0xc2,
+};
+
 static const uint8_t s_config_desc[] = {
-    TUD_CONFIG_DESCRIPTOR(1, 2, 0, TUSB_DESC_TOTAL_LEN, 0, 100),
+    TUD_CONFIG_DESCRIPTOR(1, 3, 0, TUSB_DESC_TOTAL_LEN, 0, 100),
     /* 64-byte packets, 1 ms poll: a Deck action (chunked, page 0xFB) of a
      * few hundred bytes goes out in a few ms. */
     TUD_HID_DESCRIPTOR(HID_ITF_VENDOR, 0, HID_ITF_PROTOCOL_NONE,
@@ -164,6 +328,9 @@ static const uint8_t s_config_desc[] = {
     /* 1 ms poll for the pointer -- real mice use 1..8 ms */
     TUD_HID_DESCRIPTOR(HID_ITF_INPUT, 0, HID_ITF_PROTOCOL_NONE,
                        sizeof(hid_input_report_descriptor), 0x82, 16, 1),
+    /* Precision Touchpad: 20-byte input report, 1 ms poll */
+    TUD_HID_DESCRIPTOR(HID_ITF_PTP, 0, HID_ITF_PROTOCOL_NONE,
+                       sizeof(hid_ptp_report_descriptor), 0x83, 32, 1),
 };
 
 static const tusb_desc_device_t s_device_desc = {
@@ -180,9 +347,10 @@ static const tusb_desc_device_t s_device_desc = {
      * a new PID makes it enumerate the composite device cleanly. ESDeckPC
      * accepts both. */
     .idProduct          = 0x4005,
-    /* 0x0101: vendor IN report widened 8 -> 64 bytes; bumped so Windows
-     * doesn't reuse a cached descriptor set. */
-    .bcdDevice          = 0x0101,
+    /* 0x0101: vendor IN report widened 8 -> 64 bytes; 0x0102: Precision
+     * Touchpad interface added. Bumped so Windows doesn't reuse a cached
+     * descriptor set. */
+    .bcdDevice          = 0x0102,
     .iManufacturer      = 0x01,
     .iProduct           = 0x02,
     .iSerialNumber      = 0x03,
@@ -1010,6 +1178,7 @@ void usb_hid_media_seek(uint32_t position_ms)
  * down, after those queues (tp_flush_native(), kb_flush_native()).
  * ----------------------------------------------------------------------- */
 static bool    s_native   = false;   /* usb_hid_set_native_input() */
+static bool    s_ptp      = false;   /* usb_hid_set_ptp() -- Precision Touchpad, see below */
 
 /* Mouse feature report (ID 2): bits 0-1 wheel multiplier, bits 2-3 pan
  * multiplier, as set by the host. Non-zero = host turned hi-res on, so one
@@ -1154,8 +1323,13 @@ static int32_t tp_clamp(int32_t v, int32_t lo, int32_t hi)
 
 static void tp_flush_native(void);
 
+static void ptp_flush(void);
+
 void usb_hid_tp_flush(void)
 {
+    /* Windows Touchpad: fingers + buttons go out as PTP reports; the
+     * native mouse still carries the sidebar wheel strip. */
+    if (s_ptp) ptp_flush();
     if (s_native) { tp_flush_native(); return; }
 
     bool have_btn = s_tp_btn_count > 0;
@@ -1358,6 +1532,110 @@ static void kb_flush_native(void)
     s_kb_count--;
 }
 
+/* -----------------------------------------------------------------------
+ * Precision Touchpad (interface 2) -- state, reports
+ * ----------------------------------------------------------------------- */
+#define PTP_REPORT_LEN   (HID_PTP_MAX_CONTACTS * 5 + 4)   /* without report ID */
+#define PTP_Q_LEN        8
+
+static volatile uint8_t s_ptp_mode     = 0;       /* Input Mode written by the host (3 = PTP) */
+static volatile uint8_t s_ptp_switch   = 0x03;    /* bit0 surface, bit1 buttons (both on) */
+static uint8_t s_ptp_q[PTP_Q_LEN][PTP_REPORT_LEN];
+static uint8_t s_ptp_head = 0, s_ptp_count = 0;
+
+/* One report per call -- the next goes out when the endpoint is free again. */
+static void ptp_flush(void)
+{
+    if (s_ptp_count == 0) return;
+    if (!s_active || !tud_hid_n_ready(HID_ITF_PTP)) return;
+    if (!tud_hid_n_report(HID_ITF_PTP, RID_PTP_INPUT, s_ptp_q[s_ptp_head], PTP_REPORT_LEN)) return;
+    s_ptp_head = (s_ptp_head + 1) % PTP_Q_LEN;
+    s_ptp_count--;
+}
+
+void usb_hid_ptp_report(const usb_hid_ptp_contact_t *c, int n, uint8_t buttons)
+{
+    if (!s_ptp) return;
+    if (n > HID_PTP_MAX_CONTACTS) n = HID_PTP_MAX_CONTACTS;
+
+    if (s_ptp_count == PTP_Q_LEN) {   /* full: drop the oldest, the newest state matters most */
+        s_ptp_head = (s_ptp_head + 1) % PTP_Q_LEN;
+        s_ptp_count--;
+    }
+    uint8_t *r = s_ptp_q[(s_ptp_head + s_ptp_count) % PTP_Q_LEN];
+    memset(r, 0, PTP_REPORT_LEN);
+    for (int i = 0; i < n; i++) {
+        uint8_t *f = r + i * 5;
+        uint16_t x = c[i].x > PTP_LOG_X_MAX ? PTP_LOG_X_MAX : c[i].x;
+        uint16_t y = c[i].y > PTP_LOG_Y_MAX ? PTP_LOG_Y_MAX : c[i].y;
+        f[0] = 0x01 /* confidence */ | (c[i].tip ? 0x02 : 0) | (uint8_t)((c[i].id & 0x03) << 2);
+        f[1] = (uint8_t)x; f[2] = (uint8_t)(x >> 8);
+        f[3] = (uint8_t)y; f[4] = (uint8_t)(y >> 8);
+    }
+    uint16_t scan = (uint16_t)(esp_timer_get_time() / 100);   /* 100 us units, wraps */
+    uint8_t *t = r + HID_PTP_MAX_CONTACTS * 5;
+    t[0] = (uint8_t)scan; t[1] = (uint8_t)(scan >> 8);
+    t[2] = (uint8_t)n;
+    t[3] = buttons & 0x07;
+    s_ptp_count++;
+    ptp_flush();   /* usually goes straight out (1 ms poll) */
+}
+
+bool usb_hid_ptp_host_ready(void) { return s_ptp_mode == 3; }
+
+void usb_hid_set_ptp(bool on)
+{
+    if (on == s_ptp) return;
+    s_ptp_count = 0;
+    s_ptp = on;
+    ESP_LOGI(TAG, "precision touchpad: %s (host input mode %u)", on ? "on" : "off", s_ptp_mode);
+}
+
+static void ptp_set_report(uint8_t report_id, hid_report_type_t type,
+                           uint8_t const *buf, uint16_t len)
+{
+    if (type != HID_REPORT_TYPE_FEATURE || len < 1) return;
+    if (report_id == RID_PTP_MODE) {
+        s_ptp_mode = buf[0];
+        ESP_LOGI(TAG, "PTP input mode set by host: %u", buf[0]);
+    } else if (report_id == RID_PTP_SWITCH) {
+        s_ptp_switch = buf[0] & 0x03;
+        ESP_LOGI(TAG, "PTP switches: surface %s, buttons %s",
+                 (s_ptp_switch & 1) ? "on" : "off", (s_ptp_switch & 2) ? "on" : "off");
+    }
+}
+
+static uint16_t ptp_get_report(uint8_t report_id, hid_report_type_t type,
+                               uint8_t *buf, uint16_t reqlen)
+{
+    if (reqlen < 1) return 0;
+    if (type == HID_REPORT_TYPE_FEATURE) {
+        switch (report_id) {
+        case RID_PTP_CAPS:
+            buf[0] = (uint8_t)(HID_PTP_MAX_CONTACTS | (2 << 4));   /* pad type 2: non-clickable, external buttons */
+            return 1;
+        case RID_PTP_HQA: {
+            uint16_t n = reqlen < sizeof(s_ptp_hqa_blob) ? reqlen : sizeof(s_ptp_hqa_blob);
+            memcpy(buf, s_ptp_hqa_blob, n);
+            if (n < sizeof(s_ptp_hqa_blob))
+                ESP_LOGW(TAG, "PTP blob truncated to %u bytes (CFG_TUD_HID_EP_BUFSIZE too small?)", n);
+            return n;
+        }
+        case RID_PTP_MODE:
+            buf[0] = s_ptp_mode;
+            return 1;
+        case RID_PTP_SWITCH:
+            buf[0] = s_ptp_switch;
+            return 1;
+        default:
+            break;
+        }
+    }
+    uint16_t n = reqlen < PTP_REPORT_LEN ? reqlen : PTP_REPORT_LEN;   /* input report: "no fingers" */
+    memset(buf, 0, n);
+    return n;
+}
+
 bool usb_hid_get_native_input(void) { return s_native; }
 
 void usb_hid_set_native_input(bool native)
@@ -1389,7 +1667,9 @@ void usb_hid_set_native_input(bool native)
  * ----------------------------------------------------------------------- */
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance)
 {
-    return (instance == HID_ITF_INPUT) ? hid_input_report_descriptor : hid_report_descriptor;
+    if (instance == HID_ITF_PTP)   return hid_ptp_report_descriptor;
+    if (instance == HID_ITF_INPUT) return hid_input_report_descriptor;
+    return hid_report_descriptor;
 }
 
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
@@ -1398,6 +1678,10 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
 {
     if (instance == HID_ITF_INPUT) {
         native_set_report(report_id, report_type, buffer, bufsize);
+        return;
+    }
+    if (instance == HID_ITF_PTP) {
+        ptp_set_report(report_id, report_type, buffer, bufsize);
         return;
     }
     if (report_type != HID_REPORT_TYPE_FEATURE) return;
@@ -1484,6 +1768,8 @@ uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
 {
     if (instance == HID_ITF_INPUT)
         return native_get_report(report_id, report_type, buffer, reqlen);
+    if (instance == HID_ITF_PTP)
+        return ptp_get_report(report_id, report_type, buffer, reqlen);
 
     if (report_type == HID_REPORT_TYPE_FEATURE ||
         report_type == HID_REPORT_TYPE_INPUT) {

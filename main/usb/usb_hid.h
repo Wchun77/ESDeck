@@ -210,6 +210,32 @@ bool usb_hid_kb_pending(void);
 void usb_hid_set_native_input(bool native);
 bool usb_hid_get_native_input(void);
 
+/* -----------------------------------------------------------------------
+ * Windows Precision Touchpad (USB interface 2)
+ *
+ * Touchpad mode's "Windows Touchpad" input: finger positions go to Windows
+ * as-is and Windows does cursor speed, scrolling, taps and gestures (its
+ * own Settings > Touchpad). Keyboard input still uses the native keyboard
+ * (usb_hid_set_native_input(true) as well).
+ *
+ * usb_hid_ptp_report(): one frame -- every finger currently down on the pad
+ * (tip = true) plus, once, each finger that just lifted (tip = false, last
+ * position). id stays the same for a finger while it's down (0..3). x/y in
+ * screen pixels. buttons: HID_TP_BTN_LEFT/RIGHT/MIDDLE. Queued and sent
+ * right away when the endpoint is free, the rest by usb_hid_tp_flush().
+ * ----------------------------------------------------------------------- */
+#define HID_PTP_MAX_CONTACTS  3   /* = LVGL_PORT_TOUCH_MAX_POINTS; Windows needs 3..5 */
+
+typedef struct {
+    bool     tip;
+    uint8_t  id;
+    uint16_t x, y;
+} usb_hid_ptp_contact_t;
+
+void usb_hid_set_ptp(bool on);
+void usb_hid_ptp_report(const usb_hid_ptp_contact_t *c, int n, uint8_t buttons);
+bool usb_hid_ptp_host_ready(void);   /* Windows has switched the pad to PTP mode (Input Mode 3) */
+
 void usb_hid_driver_install(void);
 
 void usb_hid_activate(void);

@@ -106,10 +106,15 @@ void ui_touchpad_set_pinch_zoom(bool on);
  *   TP_INPUT_ESDECKPC -- vendor reports, ESDeckPC injects them (default)
  *   TP_INPUT_USB_HID  -- the device's own USB keyboard + mouse interface;
  *                        no ESDeckPC needed, works where injected input
- *                        doesn't (games with anti-cheat, elevated windows) */
+ *                        doesn't (games with anti-cheat, elevated windows)
+ *   TP_INPUT_PTP      -- Windows Precision Touchpad: raw fingers, Windows
+ *                        does cursor / scroll / taps / gestures (its own
+ *                        Settings > Touchpad); the touchpad settings here
+ *                        don't apply. Keyboard as in USB HID. */
 typedef enum {
     TP_INPUT_ESDECKPC = 0,
     TP_INPUT_USB_HID,
+    TP_INPUT_PTP,
     TP_INPUT_COUNT,
 } tp_input_mode_t;
 
