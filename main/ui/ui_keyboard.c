@@ -1,5 +1,7 @@
 #include "ui_keyboard.h"
 #include "usb/usb_hid.h"
+#include "app_config.h"
+#include "nvs_manager/nvs_manager.h"
 #include "lvgl.h"
 #include "esp_log.h"
 #include <stdint.h>
@@ -47,6 +49,9 @@ static const char *TAG = "KB";
 #define COL_LOCKED     0x2a7fff    /* locked modifier */
 #define COL_TEXT       0xeeeeee
 #define COL_TEXT_DIM   0xaaaaaa
+#define COL_ZHUYIN     0x8fc8ff    /* Zhuyin key caps */
+
+LV_FONT_DECLARE(font_zhuyin_16);   /* ui/fonts/font_zhuyin_16.c, ㄅ..ㄩ + tones */
 
 /* -----------------------------------------------------------------------
  * Key table
@@ -150,6 +155,7 @@ static const kb_key_t *const s_rows[KB_ROWS] = { s_row0, s_row1, s_row2, s_row3,
 static lv_obj_t        *s_screen = NULL;
 static lv_obj_t        *s_btn[KB_MAX_KEYS];
 static lv_obj_t        *s_lbl[KB_MAX_KEYS];
+static lv_obj_t        *s_zy[KB_MAX_KEYS];   /* Zhuyin label, NULL = none on this key */
 static const kb_key_t  *s_def[KB_MAX_KEYS];
 static int              s_key_count = 0;
 
@@ -176,6 +182,73 @@ static lv_timer_t *s_timer       = NULL;
 static uint32_t s_last_mod_tap_ms  = 0;
 
 static uint8_t active_mods(void) { return s_mod_oneshot | s_mod_locked; }
+
+/* -----------------------------------------------------------------------
+ * Zhuyin key caps (standard / Dachen layout), by the key's VK.
+ * ----------------------------------------------------------------------- */
+static bool s_zy_enabled = false;
+static bool s_zy_loaded  = false;
+static int  s_zy_shown   = -1;     /* layout currently applied: 1 = Zhuyin, 0 = plain, -1 = none yet */
+
+static const char *zhuyin_for(uint8_t vk)
+{
+    switch (vk) {
+    case '1': return "ㄅ"; case '2': return "ㄉ"; case '3': return "ˇ";  case '4': return "ˋ";
+    case '5': return "ㄓ"; case '6': return "ˊ";  case '7': return "˙";  case '8': return "ㄚ";
+    case '9': return "ㄞ"; case '0': return "ㄢ"; case 0xBD: return "ㄦ";   /* - */
+    case 'Q': return "ㄆ"; case 'W': return "ㄊ"; case 'E': return "ㄍ"; case 'R': return "ㄐ";
+    case 'T': return "ㄔ"; case 'Y': return "ㄗ"; case 'U': return "ㄧ"; case 'I': return "ㄛ";
+    case 'O': return "ㄟ"; case 'P': return "ㄣ";
+    case 'A': return "ㄇ"; case 'S': return "ㄋ"; case 'D': return "ㄎ"; case 'F': return "ㄑ";
+    case 'G': return "ㄕ"; case 'H': return "ㄘ"; case 'J': return "ㄨ"; case 'K': return "ㄜ";
+    case 'L': return "ㄠ"; case 0xBA: return "ㄤ";   /* ; */
+    case 'Z': return "ㄈ"; case 'X': return "ㄌ"; case 'C': return "ㄏ"; case 'V': return "ㄒ";
+    case 'B': return "ㄖ"; case 'N': return "ㄙ"; case 'M': return "ㄩ";
+    case 0xBC: return "ㄝ"; case 0xBE: return "ㄡ"; case 0xBF: return "ㄥ";   /* , . / */
+    default:  return NULL;
+    }
+}
+
+bool ui_keyboard_get_zhuyin(void)
+{
+    if (!s_zy_loaded) {
+        char v[4] = "";
+        s_zy_enabled = nvs_manager_get_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_KB_ZHUYIN, v, sizeof(v)) &&
+                       v[0] == '1';
+        s_zy_loaded = true;
+    }
+    return s_zy_enabled;
+}
+
+void ui_keyboard_set_zhuyin(bool on)
+{
+    s_zy_enabled = on;
+    s_zy_loaded  = true;
+    if (!nvs_manager_set_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_KB_ZHUYIN, on ? "1" : "0"))
+        ESP_LOGW(TAG, "NVS save failed: %s", CFG_NVS_KEY_KB_ZHUYIN);
+}
+
+/* Zhuyin layout: English 14 px top-left + Zhuyin bottom-right. Plain
+ * layout (Shift / Fn active, or Zhuyin off): English 16 px centered, as
+ * before. Only keys that carry a Zhuyin label are touched, and only when
+ * the layout actually flips. */
+static void apply_zhuyin_layout(bool show)
+{
+    if ((int)show == s_zy_shown) return;
+    s_zy_shown = show;
+    for (int i = 0; i < s_key_count; i++) {
+        if (!s_zy[i]) continue;
+        if (show) {
+            lv_obj_set_style_text_font(s_lbl[i], &lv_font_montserrat_14, 0);
+            lv_obj_align(s_lbl[i], LV_ALIGN_TOP_LEFT, 5, 3);
+            lv_obj_clear_flag(s_zy[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_set_style_text_font(s_lbl[i], &lv_font_montserrat_16, 0);
+            lv_obj_center(s_lbl[i]);
+            lv_obj_add_flag(s_zy[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
 
 /* -----------------------------------------------------------------------
  * Visual refresh
@@ -222,6 +295,9 @@ static void refresh_keys(void)
             else                             set_mod_look(i, COL_KEY_MOD, false);
         }
     }
+
+    /* Shift / Fn: the whole keyboard goes back to plain English. */
+    apply_zhuyin_layout(s_zy_enabled && !shift && !fn);
 }
 
 /* -----------------------------------------------------------------------
@@ -368,6 +444,19 @@ static void build_key(lv_obj_t *panel, const kb_key_t *k, int x, int y)
     lv_obj_set_style_text_color(lbl, lv_color_hex(special ? COL_TEXT_DIM : COL_TEXT), 0);
     lv_obj_center(lbl);
 
+    /* Zhuyin cap, hidden until apply_zhuyin_layout() shows it. */
+    s_zy[idx] = NULL;
+    const char *zy = (s_zy_enabled && (k->kind == KK_LETTER || k->kind == KK_NORMAL)) ? zhuyin_for(k->vk) : NULL;
+    if (zy) {
+        lv_obj_t *zl = lv_label_create(btn);
+        lv_label_set_text_static(zl, zy);
+        lv_obj_set_style_text_font(zl, &font_zhuyin_16, 0);
+        lv_obj_set_style_text_color(zl, lv_color_hex(COL_ZHUYIN), 0);
+        lv_obj_align(zl, LV_ALIGN_BOTTOM_RIGHT, -5, -3);
+        lv_obj_add_flag(zl, LV_OBJ_FLAG_HIDDEN);
+        s_zy[idx] = zl;
+    }
+
     s_btn[idx] = btn;
     s_lbl[idx] = lbl;
     s_def[idx] = k;
@@ -437,6 +526,8 @@ void ui_keyboard_show(void)
     /* Taps on the panel itself (gaps between keys) must not close it. */
     lv_obj_add_event_cb(panel, lv_event_stop_processing, LV_EVENT_CLICKED, NULL);
 
+    ui_keyboard_get_zhuyin();   /* load the setting from NVS once */
+    s_zy_shown = -1;            /* fresh widgets: apply the layout whatever it is */
     build_keys(panel);
     refresh_keys();
 

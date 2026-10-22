@@ -6,6 +6,7 @@
 #include "ui_deck.h"
 #include "ui_media.h"
 #include "ui_touchpad.h"
+#include "ui_keyboard.h"
 #include "ui_img_pool.h"
 #include "ui_log_view.h"
 #include "usb/usb_hid.h"
@@ -760,6 +761,8 @@ static const setting_node_t s_touchpad_menu[] = {
       ui_touchpad_get_btn_right_func, ui_touchpad_set_btn_right_func },
     { "Hide Labels",    SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
       ui_touchpad_get_hide_labels, ui_touchpad_set_hide_labels },
+    { "Keyboard Zhuyin", SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
+      ui_keyboard_get_zhuyin, ui_keyboard_set_zhuyin },
 };
 
 static const setting_node_t s_custom_menu[] = {
