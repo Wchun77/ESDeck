@@ -448,6 +448,27 @@ static void item_mode_to_monitor_cb(lv_event_t *e) { (void)e; switch_to_mode(UI_
 static void item_mode_to_media_cb(lv_event_t *e)   { (void)e; switch_to_mode(UI_MODE_MEDIA); }
 static void item_mode_to_touchpad_cb(lv_event_t *e) { (void)e; switch_to_mode(UI_MODE_TOUCHPAD); }
 
+/* Long press on the gear: pick a mode directly, without going through
+ * Settings > Mode. Reuses the SETTING_CHOICE popup with a node of its own;
+ * picking the current mode just closes it (switch_to_mode() no-op). */
+static void choice_open(const setting_node_t *node);   /* SETTING_CHOICE popup, defined below */
+
+static const char *const s_mode_pick_names[] = { "Deck", "Monitor", "Media", "Touchpad" };
+static const char *const *mode_pick_names(void) { return s_mode_pick_names; }
+static int  mode_pick_get(void)    { return (int)s_mode; }
+static void mode_pick_set(int idx) { if (valid_mode(idx)) switch_to_mode((ui_mode_t)idx); }
+
+static const setting_node_t s_mode_pick_node = {
+    "Switch Mode", SETTING_CHOICE, SETMASK_ALL, NULL, NULL, 0, NULL, NULL, NULL, NULL,
+    mode_pick_names, (int)(sizeof(s_mode_pick_names) / sizeof(s_mode_pick_names[0])),
+    mode_pick_get, mode_pick_set,
+};
+
+void ui_settings_mode_picker_open(void)
+{
+    choice_open(&s_mode_pick_node);
+}
+
 static void info_dismiss_cb(lv_event_t *e)
 {
     lv_obj_del(lv_event_get_target(e));

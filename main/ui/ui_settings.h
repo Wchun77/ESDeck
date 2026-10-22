@@ -56,6 +56,10 @@ ui_mode_t ui_settings_get_mode(void);
  * exists. */
 ui_mode_t ui_settings_boot_mode(void);
 
+/* Mode picker popup (Deck / Monitor / Media / Touchpad) -- opened by a
+ * long press on the sidebar gear, switches mode on pick. */
+void ui_settings_mode_picker_open(void);
+
 /* Set the current mode without any transition -- only for my_ui_init(),
  * right before it enters the boot mode. */
 void ui_settings_init_mode(ui_mode_t mode);

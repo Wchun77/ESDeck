@@ -81,9 +81,26 @@ void ui_hide_switching_screen(void)
 /* -----------------------------------------------------------------------
  * Gear button callback
  * ----------------------------------------------------------------------- */
+/* Gear: short tap opens Settings, long press opens the mode picker.
+ * SHORT_CLICKED (not CLICKED) so releasing after a long press doesn't
+ * open Settings too -- LVGL sends CLICKED regardless of a long press. */
 static void settings_btn_cb(lv_event_t *e)
 {
+    (void)e;
     ui_settings_select();
+}
+
+static void settings_btn_long_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_settings_mode_picker_open();
+    /* The finger is still down. The gear has PRESS_LOCK cleared, so LVGL
+     * would hand this same press over to the popup's full-screen backdrop
+     * that just appeared under it, and the release would count as a tap
+     * on the backdrop = close the popup right away. Ignore this press
+     * until it's released. */
+    lv_indev_t *indev = lv_indev_get_act();
+    if (indev) lv_indev_wait_release(indev);
 }
 
 /* -----------------------------------------------------------------------
@@ -117,7 +134,8 @@ static void ui_build_static(void)
     lv_obj_set_size(settings_btn, 64, 64);
     lv_obj_set_style_bg_color(settings_btn, lv_color_hex(0x2a2a2a), 0);
     lv_obj_set_style_radius(settings_btn, 8, 0);
-    lv_obj_add_event_cb(settings_btn, settings_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(settings_btn, settings_btn_cb, LV_EVENT_SHORT_CLICKED, NULL);
+    lv_obj_add_event_cb(settings_btn, settings_btn_long_cb, LV_EVENT_LONG_PRESSED, NULL);
     lv_obj_clear_flag(settings_btn, LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_t *settings_label = lv_label_create(settings_btn);
     lv_label_set_text(settings_label, LV_SYMBOL_SETTINGS);
