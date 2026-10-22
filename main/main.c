@@ -8,6 +8,7 @@
 #include "usb/usb_manager.h"
 #include "ble/ble_manager.h"
 #include "boot_anim.h"
+#include "lvgl_port.h"   /* lvgl_port_wait_render_idle() */
 #include "nvs_manager/nvs_manager.h"
 #include "dump_manager/dump_manager.h"
 #include "sys_log.h"
@@ -70,7 +71,7 @@ void app_main(void)
      * 空檔繼續跑,兩者維持平行、只是動畫優先,播完動畫就把優先權還原。 */
     UBaseType_t main_task_prio = uxTaskPriorityGet(NULL);
     vTaskPrioritySet(NULL, main_task_prio + 3);
-    boot_anim_play();     /* animation plays while preload task runs */
+    bool bl_on = boot_anim_play();     /* animation plays while preload task runs */
     vTaskPrioritySet(NULL, main_task_prio);
 
     ui_deck_preload_wait();   /* no-op when the preload wasn't started */
@@ -88,5 +89,14 @@ void app_main(void)
     if (lvgl_port_lock(-1)) {
         my_ui_init(boot_mode);
         lvgl_port_unlock();
+    }
+
+    if (!bl_on) {
+        /* Boot Animation = None: backlight is still off -- turn it on once
+         * the first UI frame is out (same as the OTA prompt), so no white
+         * flash / half-drawn screen. */
+        lvgl_port_wait_render_idle(1000);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        wavesahre_rgb_lcd_bl_on();
     }
 }

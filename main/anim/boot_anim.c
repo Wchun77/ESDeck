@@ -268,8 +268,8 @@ static void start_animations(void)
  * Multiple animation sets can live side by side under SD_PATH_ASSETS_BOOT,
  * one subfolder each, e.g. assets/boot/xmas/frame_0000.jpg, frame_0001.jpg,
  * ... The active set's folder name is stored in NVS (CFG_NVS_KEY_BOOT_ANIM,
- * settings menu -> Boot Animation); "none"/unset disables the custom
- * animation entirely and falls back to the built-in procedural one below.
+ * settings menu -> Boot Animation); "default"/unset plays the built-in
+ * procedural one below instead, "none" plays nothing at all.
  * Keeping each set in its own folder also means swapping animations never
  * mixes leftover frames from a previous, differently-sized set.
  *
@@ -600,15 +600,16 @@ static void prefetch_stop(void)
 }
 
 /* 讀NVS裡使用者選定的開機動畫子資料夾名稱,同時回傳原始名稱(給flash
- * 快取比對用)跟組好的SD完整路徑。沒設定過、或使用者選的是"none",
- * 回傳false(交給程序動畫)。 */
+ * 快取比對用)跟組好的SD完整路徑。沒設定過、或使用者選的是"default"/
+ * "none",回傳false("none"由boot_anim_play()自己先擋掉)。 */
 static bool get_selected_anim(char *name_out, size_t name_out_size,
                                char *dir_out, size_t dir_out_size)
 {
     if (!nvs_manager_get_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_BOOT_ANIM, name_out, name_out_size)) {
         return false;   /* 從沒選過 */
     }
-    if (name_out[0] == '\0' || strcmp(name_out, "none") == 0) {
+    if (name_out[0] == '\0' || strcmp(name_out, "none") == 0 ||
+        strcmp(name_out, "default") == 0) {
         return false;
     }
     snprintf(dir_out, dir_out_size, "%s/%s", SD_PATH_ASSETS_BOOT, name_out);
@@ -1082,7 +1083,7 @@ static bool play_custom_boot_anim(void)
     static char name[64];
     static char anim_dir[288];
     if (!get_selected_anim(name, sizeof(name), anim_dir, sizeof(anim_dir))) {
-        return false;   /* 使用者選了 None,或還沒選過 */
+        return false;   /* 使用者選了 Default,或還沒選過 */
     }
 
     jpeg_prewarm_wait();   /* 如果main.c有先呼叫boot_anim_prewarm_jpeg,這裡通常瞬間返回 */
@@ -1127,12 +1128,24 @@ static bool play_custom_boot_anim(void)
 /* -----------------------------------------------------------------------
  * Public entry point
  * ----------------------------------------------------------------------- */
-void boot_anim_play(void)
+/* 使用者選了 None:完全不播 */
+static bool anim_disabled(void)
 {
-    if (play_custom_boot_anim()) return;
+    char v[16];
+    return nvs_manager_get_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_BOOT_ANIM, v, sizeof(v)) &&
+           strcmp(v, "none") == 0;
+}
+
+bool boot_anim_play(void)
+{
+    if (anim_disabled()) {
+        ESP_LOGI(TAG, "boot animation: none");
+        return false;   /* 背光維持關閉,交給呼叫端在UI畫好後再開 */
+    }
+    if (play_custom_boot_anim()) return true;
 
     /* 沒有自訂動畫(或PSRAM/解碼失敗) -> 用原本內建的程序動畫 */
-    if (!lvgl_port_lock(-1)) return;
+    if (!lvgl_port_lock(-1)) return true;   /* 背光沒開,但這種情況實際上不會發生 */
     build_boot_screen();
     start_animations();
     lvgl_port_unlock();
@@ -1142,7 +1155,8 @@ void boot_anim_play(void)
 
     vTaskDelay(pdMS_TO_TICKS(2150));
 
-    if (!lvgl_port_lock(-1)) return;
+    if (!lvgl_port_lock(-1)) return true;
     lv_obj_clean(lv_scr_act());
     lvgl_port_unlock();
+    return true;
 }

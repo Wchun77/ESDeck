@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>
 
 #define BOOT_ANIM_STYLE 2
 
@@ -9,4 +10,7 @@
  * 關係,decode第一幀時會自動補做初始化,只是會變成同步等待。 */
 void boot_anim_prewarm_jpeg(void);
 
-void boot_anim_play(void);
+/* 播開機動畫(NVS CFG_NVS_KEY_BOOT_ANIM:SD上的資料夾名稱 / "default"或
+ * 沒設定 = 內建程序動畫 / "none" = 不播)。有播的話會開背光並回傳true;
+ * "none"回傳false,背光維持關閉,由呼叫端在UI畫好後自己開。 */
+bool boot_anim_play(void);

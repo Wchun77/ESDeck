@@ -615,8 +615,8 @@ static void item_hid_status_cb(lv_event_t *e)
  *
  * Each animation set lives in its own subfolder under SD_PATH_ASSETS_BOOT
  * (e.g. assets/boot/xmas/frame_0000.jpg...). The chosen folder name is
- * stored in NVS (CFG_NVS_KEY_BOOT_ANIM); "none" disables the custom
- * animation and falls back to the built-in one (see boot_anim.c).
+ * stored in NVS (CFG_NVS_KEY_BOOT_ANIM); "default" (or unset) plays the
+ * built-in animation, "none" plays nothing (see boot_anim.c).
  * ----------------------------------------------------------------------- */
 #define BOOT_ANIM_LIST_MAX  12
 #define BOOT_ANIM_NAME_LEN  32
@@ -679,7 +679,7 @@ static void item_boot_anim_cb(lv_event_t *e)
     char selected[BOOT_ANIM_NAME_LEN];
     if (!nvs_manager_get_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_BOOT_ANIM, selected, sizeof(selected)) ||
         selected[0] == '\0') {
-        snprintf(selected, sizeof(selected), "none");
+        snprintf(selected, sizeof(selected), "default");
     }
 
     lv_obj_t *scr = lv_scr_act();
@@ -712,6 +712,7 @@ static void item_boot_anim_cb(lv_event_t *e)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
 
     add_pick_item(box, "None", selected, "none");
+    add_pick_item(box, "Default", selected, "default");
     for (int i = 0; i < s_boot_anim_count; i++) {
         add_pick_item(box, s_boot_anim_names[i], selected, s_boot_anim_names[i]);
     }
