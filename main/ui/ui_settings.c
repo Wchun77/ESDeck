@@ -88,8 +88,8 @@ static lv_obj_t *s_content        = NULL;  /* padded flex column inside s_panel,
 static lv_obj_t *s_list           = NULL;  /* item list inside the page (paged, see page_btn_cb) */
 static lv_obj_t *s_pg_up_btn      = NULL;  /* header: previous / next page of s_list */
 static lv_obj_t *s_pg_dn_btn      = NULL;
-static lv_obj_t *s_back_btn       = NULL;
-static lv_obj_t *s_back_lbl       = NULL;  /* back_btn's glyph -- swaps LV_SYMBOL_LEFT/CLOSE with menu depth */
+static lv_obj_t *s_close_btn      = NULL;  /* header, far left: always closes Settings */
+static lv_obj_t *s_back_btn       = NULL;  /* header, next to it: up one menu level, hidden at the root */
 static lv_obj_t *s_breadcrumb_lbl = NULL;
 static lv_obj_t *s_gear_btn       = NULL;  /* sidebar gear button -- highlighted like a page button */
 static lv_obj_t *s_gear_glyph     = NULL;  /* LV_SYMBOL_SETTINGS label, gear_btn's child 0 -- hidden/shown as side_icon comes and goes */
@@ -898,9 +898,10 @@ static lv_obj_t *value_step_btn(lv_obj_t *row, const setting_node_t *node, const
 
 /* Close Settings entirely and resume whatever mode is active -- the
  * counterpart to the deselect_current() call in ui_settings_select().
- * Called from the root-level back button (shown as an X, see
- * render_current_level()) so there is always a way out of Settings, even
- * for modes like Media that have no page list to tap instead. */
+ * Called from the header's X button (s_close_btn), shown at every menu
+ * level, so there is always a one-tap way out of Settings -- even from
+ * deep inside a submenu, and for modes like Media that have no page list
+ * to tap instead. */
 static void close_settings(void)
 {
     ui_settings_deselect();
@@ -915,12 +916,16 @@ static void close_settings(void)
         ui_media_reselect_current();
 }
 
+static void close_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    close_settings();
+}
+
 static void back_btn_cb(lv_event_t *e)
 {
-    if (s_stack_depth == 0) {
-        close_settings();
-        return;
-    }
+    (void)e;
+    if (s_stack_depth == 0) return;   /* hidden at the root anyway */
     s_stack_depth--;
     render_current_level();
 }
@@ -1138,17 +1143,15 @@ static void render_current_level(void)
         }
     }
 
-    /* Root level: back_btn doubles as a close button (X) instead of being
-     * hidden -- Media has no page list to pick from to leave Settings the
-     * old way, so there needs to be an explicit close everywhere. */
+    /* X is always there; the back arrow only below the root. */
     if (s_stack_depth == 0) {
         lv_label_set_text(s_breadcrumb_lbl, "Settings");
-        lv_label_set_text(s_back_lbl, LV_SYMBOL_CLOSE);
+        lv_obj_add_flag(s_back_btn, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_label_set_text(s_breadcrumb_lbl, s_menu_stack_label[s_stack_depth]);
-        lv_label_set_text(s_back_lbl, LV_SYMBOL_LEFT);
+        lv_obj_clear_flag(s_back_btn, LV_OBJ_FLAG_HIDDEN);
     }
-    lv_obj_clear_flag(s_back_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_close_btn, LV_OBJ_FLAG_HIDDEN);
     update_page_btns();
 }
 
@@ -1454,10 +1457,10 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
     lv_obj_clear_flag(s_content, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_content, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    /* Header: back button + centered breadcrumb. The back button is always
-     * visible once a level has been rendered -- it shows LV_SYMBOL_LEFT to
-     * go up one menu level, or LV_SYMBOL_CLOSE at the root to close
-     * Settings entirely (see render_current_level() / close_settings()). */
+    /* Header: [X][<]  breadcrumb (centered)  [^][v]
+     * X always closes Settings (close_settings()), from any menu level;
+     * < goes up one level and is hidden at the root (see
+     * render_current_level()). */
     lv_obj_t *header = lv_obj_create(s_content);
     lv_obj_set_size(header, LV_PCT(100), 40);
     lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
@@ -1465,26 +1468,18 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
     lv_obj_set_style_pad_all(header, 0, 0);
     lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_back_btn = lv_btn_create(header);
-    lv_obj_set_size(s_back_btn, 36, 36);
-    lv_obj_align(s_back_btn, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_bg_color(s_back_btn, lv_color_hex(0x2a2a2a), 0);
-    lv_obj_set_style_bg_opa(s_back_btn, LV_OPA_50, 0);
-    lv_obj_set_style_bg_color(s_back_btn, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
-    lv_obj_set_style_bg_grad_dir(s_back_btn, LV_GRAD_DIR_NONE, 0);
-    lv_obj_set_style_shadow_width(s_back_btn, 0, 0);
-    lv_obj_set_style_outline_width(s_back_btn, 0, 0);
-    lv_obj_set_style_radius(s_back_btn, 6, 0);
-    lv_obj_clear_flag(s_back_btn, LV_OBJ_FLAG_PRESS_LOCK);
+    s_close_btn = make_header_btn(header, LV_SYMBOL_CLOSE);
+    lv_obj_align(s_close_btn, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_add_event_cb(s_close_btn, close_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(s_close_btn, LV_OBJ_FLAG_HIDDEN);
+
+    s_back_btn = make_header_btn(header, LV_SYMBOL_LEFT);
+    lv_obj_align(s_back_btn, LV_ALIGN_LEFT_MID, 44, 0);   /* same 44 px step as the page buttons */
     lv_obj_add_event_cb(s_back_btn, back_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_flag(s_back_btn, LV_OBJ_FLAG_HIDDEN);
-    s_back_lbl = lv_label_create(s_back_btn);
-    lv_label_set_text(s_back_lbl, LV_SYMBOL_LEFT);
-    lv_obj_center(s_back_lbl);
 
-    /* Centered on the page rather than balanced against the back button's
-     * width -- simpler, and reads fine whether or not the back button is
-     * showing. */
+    /* Centered on the page rather than balanced against the header
+     * buttons' width -- simpler, and reads fine either way. */
     s_breadcrumb_lbl = lv_label_create(header);
     lv_label_set_text(s_breadcrumb_lbl, "Settings");
     lv_obj_set_style_text_color(s_breadcrumb_lbl, lv_color_hex(0xffffff), 0);
