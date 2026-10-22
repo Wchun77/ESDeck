@@ -259,6 +259,11 @@ void usb_hid_ota_erased(void);                       /* worker: erase done */
 int  usb_hid_ota_read(uint8_t *buf, size_t max);    /* worker: > 0 bytes, 0 = end, < 0 = error/timeout */
 void usb_hid_ota_finish(bool ok);                    /* worker: DONE / ERROR to the PC, ends the session */
 
+/* True from BEGIN until usb_hid_ota_finish(). While set, the PC's
+ * Monitor / Media data and images are ignored (only time sync and mode
+ * query still go through), and Touchpad mode stops sending input. */
+bool usb_hid_ota_active(void);
+
 /* Send monitor subscribe / unsubscribe control IN report */
 void usb_hid_monitor_subscribe(void);
 void usb_hid_monitor_unsubscribe(void);

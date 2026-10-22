@@ -480,7 +480,8 @@ static void apply_layout(void)
  * is touching: not under Settings, not under the keyboard overlay. */
 static bool input_enabled(void)
 {
-    return s_page && !lv_obj_has_flag(s_page, LV_OBJ_FLAG_HIDDEN) && !ui_keyboard_is_open();
+    return s_page && !lv_obj_has_flag(s_page, LV_OBJ_FLAG_HIDDEN) && !ui_keyboard_is_open() &&
+           !usb_hid_ota_active();   /* firmware update screen is up */
 }
 
 static bool obj_hit(lv_obj_t *obj, int16_t x, int16_t y)

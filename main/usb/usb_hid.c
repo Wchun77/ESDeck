@@ -875,6 +875,8 @@ static void ota_data(const uint8_t *buf, uint16_t len)
     s_ota_rx += n;
 }
 
+bool usb_hid_ota_active(void) { return s_ota_active; }
+
 void usb_hid_ota_erased(void)
 {
     ota_status(HID_OTA_ST_ERASED, 0);
@@ -1402,6 +1404,14 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
     if (bufsize < 1) return;
 
     uint8_t cmd = buffer[0];
+
+    /* Firmware update running: only the update itself, time sync and the
+     * mode query get through -- no Monitor stats / Media progress, level or
+     * images to redraw (and decode) behind the update screen. */
+    if (s_ota_active &&
+        cmd != HID_OTA_CMD_DATA && cmd != HID_OTA_CMD_BEGIN && cmd != HID_OTA_CMD_ABORT &&
+        cmd != HID_MON_CMD_TIME && cmd != HID_MON_CMD_QUERY)
+        return;
 
     if (cmd == HID_MON_CMD_DATA && bufsize >= 15) {
         if (s_monitor_data_cb)
