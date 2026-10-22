@@ -76,6 +76,7 @@ typedef struct setting_node_s {
     int                         (*choice_get_cb)(void);
     void                        (*choice_set_cb)(int idx);
     bool                        (*locked_cb)(void);      /* SETTING_TOGGLE, optional: true = shown on and disabled */
+    bool                        (*visible_cb)(void);     /* optional, any type: false = row hidden (on top of mode_mask) */
 } setting_node_t;
 
 /* Element count of a static array (menu tables, choice name lists). */
@@ -729,20 +730,23 @@ static void item_boot_anim_cb(lv_event_t *e)
  * elsewhere, add an optional label_fn to setting_node_t instead of
  * growing this pattern.
  * ----------------------------------------------------------------------- */
-/* Touchpad-only rows live in Custom too; mode_mask hides them elsewhere,
- * so Custom's child_count below counts every row, shown or not. */
-/* Touchpad mode's own preferences (Custom > Touchpad), all persisted in
- * NVS by ui_touchpad.c. */
-/* Page 1 (7 rows): how input feels. Page 2: what's on screen. */
-static const setting_node_t s_touchpad_menu[] = {
+/* Touchpad-only rows live in Custom too; mode_mask hides them elsewhere.
+ *
+ * Custom > Touchpad: Input Mode first -- it decides what the rest does.
+ * With "Windows Touchpad" (PTP) Windows does pointer / taps / gestures, so
+ * Pointer & Gestures is swapped for a pointer to Windows' own settings,
+ * and Scrolling only stays while the sidebar wheel (which still uses it)
+ * is shown. All persisted in NVS by ui_touchpad.c. */
+static bool tp_not_ptp(void)  { return ui_touchpad_get_input_mode() != TP_INPUT_PTP; }
+static bool tp_is_ptp(void)   { return ui_touchpad_get_input_mode() == TP_INPUT_PTP; }
+static bool tp_scroll_used(void)
+{
+    return tp_not_ptp() || ui_touchpad_get_sidebar_mode() == TP_SIDEBAR_WHEEL;
+}
+
+static const setting_node_t s_tp_gesture_menu[] = {
     { "Cursor Speed",   SETTING_VALUE,  SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL,
       ui_touchpad_cursor_speed_text, ui_touchpad_cursor_speed_step },
-    { "Scroll Speed",   SETTING_VALUE,  SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL,
-      ui_touchpad_scroll_speed_text, ui_touchpad_scroll_speed_step },
-    { "Natural Scroll", SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
-      ui_touchpad_get_natural_scroll, ui_touchpad_set_natural_scroll },
-    { "Scroll Inertia", SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
-      ui_touchpad_get_inertia, ui_touchpad_set_inertia },
     { "Tap to Click",   SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
       ui_touchpad_get_tap_click, ui_touchpad_set_tap_click,
       NULL, NULL, NULL, 0, NULL, NULL, ui_touchpad_tap_click_forced },
@@ -754,9 +758,19 @@ static const setting_node_t s_touchpad_menu[] = {
       ui_touchpad_get_swipe3_mode, ui_touchpad_set_swipe3_mode },
     { "Pinch to Zoom",  SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
       ui_touchpad_get_pinch_zoom, ui_touchpad_set_pinch_zoom },
-    { "Input Mode",     SETTING_CHOICE, SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL, NULL, NULL,
-      ui_touchpad_input_mode_names, TP_INPUT_COUNT,
-      ui_touchpad_get_input_mode, ui_touchpad_set_input_mode },
+};
+
+/* Two-finger scrolling on the pad and the sidebar wheel strip. */
+static const setting_node_t s_tp_scroll_menu[] = {
+    { "Scroll Speed",   SETTING_VALUE,  SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL,
+      ui_touchpad_scroll_speed_text, ui_touchpad_scroll_speed_step },
+    { "Natural Scroll", SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
+      ui_touchpad_get_natural_scroll, ui_touchpad_set_natural_scroll },
+    { "Scroll Inertia", SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
+      ui_touchpad_get_inertia, ui_touchpad_set_inertia },
+};
+
+static const setting_node_t s_tp_layout_menu[] = {
     { "Sidebar",        SETTING_CHOICE, SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL, NULL, NULL,
       ui_touchpad_sidebar_mode_names, TP_SIDEBAR_COUNT,
       ui_touchpad_get_sidebar_mode, ui_touchpad_set_sidebar_mode },
@@ -770,18 +784,40 @@ static const setting_node_t s_touchpad_menu[] = {
       ui_touchpad_get_btn_right_func, ui_touchpad_set_btn_right_func },
     { "Hide Labels",    SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
       ui_touchpad_get_hide_labels, ui_touchpad_set_hide_labels },
-    { "Keyboard Zhuyin", SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
+};
+
+static const setting_node_t s_touchpad_menu[] = {
+    { "Input Mode",     SETTING_CHOICE, SETMASK_TOUCHPAD, NULL, NULL, 0, NULL, NULL, NULL, NULL,
+      ui_touchpad_input_mode_names, TP_INPUT_COUNT,
+      ui_touchpad_get_input_mode, ui_touchpad_set_input_mode },
+    { .label = "Pointer & Gestures", .type = SETTING_SUBMENU, .mode_mask = SETMASK_TOUCHPAD,
+      .children = s_tp_gesture_menu, .child_count = COUNT_OF(s_tp_gesture_menu),
+      .visible_cb = tp_not_ptp },
+    { .label = "Gestures: Windows Settings", .type = SETTING_LABEL, .mode_mask = SETMASK_TOUCHPAD,
+      .visible_cb = tp_is_ptp },
+    { .label = "Scrolling", .type = SETTING_SUBMENU, .mode_mask = SETMASK_TOUCHPAD,
+      .children = s_tp_scroll_menu, .child_count = COUNT_OF(s_tp_scroll_menu),
+      .visible_cb = tp_scroll_used },
+    { .label = "Layout", .type = SETTING_SUBMENU, .mode_mask = SETMASK_TOUCHPAD,
+      .children = s_tp_layout_menu, .child_count = COUNT_OF(s_tp_layout_menu) },
+};
+
+/* Mini keyboard (Touchpad mode's sidebar keyboard button). */
+static const setting_node_t s_keyboard_menu[] = {
+    { "Show Zhuyin",    SETTING_TOGGLE, SETMASK_TOUCHPAD, NULL, NULL, 0,
       ui_keyboard_get_zhuyin, ui_keyboard_set_zhuyin },
 };
 
 static const setting_node_t s_custom_menu[] = {
     { "Select Config",  SETTING_ACTION, SETMASK_ALL, item_config_cb,    NULL, 0 },
-    { "Boot Animation", SETTING_ACTION, SETMASK_ALL, item_boot_anim_cb, NULL, 0 },
     { "Boot Mode",      SETTING_CHOICE, SETMASK_ALL, NULL, NULL, 0, NULL, NULL, NULL, NULL,
       ui_settings_boot_mode_names, UI_BOOT_MODE_CHOICES,
       ui_settings_get_boot_mode_choice, ui_settings_set_boot_mode_choice },
+    { "Boot Animation", SETTING_ACTION, SETMASK_ALL, item_boot_anim_cb, NULL, 0 },
     { "Touchpad",       SETTING_SUBMENU, SETMASK_TOUCHPAD, NULL, s_touchpad_menu,
       COUNT_OF(s_touchpad_menu) },
+    { "Keyboard",       SETTING_SUBMENU, SETMASK_TOUCHPAD, NULL, s_keyboard_menu,
+      COUNT_OF(s_keyboard_menu) },
 };
 
 static const setting_node_t s_system_menu[] = {
@@ -1049,6 +1085,13 @@ static int                   s_page_idx = 0;
 static int                   s_page_cnt = 1;
 static const setting_node_t *s_page_arr = NULL;   /* level the page index belongs to */
 
+/* Row shown in this mode: mode_mask, then the node's own visible_cb. */
+static bool node_shown(const setting_node_t *node, uint8_t mode_bit)
+{
+    if (!(node->mode_mask & mode_bit)) return false;
+    return !node->visible_cb || node->visible_cb();
+}
+
 static int rows_per_page(void)
 {
     lv_coord_t h = lv_obj_get_content_height(s_list);
@@ -1123,7 +1166,7 @@ static void render_current_level(void)
     }
     int visible = 0;
     for (int i = 0; i < count; i++)
-        if (arr[i].mode_mask & mode_bit) visible++;
+        if (node_shown(&arr[i], mode_bit)) visible++;
     int per_page = rows_per_page();
     s_page_cnt = visible > 0 ? (visible + per_page - 1) / per_page : 1;
     if (s_page_idx >= s_page_cnt) s_page_idx = s_page_cnt - 1;
@@ -1133,7 +1176,7 @@ static void render_current_level(void)
     int vis_idx = -1;
     for (int i = 0; i < count; i++) {
         const setting_node_t *node = &arr[i];
-        if (!(node->mode_mask & mode_bit)) continue;
+        if (!node_shown(node, mode_bit)) continue;
         vis_idx++;
         if (vis_idx < first || vis_idx >= last) continue;
 
