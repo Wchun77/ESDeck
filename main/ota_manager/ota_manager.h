@@ -44,6 +44,23 @@ typedef void (*ota_progress_cb_t)(uint8_t percent, void *user_data);
  * screen instead of stuttering a live animation. */
 typedef void (*ota_phase_cb_t)(void *user_data);
 
+/* Source of the firmware bytes for ota_apply_stream(): fill buf with up to
+ * max bytes. Return the byte count (> 0), 0 at the end of the image, or
+ * < 0 on error (aborts the update). May block. */
+typedef int (*ota_read_fn_t)(uint8_t *buf, size_t max, void *ctx);
+
+/*
+ * Core of every update: flash `size` bytes taken from read_fn to the
+ * inactive OTA slot (bulk erase first, see ota_phase_cb_t), verify, set it
+ * as the next boot partition. Returns true on success (caller reboots).
+ * check_project: also reject an image whose esp_app_desc project name
+ * differs from the running firmware's (a wrong .bin picked on the PC).
+ */
+bool ota_apply_stream(size_t size, ota_read_fn_t read_fn, void *read_ctx,
+                      bool check_project,
+                      ota_phase_cb_t on_erase_done,
+                      ota_progress_cb_t progress_cb, void *user_data);
+
 /*
  * Flash `path` (as found by ota_check_update) to the inactive OTA slot.
  * On success: the file is deleted from the SD card, the new slot is set

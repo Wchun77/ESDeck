@@ -6,6 +6,7 @@
 #include "class/hid/hid_device.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/stream_buffer.h"
 #include "esp_heap_caps.h"
 #include "esp_jpeg_dec.h"
 #include "lvgl.h"
@@ -794,6 +795,124 @@ bool usb_hid_send_action(const char *data, size_t len)
     return true;
 }
 
+/* -----------------------------------------------------------------------
+ * Firmware update over HID (HID_OTA_*). Chunks arrive in the TinyUSB task
+ * (tud_hid_set_report_cb) and go into a stream buffer; the worker started
+ * by the UI (ui_ota_dialog.c) drains it with usb_hid_ota_read(). Flow
+ * control is the PC's job: it never has more than HID_OTA_WINDOW bytes
+ * beyond the last ACK in flight, and the buffer holds twice that, so the
+ * USB side never has to wait (it can't block the TinyUSB task).
+ * ----------------------------------------------------------------------- */
+#define OTA_SB_SIZE      (HID_OTA_WINDOW * 2)
+#define OTA_ACK_STEP     4096
+#define OTA_READ_TMO_MS  5000
+
+static usb_hid_ota_begin_cb_t s_ota_begin_cb = NULL;
+static StreamBufferHandle_t   s_ota_sb       = NULL;
+static StaticStreamBuffer_t   s_ota_sb_ctl;
+static uint8_t               *s_ota_sb_mem   = NULL;
+static volatile bool          s_ota_active   = false;
+static volatile uint8_t       s_ota_err      = 0;     /* set by the USB side, read by the worker */
+static uint32_t               s_ota_total    = 0;
+static uint32_t               s_ota_rx       = 0;     /* USB side */
+static uint16_t               s_ota_seq      = 0;     /* USB side: next expected chunk */
+static uint32_t               s_ota_used     = 0;     /* worker side */
+static uint32_t               s_ota_acked    = 0;     /* worker side */
+
+void usb_hid_set_ota_begin_cb(usb_hid_ota_begin_cb_t cb) { s_ota_begin_cb = cb; }
+
+/* Status IN report. tries > 1 (worker task only) retries for a while if
+ * the endpoint is busy -- a lost ACK would leave the PC waiting. From the
+ * TinyUSB task (BEGIN errors) use 1: waiting there would stall the very
+ * task that completes the transfer; the PC times out instead. */
+static void ota_status_n(uint8_t st, uint32_t val, int tries)
+{
+    uint8_t r[6] = { HID_OTA_PAGE, st,
+                     (uint8_t)val, (uint8_t)(val >> 8), (uint8_t)(val >> 16), (uint8_t)(val >> 24) };
+    for (int i = 0; i < tries; i++) {
+        if (s_active && vendor_send(r, sizeof(r))) return;
+        if (i + 1 < tries) vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    ESP_LOGW(TAG, "OTA status 0x%02X not sent", st);
+}
+
+static void ota_status(uint8_t st, uint32_t val) { ota_status_n(st, val, 100); }
+
+static void ota_begin(uint32_t size)
+{
+    if (s_ota_active) { ota_status_n(HID_OTA_ST_ERROR, HID_OTA_ERR_BUSY, 1); return; }
+    if (size == 0 || size > 0x400000) { ota_status_n(HID_OTA_ST_ERROR, HID_OTA_ERR_SIZE, 1); return; }
+    if (!s_ota_begin_cb) { ota_status_n(HID_OTA_ST_ERROR, HID_OTA_ERR_NO_UI, 1); return; }
+
+    if (!s_ota_sb) {
+        s_ota_sb_mem = heap_caps_malloc(OTA_SB_SIZE + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_ota_sb_mem) { ota_status_n(HID_OTA_ST_ERROR, HID_OTA_ERR_FLASH, 1); return; }
+        s_ota_sb = xStreamBufferCreateStatic(OTA_SB_SIZE, 1, s_ota_sb_mem, &s_ota_sb_ctl);
+    }
+    xStreamBufferReset(s_ota_sb);
+
+    s_ota_total = size;
+    s_ota_rx = s_ota_used = s_ota_acked = 0;
+    s_ota_seq = 0;
+    s_ota_err = 0;
+    s_ota_active = true;
+    ESP_LOGI(TAG, "OTA from PC: %lu bytes", (unsigned long)size);
+    s_ota_begin_cb(size);
+}
+
+static void ota_data(const uint8_t *buf, uint16_t len)
+{
+    if (!s_ota_active || s_ota_err || len < 3) return;
+    uint16_t seq = (uint16_t)(buf[0] | (buf[1] << 8));
+    if (seq != s_ota_seq) { s_ota_err = HID_OTA_ERR_SEQ; return; }
+    s_ota_seq++;
+
+    uint32_t n = len - 2;
+    if (n > HID_OTA_CHUNK) n = HID_OTA_CHUNK;
+    if (n > s_ota_total - s_ota_rx) n = s_ota_total - s_ota_rx;   /* drop the last chunk's padding */
+    if (n == 0) return;
+    if (xStreamBufferSend(s_ota_sb, buf + 2, n, 0) != n) { s_ota_err = HID_OTA_ERR_OVERFLOW; return; }
+    s_ota_rx += n;
+}
+
+void usb_hid_ota_erased(void)
+{
+    ota_status(HID_OTA_ST_ERASED, 0);
+}
+
+int usb_hid_ota_read(uint8_t *buf, size_t max)
+{
+    if (!s_ota_active) return -1;
+    if (s_ota_used >= s_ota_total) return 0;
+
+    size_t want = s_ota_total - s_ota_used;
+    if (want > max) want = max;
+
+    /* Wait for data in short slices so an error flagged by the USB side
+     * (or an ABORT) is noticed quickly; give up after OTA_READ_TMO_MS of
+     * silence (PC gone). */
+    size_t n = 0;
+    for (int waited = 0; n == 0; waited += 100) {
+        if (s_ota_err) return -1;
+        if (waited >= OTA_READ_TMO_MS) { ESP_LOGE(TAG, "OTA: no data from PC"); return -1; }
+        n = xStreamBufferReceive(s_ota_sb, buf, want, pdMS_TO_TICKS(100));
+    }
+
+    s_ota_used += n;
+    if (s_ota_used - s_ota_acked >= OTA_ACK_STEP || s_ota_used == s_ota_total) {
+        s_ota_acked = s_ota_used;
+        ota_status(HID_OTA_ST_ACK, s_ota_used);
+    }
+    return (int)n;
+}
+
+void usb_hid_ota_finish(bool ok)
+{
+    uint8_t err = s_ota_err ? s_ota_err : HID_OTA_ERR_FLASH;
+    ota_status(ok ? HID_OTA_ST_DONE : HID_OTA_ST_ERROR, ok ? 0 : err);
+    s_ota_active = false;
+}
+
 void usb_hid_monitor_subscribe(void)
 {
     if (!s_active || !tud_hid_ready()) return;
@@ -1331,6 +1450,16 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
         uint8_t generation = buffer[1];
         uint8_t kind       = buffer[2];
         img_recv_chunk(generation, kind, buffer + 3, bufsize - 3);
+    }
+    else if (cmd == HID_OTA_CMD_DATA) {
+        ota_data(buffer + 1, bufsize - 1);
+    }
+    else if (cmd == HID_OTA_CMD_BEGIN && bufsize >= 5) {
+        ota_begin((uint32_t)buffer[1] | ((uint32_t)buffer[2] << 8) |
+                  ((uint32_t)buffer[3] << 16) | ((uint32_t)buffer[4] << 24));
+    }
+    else if (cmd == HID_OTA_CMD_ABORT) {
+        if (s_ota_active) s_ota_err = HID_OTA_ERR_FLASH;
     }
     else if (cmd == HID_MEDIA_CMD_NOWPLAYING_IMG_END && bufsize >= 3) {
         uint8_t generation = buffer[1];

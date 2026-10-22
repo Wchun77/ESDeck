@@ -3,6 +3,7 @@
 #include "ui_monitor.h"
 #include "ui_media.h"
 #include "ui_touchpad.h"
+#include "ui_ota_dialog.h"
 #include "ui_settings.h"
 #include "ui_toast.h"
 #include "ui_font_cjk.h"
@@ -192,6 +193,7 @@ void my_ui_init(ui_mode_t mode)
 
     ui_build_static();
     ui_toast_init();
+    ui_ota_hid_init();   /* firmware updates pushed from ESDeckPC */
 
     /* CJK font is only ever consumed by ble_manager.c's ANCS toast path --
      * skip the ~13s SD load and the permanent font-bitmap footprint

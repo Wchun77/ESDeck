@@ -18,3 +18,11 @@
  * and off again before returning (screen left black).
  */
 void ui_ota_check_and_prompt(void);
+
+/*
+ * Accept firmware updates pushed from ESDeckPC over HID (usb_hid.h,
+ * HID_OTA_*): shows the same progress screen as the SD update, flashes,
+ * and reboots on success; on failure shows an error and returns to the
+ * UI. Call once at boot after the UI exists (my_ui_init()).
+ */
+void ui_ota_hid_init(void);

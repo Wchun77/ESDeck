@@ -2,6 +2,7 @@
 #include "ota_manager/ota_manager.h"
 #include "lvgl_port.h"
 #include "waveshare_rgb_lcd_port.h"   /* backlight on/off */
+#include "usb/usb_hid.h"              /* update from ESDeckPC */
 #include "lvgl.h"
 
 #include "esp_log.h"
@@ -326,4 +327,85 @@ void ui_ota_check_and_prompt(void)
      * its own first frame is drawn. */
     vTaskDelay(pdMS_TO_TICKS(100));
     wavesahre_rgb_lcd_bl_off();
+}
+
+/* -----------------------------------------------------------------------
+ * Update from ESDeckPC over HID -- same progress screen and flash path as
+ * the SD update, the bytes just come from usb_hid_ota_read(). No confirm
+ * dialog: the user already picked the file and confirmed on the PC, and
+ * the image's project name is checked before anything is written.
+ * ----------------------------------------------------------------------- */
+static int hid_read(uint8_t *buf, size_t max, void *ctx)
+{
+    (void)ctx;
+    return usb_hid_ota_read(buf, max);
+}
+
+static void on_hid_erase_done(void *user_data)
+{
+    usb_hid_ota_erased();
+    on_ota_erase_done(user_data);
+}
+
+static void hid_ota_task(void *arg)
+{
+    size_t size = (size_t)(uintptr_t)arg;
+
+    /* Same as the SD flow: progress screen fully on the panel before the
+     * erase starts (flash and PSRAM share the bus). */
+    lvgl_port_wait_render_idle(1000);
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    bool ok = ota_apply_stream(size, hid_read, NULL, true,
+                               on_hid_erase_done, on_ota_progress, NULL);
+    usb_hid_ota_finish(ok);
+
+    if (ok) {
+        if (lvgl_port_lock(-1)) {
+            lv_label_set_text(s_status_lbl, "Done -- rebooting...");
+            lvgl_port_unlock();
+        }
+        vTaskDelay(pdMS_TO_TICKS(800));
+        esp_restart();
+        /* not reached */
+    }
+
+    ESP_LOGE(TAG, "OTA from PC failed");
+    if (lvgl_port_lock(-1)) {
+        lv_label_set_text(s_status_lbl, "Update failed. Current firmware kept.");
+        lv_obj_set_style_text_color(s_status_lbl, lv_color_hex(0xff6666), 0);
+        lvgl_port_unlock();
+    }
+    vTaskDelay(pdMS_TO_TICKS(2500));
+
+    if (lvgl_port_lock(-1)) {
+        if (s_dim) {
+            lv_obj_del(s_dim);
+            s_dim = NULL;
+        }
+        s_status_lbl = NULL;
+        s_bar_bg     = NULL;
+        s_bar        = NULL;
+        s_pct_lbl    = NULL;
+        lvgl_port_unlock();
+    }
+    vTaskDelete(NULL);
+}
+
+static void hid_ota_begin_async(void *arg)
+{
+    build_progress_screen();
+    lv_label_set_text(s_status_lbl, "Receiving from PC (erasing flash)...");
+    xTaskCreate(hid_ota_task, "ota_hid", 8192, arg, 3, NULL);
+}
+
+/* usb_hid's BEGIN callback -- TinyUSB task, so hop to the LVGL thread. */
+static void on_hid_ota_begin(uint32_t size)
+{
+    lv_async_call(hid_ota_begin_async, (void *)(uintptr_t)size);
+}
+
+void ui_ota_hid_init(void)
+{
+    usb_hid_set_ota_begin_cb(on_hid_ota_begin);
 }

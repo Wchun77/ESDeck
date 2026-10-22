@@ -4,6 +4,8 @@
 
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "esp_app_desc.h"
+#include <stdlib.h>
 #include "dirent.h"
 #include "sys/stat.h"
 #include "string.h"
@@ -52,11 +54,51 @@ ota_scan_result_t ota_check_update(void)
     return res;
 }
 
-bool ota_apply_update(const char *path, size_t size,
+/* Read until buf is full or the source ends -- a stream source (HID) hands
+ * out small pieces, but esp_ota_write() is happiest with whole 4 KB
+ * blocks, and the project-name check needs the first ~112 bytes at once. */
+static int read_full(ota_read_fn_t read_fn, void *ctx, uint8_t *buf, size_t want)
+{
+    size_t got = 0;
+    while (got < want) {
+        int n = read_fn(buf + got, want - got, ctx);
+        if (n < 0) return n;
+        if (n == 0) break;
+        got += (size_t)n;
+    }
+    return (int)got;
+}
+
+/* esp_image_header_t (24) + first esp_image_segment_header_t (8), then
+ * esp_app_desc_t: magic(4) secure_version(4) reserv1(8) version[32]
+ * project_name[32] ... */
+#define APP_DESC_OFFSET      32
+#define APP_DESC_PROJ_OFFSET (APP_DESC_OFFSET + 4 + 4 + 8 + 32)
+#define IMAGE_MAGIC          0xE9
+
+static bool image_matches_project(const uint8_t *buf, size_t len)
+{
+    if (len < APP_DESC_PROJ_OFFSET + 32 || buf[0] != IMAGE_MAGIC) {
+        ESP_LOGE(TAG, "Not an ESP app image");
+        return false;
+    }
+    char proj[33];
+    memcpy(proj, buf + APP_DESC_PROJ_OFFSET, 32);
+    proj[32] = '\0';
+    const char *mine = esp_app_get_description()->project_name;
+    if (strncmp(proj, mine, 32) != 0) {
+        ESP_LOGE(TAG, "Image is project \"%s\", running \"%s\" -- refused", proj, mine);
+        return false;
+    }
+    return true;
+}
+
+bool ota_apply_stream(size_t size, ota_read_fn_t read_fn, void *read_ctx,
+                      bool check_project,
                       ota_phase_cb_t on_erase_done,
                       ota_progress_cb_t progress_cb, void *user_data)
 {
-    if (path == NULL || size == 0) {
+    if (read_fn == NULL || size == 0) {
         ESP_LOGE(TAG, "Invalid arguments");
         return false;
     }
@@ -66,15 +108,14 @@ bool ota_apply_update(const char *path, size_t size,
         ESP_LOGE(TAG, "No OTA partition available");
         return false;
     }
-
-    ESP_LOGI(TAG, "Flashing %s (%u bytes) -> partition \"%s\" @ 0x%06lx",
-             path, (unsigned)size, target->label, (unsigned long)target->address);
-
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        ESP_LOGE(TAG, "Cannot open %s", path);
+    if (size > target->size) {
+        ESP_LOGE(TAG, "Image (%u bytes) larger than partition (%lu bytes)",
+                 (unsigned)size, (unsigned long)target->size);
         return false;
     }
+
+    ESP_LOGI(TAG, "Flashing %u bytes -> partition \"%s\" @ 0x%06lx",
+             (unsigned)size, target->label, (unsigned long)target->address);
 
     /* OTA_SIZE_UNKNOWN erases the whole partition here, in one blocking call.
      * We tried the alternative (OTA_WITH_SEQUENTIAL_WRITES, which erases
@@ -90,7 +131,6 @@ bool ota_apply_update(const char *path, size_t size,
     esp_err_t err = esp_ota_begin(target, OTA_SIZE_UNKNOWN, &handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_begin failed: %s", esp_err_to_name(err));
-        fclose(f);
         return false;
     }
 
@@ -100,34 +140,47 @@ bool ota_apply_update(const char *path, size_t size,
     if (!buf) {
         ESP_LOGE(TAG, "malloc failed");
         esp_ota_abort(handle);
-        fclose(f);
         return false;
     }
 
-    size_t total_read = 0;
-    bool   ok = true;
+    size_t total = 0;
+    bool   ok    = true;
 
-    while (1) {
-        size_t n = fread(buf, 1, OTA_READ_CHUNK, f);
-        if (n == 0) break;
+    while (total < size) {
+        size_t want = size - total;
+        if (want > OTA_READ_CHUNK) want = OTA_READ_CHUNK;
+        int n = read_full(read_fn, read_ctx, buf, want);
+        if (n < 0) {
+            ESP_LOGE(TAG, "read failed at %u / %u bytes", (unsigned)total, (unsigned)size);
+            ok = false;
+            break;
+        }
+        if (n == 0) {
+            ESP_LOGE(TAG, "source ended early at %u / %u bytes", (unsigned)total, (unsigned)size);
+            ok = false;
+            break;
+        }
+        if (total == 0 && check_project && !image_matches_project(buf, (size_t)n)) {
+            ok = false;
+            break;
+        }
 
-        err = esp_ota_write(handle, buf, n);
+        err = esp_ota_write(handle, buf, (size_t)n);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(err));
             ok = false;
             break;
         }
 
-        total_read += n;
+        total += (size_t)n;
         if (progress_cb) {
-            uint8_t pct = (size > 0) ? (uint8_t)((total_read * 100) / size) : 0;
+            uint8_t pct = (uint8_t)((total * 100) / size);
             if (pct > 100) pct = 100;
             progress_cb(pct, user_data);
         }
     }
 
     free(buf);
-    fclose(f);
 
     if (!ok) {
         esp_ota_abort(handle);
@@ -147,8 +200,39 @@ bool ota_apply_update(const char *path, size_t size,
     }
 
     if (progress_cb) progress_cb(100, user_data);
-
-    remove(path);   /* done -- don't offer the same update again on next boot */
     ESP_LOGI(TAG, "OTA update flashed OK, ready to reboot");
     return true;
+}
+
+static int file_read(uint8_t *buf, size_t max, void *ctx)
+{
+    FILE *f = (FILE *)ctx;
+    size_t n = fread(buf, 1, max, f);
+    if (n == 0 && ferror(f)) return -1;
+    return (int)n;
+}
+
+bool ota_apply_update(const char *path, size_t size,
+                      ota_phase_cb_t on_erase_done,
+                      ota_progress_cb_t progress_cb, void *user_data)
+{
+    if (path == NULL || size == 0) {
+        ESP_LOGE(TAG, "Invalid arguments");
+        return false;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        ESP_LOGE(TAG, "Cannot open %s", path);
+        return false;
+    }
+    ESP_LOGI(TAG, "SD update: %s", path);
+
+    /* SD keeps its old rule (file name must contain FW_PROJECT_NAME, see
+     * ota_check_update()) -- no project-name check on the image itself. */
+    bool ok = ota_apply_stream(size, file_read, f, false, on_erase_done, progress_cb, user_data);
+    fclose(f);
+
+    if (ok) remove(path);   /* done -- don't offer the same update again on next boot */
+    return ok;
 }

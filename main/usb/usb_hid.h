@@ -29,6 +29,37 @@
 #define HID_ACTION_FLAG_LAST     0x02
 #define HID_ACTION_MAX_LEN       4096
 
+/* Firmware update from ESDeckPC over HID.
+ * PC -> ESP (Feature report, [0] = cmd):
+ *   HID_OTA_CMD_BEGIN : [1..4] image size (uint32 LE)
+ *   HID_OTA_CMD_DATA  : [1..2] chunk seq (uint16 LE, from 0), [3..63] data
+ *                       (61 bytes per chunk, the last one shorter -- the
+ *                       ESP knows the size, padding is ignored)
+ *   HID_OTA_CMD_ABORT : give up
+ * ESP -> PC (IN report): { HID_OTA_PAGE, status, value (uint32 LE) }
+ *   HID_OTA_ST_ERASED : erase done, writing starts (value 0)
+ *   HID_OTA_ST_ACK    : value = bytes taken off the receive buffer so far;
+ *                       the PC keeps at most HID_OTA_WINDOW bytes in flight
+ *                       beyond the last ACK (receive buffer is twice that)
+ *   HID_OTA_ST_DONE   : flashed and verified, rebooting
+ *   HID_OTA_ST_ERROR  : value = HID_OTA_ERR_* */
+#define HID_OTA_CMD_BEGIN        0x0B
+#define HID_OTA_CMD_DATA         0x0C
+#define HID_OTA_CMD_ABORT        0x0D
+#define HID_OTA_PAGE             0xFA
+#define HID_OTA_ST_ERASED        0x01
+#define HID_OTA_ST_ACK           0x02
+#define HID_OTA_ST_DONE          0x03
+#define HID_OTA_ST_ERROR         0x04
+#define HID_OTA_ERR_BUSY         1   /* an update is already running */
+#define HID_OTA_ERR_SIZE         2   /* size 0 / too big */
+#define HID_OTA_ERR_SEQ          3   /* chunk lost / out of order */
+#define HID_OTA_ERR_OVERFLOW     4   /* PC ignored the window */
+#define HID_OTA_ERR_FLASH        5   /* erase / write / verify failed (wrong image?) */
+#define HID_OTA_ERR_NO_UI        6   /* no handler registered */
+#define HID_OTA_CHUNK            61
+#define HID_OTA_WINDOW           8192
+
 /* Monitor OUT report command bytes (PC -> ESP) */
 #define HID_MON_CMD_DATA         0x03
 #define HID_MON_CMD_TIME         0x04
@@ -216,6 +247,17 @@ void usb_hid_set_conn_cb(usb_hid_conn_cb_t cb);
  * as HID_ACTION_PAGE chunks. Copies the data. LVGL thread only. Returns
  * false if HID isn't active, the queue is full or len is 0 / too long. */
 bool usb_hid_send_action(const char *data, size_t len);
+
+/* Firmware update over HID (see HID_OTA_*). usb_hid only moves bytes:
+ * on BEGIN it calls the registered callback (from the TinyUSB task --
+ * hop to the LVGL thread before touching UI), which starts a worker that
+ * pulls the image with usb_hid_ota_read() and reports the end result with
+ * usb_hid_ota_finish(). */
+typedef void (*usb_hid_ota_begin_cb_t)(uint32_t size);
+void usb_hid_set_ota_begin_cb(usb_hid_ota_begin_cb_t cb);
+void usb_hid_ota_erased(void);                       /* worker: erase done */
+int  usb_hid_ota_read(uint8_t *buf, size_t max);    /* worker: > 0 bytes, 0 = end, < 0 = error/timeout */
+void usb_hid_ota_finish(bool ok);                    /* worker: DONE / ERROR to the PC, ends the session */
 
 /* Send monitor subscribe / unsubscribe control IN report */
 void usb_hid_monitor_subscribe(void);
