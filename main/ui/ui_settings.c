@@ -143,8 +143,9 @@ static int                   s_menu_stack_count[SETTINGS_STACK_MAX];
 static const char           *s_menu_stack_label[SETTINGS_STACK_MAX];
 static int                   s_stack_depth = 0;
 
-/* Config used during Monitor -> Deck background preload task */
-static deck_cfg_t s_back_cfg;
+/* Deck config handed from the load (mode switch or config reload) to the
+ * icon preload task and then to ui_deck_build(), which takes ownership. */
+static deck_cfg_t s_deck_cfg;
 
 /* -----------------------------------------------------------------------
  * Accessors
@@ -155,11 +156,31 @@ ui_mode_t ui_settings_get_mode(void)
 }
 
 /* -----------------------------------------------------------------------
- * Deck -> Monitor background task
- * No image preload needed for monitor (no bg images yet),
- * but go through the same async pattern for future-proofing and
- * so the switching screen is visible before monitor builds.
+ * Enter tasks -- one per mode, used by both switch_to_mode() and the
+ * ui_settings_*_reload() functions. Each runs after the switching screen
+ * is up; Monitor/Media/Touchpad have nothing heavy to preload, the delay
+ * just keeps the switching screen visible for a beat. Deck preloads its
+ * icons (see enter_deck_task()).
  * ----------------------------------------------------------------------- */
+static void on_enter_deck_done(void *arg)
+{
+    ui_deck_build(ui_get_sidebar(), &s_deck_cfg);
+    ui_hide_switching_screen();
+}
+
+static void enter_deck_task(void *arg)
+{
+    /* Invalidate LVGL image cache so stale entries from the previous
+     * mode/config don't render with freed buffer addresses on the first
+     * Deck frame. */
+    lv_img_cache_invalidate_src(NULL);
+    ui_deck_preload_icons(&s_deck_cfg);
+    /* Ensure at least 1 second on the switching screen. */
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    lv_async_call(on_enter_deck_done, NULL);
+    vTaskDelete(NULL);
+}
+
 static void on_enter_monitor_done(void *arg)
 {
     ui_monitor_enter(ui_get_sidebar());
@@ -173,15 +194,6 @@ static void enter_monitor_task(void *arg)
     vTaskDelete(NULL);
 }
 
-/* -----------------------------------------------------------------------
- * Deck/Monitor -> Media background task
- * Media is UI-mock-only right now (no bg image / icon loading yet), but
- * goes through the same async pattern as Deck<->Monitor for
- * future-proofing -- once it grows real SD-loaded assets, this is already
- * the right shape, and the switching screen is visible for the same
- * reason it is for Monitor: a beat of "something is loading" feedback
- * instead of an instant, jarring cut.
- * ----------------------------------------------------------------------- */
 static void on_enter_media_done(void *arg)
 {
     ui_media_enter(ui_get_sidebar());
@@ -195,11 +207,6 @@ static void enter_media_task(void *arg)
     vTaskDelete(NULL);
 }
 
-/* -----------------------------------------------------------------------
- * Any -> Touchpad background task -- same shape as enter_media_task():
- * nothing to preload yet, the delay just keeps the switching screen up
- * for a beat.
- * ----------------------------------------------------------------------- */
 static void on_enter_touchpad_done(void *arg)
 {
     ui_touchpad_enter(ui_get_sidebar());
@@ -213,25 +220,31 @@ static void enter_touchpad_task(void *arg)
     vTaskDelete(NULL);
 }
 
-/* -----------------------------------------------------------------------
- * Monitor -> Deck background task
- * ----------------------------------------------------------------------- */
-static void on_back_to_deck_done(void *arg)
+/* Load the selected Deck config (an empty "Main" page if there is none or
+ * it fails to load), show the switching screen and build the deck in the
+ * background. The previous deck/mode must already be torn down. Shared by
+ * switch_to_mode() and ui_settings_deck_reload(). */
+static void start_enter_deck(const char *msg)
 {
-    ui_deck_build(ui_get_sidebar(), &s_back_cfg);
-    ui_hide_switching_screen();
+    if (!ui_deck_config_load(&s_deck_cfg) || s_deck_cfg.page_count == 0) {
+        s_deck_cfg.page_count = 1;
+        s_deck_cfg.pages      = calloc(1, sizeof(page_cfg_t));
+        snprintf(s_deck_cfg.pages[0].name, UI_DECK_CONFIG_NAME_LEN, "Main");
+        s_deck_cfg.pages[0].button_count = 0;
+        s_deck_cfg.pages[0].buttons      = NULL;
+    }
+    ui_show_switching_screen(msg);
+    lv_refr_now(NULL);
+    xTaskCreate(enter_deck_task, "enter_deck", 8192, NULL, 3, NULL);
 }
 
-static void back_to_deck_task(void *arg)
+void ui_settings_deck_reload(void)
 {
-    /* Invalidate LVGL image cache so stale entries from Monitor do not
-     * render with freed buffer addresses on the first Deck frame. */
-    lv_img_cache_invalidate_src(NULL);
-    ui_deck_preload_icons(&s_back_cfg);
-    /* Ensure at least 1 second on the switching screen. */
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    lv_async_call(on_back_to_deck_done, NULL);
-    vTaskDelete(NULL);
+    /* Same reasoning as switch_to_mode(): the rebuilt deck highlights its
+     * own page 0, so leave Settings first or the gear stays selected. */
+    ui_settings_deselect();
+    ui_deck_destroy();
+    start_enter_deck("Applying config...");
 }
 
 void ui_settings_monitor_reload(void)
@@ -300,7 +313,7 @@ static void item_config_cb(lv_event_t *e)
     else if (s_mode == UI_MODE_TOUCHPAD)
         ui_touchpad_config_dialog_show();
     else
-        ui_config_dialog_show();
+        ui_deck_config_dialog_show();
 }
 
 /* -----------------------------------------------------------------------
@@ -346,16 +359,7 @@ static void switch_to_mode(ui_mode_t target)
     /* Setup -- depends only on the mode being entered. */
     switch (target) {
     case UI_MODE_DECK:
-        if (!ui_deck_config_load(&s_back_cfg) || s_back_cfg.page_count == 0) {
-            s_back_cfg.page_count = 1;
-            s_back_cfg.pages      = calloc(1, sizeof(page_cfg_t));
-            snprintf(s_back_cfg.pages[0].name, UI_DECK_CONFIG_NAME_LEN, "Main");
-            s_back_cfg.pages[0].button_count = 0;
-            s_back_cfg.pages[0].buttons      = NULL;
-        }
-        ui_show_switching_screen("Entering Deck Mode...");
-        lv_refr_now(NULL);
-        xTaskCreate(back_to_deck_task, "back_deck", 8192, NULL, 3, NULL);
+        start_enter_deck("Entering Deck Mode...");
         break;
 
     case UI_MODE_MONITOR:

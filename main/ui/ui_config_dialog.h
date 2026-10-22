@@ -1,9 +1,9 @@
 #pragma once
 
-/* Show the Select Config dialog.
- * On confirm, tears down the current deck, loads the selected config,
- * and rebuilds the deck via a background preload task. */
-void ui_config_dialog_show(void);
+/* Select Config dialog, one per mode -- the *.json files under that mode's
+ * config folder. On confirm each saves the selection to NVS and calls its
+ * mode's ui_settings_*_reload(). */
+void ui_deck_config_dialog_show(void);
 void ui_monitor_config_dialog_show(void);
 
 /* Same dialog, Media's config list (the *.json files under config/media).

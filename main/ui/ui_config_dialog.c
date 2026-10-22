@@ -38,9 +38,6 @@ static int  s_cfg_pages  = 0;
 static int  s_sel_idx    = -1;
 static lv_obj_t *s_sel_row = NULL;
 
-/* New config loaded during the switch preload task. */
-static deck_cfg_t s_new_cfg;
-
 /* Which mode's config list the dialog is currently showing. */
 typedef enum {
     CFG_DIALOG_DECK,
@@ -114,24 +111,6 @@ static void render_page(void)
 }
 
 /* -----------------------------------------------------------------------
- * Config switch flow
- * ----------------------------------------------------------------------- */
-static void on_switch_preload_done(void *arg)
-{
-    ui_deck_build(ui_get_sidebar(), &s_new_cfg);
-    ui_hide_switching_screen();
-    ESP_LOGI("CFG_DLG", "switch complete - PSRAM free: %d B",
-             heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-}
-
-static void switch_preload_task(void *arg)
-{
-    ui_deck_preload_icons(&s_new_cfg);
-    lv_async_call(on_switch_preload_done, NULL);
-    vTaskDelete(NULL);
-}
-
-/* -----------------------------------------------------------------------
  * Callbacks
  * ----------------------------------------------------------------------- */
 static void cancel_cb(lv_event_t *e)
@@ -183,23 +162,7 @@ static void confirm_cb(lv_event_t *e)
     }
 
     dialog_close();
-    /* Leaving Settings the same way sidebar_btn_cb()/item_mode_cb() do --
-     * otherwise the rebuilt deck highlights Page0 while the gear button
-     * (and s_panel) are still left selected from before the switch. */
-    ui_settings_deselect();
-    ui_deck_destroy();
-
-    bool cfg_ok = ui_deck_config_load(&s_new_cfg);
-    if (!cfg_ok || s_new_cfg.page_count == 0) {
-        s_new_cfg.page_count = 1;
-        s_new_cfg.pages      = calloc(1, sizeof(page_cfg_t));
-        snprintf(s_new_cfg.pages[0].name, UI_DECK_CONFIG_NAME_LEN, "Main");
-        s_new_cfg.pages[0].button_count = 0;
-        s_new_cfg.pages[0].buttons      = NULL;
-    }
-
-    ui_show_switching_screen("Switching config...");
-    xTaskCreate(switch_preload_task, "sw_preload", 8192, NULL, 3, NULL);
+    ui_settings_deck_reload();
 }
 
 static void item_cb(lv_event_t *e)
@@ -386,7 +349,7 @@ static void dialog_show_internal(cfg_dialog_mode_t mode)
     lv_obj_set_style_pad_hor(title_bar, 16, 0);
     lv_obj_clear_flag(title_bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *title_lbl = lv_label_create(title_bar);
-    const char *title_text = "Select Config";
+    const char *title_text = "Select Deck Config";
     if (s_dialog_mode == CFG_DIALOG_MONITOR) title_text = "Select Monitor Config";
     else if (s_dialog_mode == CFG_DIALOG_MEDIA) title_text = "Select Media Config";
     else if (s_dialog_mode == CFG_DIALOG_TOUCHPAD) title_text = "Select Touchpad Config";
@@ -528,7 +491,7 @@ static void dialog_show_internal(cfg_dialog_mode_t mode)
     render_page();
 }
 
-void ui_config_dialog_show(void)
+void ui_deck_config_dialog_show(void)
 {
     dialog_show_internal(CFG_DIALOG_DECK);
 }

@@ -46,6 +46,11 @@ void ui_settings_deselect(void);
 /* Return the current UI mode. */
 ui_mode_t ui_settings_get_mode(void);
 
+/* Rebuild Deck mode from the config selected in NVS (after Select Config).
+ * Tears down the current deck, shows the switching screen, preloads icons
+ * in the background, then builds -- same path as switching into Deck. */
+void ui_settings_deck_reload(void);
+
 /* Exit and re-enter monitor mode to apply a new config.
  * Shows switching screen and re-enters asynchronously. */
 void ui_settings_monitor_reload(void);
