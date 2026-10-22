@@ -212,6 +212,11 @@ static uint32_t s_three_travel     = 0;
 static int32_t  s_three_sum_x      = 0;
 static int32_t  s_three_sum_y      = 0;
 static bool     s_three_done       = false;  /* swipe action already fired this gesture */
+/* Task View was opened by a three-finger swipe up and nothing has been
+ * clicked since (a click picks a window and closes it): swipe down closes
+ * it with Esc. Without this, swipe down does nothing -- a stray Esc would
+ * land in whatever app has focus. */
+static bool     s_task_view_open   = false;
 
 /* Pad gesture lifetime (first pad finger down .. last pad finger up) */
 static bool     s_gesture        = false;
@@ -345,11 +350,14 @@ static void sync_mod_keys(void)
 
 static void push_buttons(void)
 {
-    usb_hid_tp_buttons(current_mask());
+    uint8_t m = current_mask();
+    if (m) s_task_view_open = false;   /* a button went down: Task View picked a window */
+    usb_hid_tp_buttons(m);
 }
 
 static void click_left(void)
 {
+    s_task_view_open = false;
     uint8_t m = current_mask();
     usb_hid_tp_buttons(m | HID_TP_BTN_LEFT);
     usb_hid_tp_buttons(m & (uint8_t)~HID_TP_BTN_LEFT);
@@ -357,6 +365,7 @@ static void click_left(void)
 
 static void click_right(void)
 {
+    s_task_view_open = false;
     uint8_t m = current_mask();
     usb_hid_tp_buttons(m | HID_TP_BTN_RIGHT);
     usb_hid_tp_buttons(m & (uint8_t)~HID_TP_BTN_RIGHT);
@@ -487,6 +496,7 @@ static bool tap_drag_enabled(void)
 
 static void click_x(uint8_t btn)
 {
+    s_task_view_open = false;
     uint8_t m = current_mask();
     usb_hid_tp_buttons(m | btn);
     usb_hid_tp_buttons(m & (uint8_t)~btn);
@@ -764,14 +774,19 @@ static void three_move(int dx, int dy)
      * so swiping left brings in the desktop on the right. */
     if (ax >= ay) {
         bool next = s_three_sum_x < 0;
+        s_task_view_open = false;   /* switching desktops leaves Task View */
         send_combo(next ? 0x27 : 0x25, HID_KB_MOD_CTRL | HID_KB_MOD_WIN);   /* VK_RIGHT / VK_LEFT */
         ESP_LOGI(TAG, "3-finger swipe -> %s desktop", next ? "next" : "previous");
     } else if (s_three_sum_y < 0) {
-        send_combo(0x09, HID_KB_MOD_WIN);   /* Win+Tab: Task View */
-        ESP_LOGI(TAG, "3-finger swipe -> task view");
-    } else {
-        send_combo('D', HID_KB_MOD_WIN);    /* Win+D: show desktop */
-        ESP_LOGI(TAG, "3-finger swipe -> show desktop");
+        if (!s_task_view_open) {
+            send_combo(0x09, HID_KB_MOD_WIN);   /* Win+Tab: Task View */
+            s_task_view_open = true;
+            ESP_LOGI(TAG, "3-finger swipe -> task view");
+        }
+    } else if (s_task_view_open) {
+        send_combo(0x1B, 0);                    /* Esc: close Task View */
+        s_task_view_open = false;
+        ESP_LOGI(TAG, "3-finger swipe -> close task view");
     }
     s_three_done = true;
 }
@@ -1458,6 +1473,7 @@ void ui_touchpad_exit(void)
     if (s_gesture && s_pad_two && !s_pad_two_frozen && s_two_axis == 3)
         pinch_end();      /* mid-pinch: Ctrl up */
     s_gesture = s_pad_two = s_pad_three = false;
+    s_task_view_open = false;
 
     s_tap_pending = s_second_touch = s_dragging = false;
     s_left_held = s_right_held = false;

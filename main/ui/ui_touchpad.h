@@ -89,7 +89,7 @@ void ui_touchpad_set_swipe_mode(int mode);
 typedef enum {
     TP_SWIPE3_OFF = 0,
     TP_SWIPE3_DESKTOP,    /* left/right = next/previous virtual desktop (Win+Ctrl+Right/Left),
-                           * up = Task View (Win+Tab), down = show desktop (Win+D) (default) */
+                           * up = Task View (Win+Tab), down = close it (Esc) (default) */
     TP_SWIPE3_COUNT,
 } tp_swipe3_mode_t;
 
