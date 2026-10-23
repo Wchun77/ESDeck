@@ -188,6 +188,8 @@ static void confirm_cb(lv_event_t *e)
     ui_settings_deck_reload();
 }
 
+static void update_confirm(void);
+
 static void item_cb(lv_event_t *e)
 {
     int row_pos = (int)(uintptr_t)lv_event_get_user_data(e);
@@ -200,11 +202,20 @@ static void item_cb(lv_event_t *e)
     s_sel_row = row;
     s_sel_idx = abs_idx;
     lv_obj_set_style_bg_color(row, lv_color_hex(0x0055cc), 0);
+    update_confirm();
+}
 
+/* Confirm is only enabled when the selected config differs from the one
+ * in use -- compared by name, so it stays right however the selection got
+ * there (tap, or prev/next carrying it to another page). */
+static void update_confirm(void)
+{
+    if (!s_confirm_btn) return;
     lv_obj_t *confirm_lbl = lv_obj_get_child(s_confirm_btn, 0);
-    bool same = (s_active_fname[0] != '\0' &&
-                 strcmp(s_scan.names[abs_idx], s_active_fname) == 0);
-    if (same) {
+    bool valid = (s_sel_idx >= 0 && s_sel_idx < s_scan.count);
+    bool same  = valid && s_active_fname[0] != '\0' &&
+                 strcmp(s_scan.names[s_sel_idx], s_active_fname) == 0;
+    if (!valid || same) {
         lv_obj_add_state(s_confirm_btn, LV_STATE_DISABLED);
         lv_obj_set_style_bg_color(s_confirm_btn, lv_color_hex(0x333333), 0);
         if (confirm_lbl)
@@ -232,6 +243,7 @@ static void prev_cb(lv_event_t *e)
         if (s_sel_row) lv_obj_set_style_bg_color(s_sel_row, lv_color_hex(0x2a2a2a), 0);
         s_sel_row = s_rows[s_sel_idx - base];
         lv_obj_set_style_bg_color(s_sel_row, lv_color_hex(0x0055cc), 0);
+        update_confirm();
     }
 }
 
@@ -250,6 +262,7 @@ static void next_cb(lv_event_t *e)
         if (s_sel_row) lv_obj_set_style_bg_color(s_sel_row, lv_color_hex(0x2a2a2a), 0);
         s_sel_row = s_rows[s_sel_idx - base];
         lv_obj_set_style_bg_color(s_sel_row, lv_color_hex(0x0055cc), 0);
+        update_confirm();
     }
 }
 
@@ -311,6 +324,7 @@ static void canvas_poll_cb(lv_timer_t *t)
         preselect_active();
         set_status(NULL);
         render_page();
+        update_confirm();
     }
     lv_timer_del(s_poll_timer);
     s_poll_timer = NULL;
