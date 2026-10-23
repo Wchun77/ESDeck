@@ -23,6 +23,8 @@
 #include "esp_heap_caps.h"
 #include "app_config.h"
 #include "nvs_manager/nvs_manager.h"
+#include "lvgl_port.h"   /* screen rotation */
+#include "esp_system.h"  /* esp_restart() */
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -864,10 +866,124 @@ static const setting_node_t s_custom_menu[] = {
       COUNT_OF(s_keyboard_menu) },
 };
 
+/* -----------------------------------------------------------------------
+ * Screen Rotation (System) -- 0 / 180 degrees, for when the cable has to
+ * come out the other side. Applied at boot (lvgl_port.h), so picking the
+ * other one asks to restart; the row always shows the rotation in effect.
+ * ----------------------------------------------------------------------- */
+static const char *const s_rot_names[] = { "Normal", "Upside down" };
+static const char *const *rot_names(void) { return s_rot_names; }
+static int  rot_get(void) { return lvgl_port_rotation_180() ? 1 : 0; }
+
+static lv_obj_t *s_rot_dlg = NULL;
+
+static void rot_restart_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    esp_restart();
+}
+
+static void rot_confirm_cb(lv_event_t *e)
+{
+    bool want = (bool)(intptr_t)lv_event_get_user_data(e);
+    if (!lvgl_port_rotation_save(want)) {
+        ESP_LOGE("SETTINGS", "saving screen rotation failed");
+        if (s_rot_dlg) { lv_obj_del(s_rot_dlg); s_rot_dlg = NULL; }
+        return;
+    }
+    /* Message on a plain black screen, then restart once it's drawn.
+     * The box (this button's parent) is only hidden -- not deleted from
+     * inside its own button's event. */
+    lv_obj_add_flag(lv_obj_get_parent(lv_event_get_target(e)), LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_bg_opa(s_rot_dlg, LV_OPA_COVER, 0);
+    lv_obj_t *lbl = lv_label_create(s_rot_dlg);
+    lv_label_set_text(lbl, "Restarting...");
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xcccccc), 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+    lv_obj_center(lbl);
+    lv_timer_t *t = lv_timer_create(rot_restart_timer_cb, 300, NULL);
+    lv_timer_set_repeat_count(t, 1);
+}
+
+static void rot_cancel_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_rot_dlg) { lv_obj_del(s_rot_dlg); s_rot_dlg = NULL; }
+}
+
+static lv_obj_t *rot_btn(lv_obj_t *parent, const char *text, uint32_t bg, lv_event_cb_t cb, void *ud)
+{
+    lv_obj_t *b = lv_btn_create(parent);
+    lv_obj_set_size(b, 120, 40);
+    lv_obj_set_style_bg_color(b, lv_color_hex(bg), 0);
+    lv_obj_set_style_border_width(b, 0, 0);
+    lv_obj_set_style_radius(b, 6, 0);
+    lv_obj_clear_flag(b, LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, ud);
+    lv_obj_t *l = lv_label_create(b);
+    lv_label_set_text(l, text);
+    lv_obj_set_style_text_color(l, lv_color_hex(0xffffff), 0);
+    lv_obj_center(l);
+    return b;
+}
+
+/* lv_async_call target: runs after the choice popup closed and the
+ * settings list re-rendered, so the dialog ends up on top. */
+static void rot_confirm_open(void *arg)
+{
+    bool want = (bool)(intptr_t)arg;
+    if (s_rot_dlg) return;
+
+    s_rot_dlg = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(s_rot_dlg, SCREEN_W, SCREEN_H);
+    lv_obj_set_pos(s_rot_dlg, 0, 0);
+    lv_obj_set_style_bg_color(s_rot_dlg, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_rot_dlg, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(s_rot_dlg, 0, 0);
+    lv_obj_set_style_radius(s_rot_dlg, 0, 0);
+    lv_obj_clear_flag(s_rot_dlg, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *box = lv_obj_create(s_rot_dlg);
+    lv_obj_set_size(box, 460, 200);
+    lv_obj_center(box);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x2a2a2a), 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x444444), 0);
+    lv_obj_set_style_border_width(box, 1, 0);
+    lv_obj_set_style_radius(box, 12, 0);
+    lv_obj_set_style_pad_all(box, 24, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text(title, want ? "Turn Screen Upside Down" : "Turn Screen Back to Normal");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xffffff), 0);
+    lv_obj_set_pos(title, 0, 0);
+
+    lv_obj_t *body = lv_label_create(box);
+    lv_label_set_text(body, "The device restarts to apply this.\nESDeckPC reconnects by itself.");
+    lv_obj_set_style_text_color(body, lv_color_hex(0x999999), 0);
+    lv_obj_set_style_text_font(body, &lv_font_montserrat_14, 0);
+    lv_obj_set_pos(body, 0, 36);
+
+    lv_obj_t *cancel = rot_btn(box, "Cancel", 0x3a3a3a, rot_cancel_cb, NULL);
+    lv_obj_align(cancel, LV_ALIGN_BOTTOM_RIGHT, -132, 0);
+    lv_obj_t *ok = rot_btn(box, "Restart", 0x0055cc, rot_confirm_cb, (void *)(intptr_t)want);
+    lv_obj_align(ok, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+}
+
+static void rot_set(int idx)
+{
+    bool want = (idx == 1);
+    if (want == lvgl_port_rotation_180()) return;
+    lv_async_call(rot_confirm_open, (void *)(intptr_t)want);
+}
+
 static const setting_node_t s_system_menu[] = {
     { "HID Status", SETTING_ACTION, SETMASK_ALL, item_hid_status_cb, NULL, 0 },
     { "Toasts",     SETTING_TOGGLE, SETMASK_ALL, NULL, NULL, 0,
       ui_toast_get_enabled, ui_toast_set_enabled },
+    { "Screen Rotation", SETTING_CHOICE, SETMASK_ALL, NULL, NULL, 0, NULL, NULL, NULL, NULL,
+      rot_names, COUNT_OF(s_rot_names), rot_get, rot_set },
     { "Info",       SETTING_ACTION, SETMASK_ALL, item_info_cb,       NULL, 0 },
 };
 

@@ -14,12 +14,60 @@
 #include "esp_log.h"
 #include "lvgl.h"
 #include "lvgl_port.h"
+#include "app_config.h"
+#include "nvs_manager/nvs_manager.h"
 
 static const char *TAG = "lv_port";                      // Tag for logging
 static SemaphoreHandle_t lvgl_mux;                       // LVGL mutex for synchronization
 static TaskHandle_t lvgl_task_handle = NULL;             // Handle for the LVGL task
 
+/* Rotation in effect, set once by lvgl_port_rotation_load() at boot. */
+static bool s_rot180 = false;
+
+/* Degrees the rotation path rotates by: the Kconfig value, or 180 for the
+ * runtime option (it only offers 0 / 180). */
 #if EXAMPLE_LVGL_PORT_ROTATION_DEGREE != 0
+#define PORT_ROT_DEG  EXAMPLE_LVGL_PORT_ROTATION_DEGREE
+#else
+#define PORT_ROT_DEG  180
+#endif
+
+bool lvgl_port_rotation_load(void)
+{
+#if LVGL_PORT_RUNTIME_ROT180
+    char v[4] = "";
+    s_rot180 = nvs_manager_get_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_ROT180, v, sizeof(v)) && v[0] == '1';
+#else
+    s_rot180 = false;
+#endif
+    ESP_LOGI(TAG, "screen rotation: %d", s_rot180 ? 180 : 0);
+    return s_rot180;
+}
+
+bool lvgl_port_rotation_180(void)
+{
+    return s_rot180;
+}
+
+bool lvgl_port_rotation_save(bool rot180)
+{
+#if LVGL_PORT_RUNTIME_ROT180
+    return nvs_manager_set_str(CFG_NVS_NAMESPACE, CFG_NVS_KEY_ROT180, rot180 ? "1" : "0");
+#else
+    (void)rot180;
+    return false;
+#endif
+}
+
+int lvgl_port_rgb_fb_count(void)
+{
+#if LVGL_PORT_RUNTIME_ROT180
+    if (s_rot180) return 3;   /* two scanned out + one LVGL draws into */
+#endif
+    return LVGL_PORT_LCD_RGB_BUFFER_NUMS;
+}
+
+#if EXAMPLE_LVGL_PORT_ROTATION_DEGREE != 0 || LVGL_PORT_RUNTIME_ROT180
 // Function to get the next frame buffer for double buffering
 static void *get_next_frame_buffer(esp_lcd_panel_handle_t panel_handle)
 {
@@ -87,7 +135,7 @@ IRAM_ATTR static void rotate_copy_pixel(const uint16_t *from, uint16_t *to, uint
 
 #if LVGL_PORT_AVOID_TEAR_ENABLE
 #if LVGL_PORT_DIRECT_MODE
-#if EXAMPLE_LVGL_PORT_ROTATION_DEGREE != 0
+#if EXAMPLE_LVGL_PORT_ROTATION_DEGREE != 0 || LVGL_PORT_RUNTIME_ROT180
 
 // Structure to store information about dirty areas that need refreshing
 typedef struct {
@@ -186,13 +234,13 @@ static void flush_dirty_copy(void *dst, void *src, lv_port_dirty_area_t *dirty_a
             y_end = dirty_area->inv_areas[i].y2;   // End Y coordinate
 
             // Rotate and copy pixel data from source to destination buffer
-            rotate_copy_pixel(src, dst, x_start, y_start, x_end, y_end, LV_HOR_RES, LV_VER_RES, EXAMPLE_LVGL_PORT_ROTATION_DEGREE);
+            rotate_copy_pixel(src, dst, x_start, y_start, x_end, y_end, LV_HOR_RES, LV_VER_RES, PORT_ROT_DEG);
         }
     }
 }
 
 
-static void flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
+static void flush_callback_rot(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
 {
     esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) drv->user_data; // Get the panel handle from driver user data
     const int offsetx1 = area->x1; // Start X coordinate of the area to flush
@@ -212,7 +260,7 @@ static void flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t
 
             // Rotate and copy data from the whole screen LVGL's buffer to the next frame buffer
             next_fb = flush_get_next_buf(panel_handle);
-            rotate_copy_pixel((uint16_t *)color_map, next_fb, offsetx1, offsety1, offsetx2, offsety2, LV_HOR_RES, LV_VER_RES, EXAMPLE_LVGL_PORT_ROTATION_DEGREE);
+            rotate_copy_pixel((uint16_t *)color_map, next_fb, offsetx1, offsety1, offsetx2, offsety2, LV_HOR_RES, LV_VER_RES, PORT_ROT_DEG);
 
             /* Switch the current RGB frame buffer to `next_fb` */
             esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, next_fb);
@@ -264,10 +312,10 @@ static void flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t
 
     lv_disp_flush_ready(drv); // Mark the display flush as complete
 }
+#endif /* rotation path */
 
-#else
-
-static void flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
+#if EXAMPLE_LVGL_PORT_ROTATION_DEGREE == 0
+static void flush_callback_direct(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
 {
     esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) drv->user_data; // Get the panel handle from driver user data
     const int offsetx1 = area->x1; // Start X coordinate of the area to flush
@@ -287,7 +335,15 @@ static void flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t
 
     lv_disp_flush_ready(drv); // Mark the display flush as complete
 }
-#endif /* EXAMPLE_LVGL_PORT_ROTATION_DEGREE */
+#endif /* EXAMPLE_LVGL_PORT_ROTATION_DEGREE == 0 */
+
+/* Which of the two direct-mode flushes display_init() registers. */
+#if EXAMPLE_LVGL_PORT_ROTATION_DEGREE != 0
+#define DIRECT_FLUSH_CB  flush_callback_rot
+#else
+#define DIRECT_FLUSH_CB  (s_rot180 ? flush_callback_rot : flush_callback_direct)
+#endif
+#define flush_callback   DIRECT_FLUSH_CB
 
 #elif LVGL_PORT_FULL_REFRESH && LVGL_PORT_LCD_RGB_BUFFER_NUMS == 2
 
@@ -329,7 +385,7 @@ void flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color
     void *next_fb = get_next_frame_buffer(panel_handle); // Get the next frame buffer
 
     /* Rotate and copy dirty area from the current LVGL's buffer to the next RGB frame buffer */
-    rotate_copy_pixel((uint16_t *)color_map, next_fb, offsetx1, offsety1, offsetx2, offsety2, LV_HOR_RES, LV_VER_RES, EXAMPLE_LVGL_PORT_ROTATION_DEGREE);
+    rotate_copy_pixel((uint16_t *)color_map, next_fb, offsetx1, offsety1, offsetx2, offsety2, LV_HOR_RES, LV_VER_RES, PORT_ROT_DEG);
 
     /* Switch the current RGB frame buffer to `next_fb` */
     esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, next_fb);
@@ -382,7 +438,17 @@ static lv_disp_t *display_init(esp_lcd_panel_handle_t panel_handle)
 #if LVGL_PORT_AVOID_TEAR_ENABLE
     // To avoid tearing effect, at least two frame buffers are needed: one for LVGL rendering and another for RGB output
     buffer_size = LVGL_PORT_H_RES * LVGL_PORT_V_RES;
-#if (LVGL_PORT_LCD_RGB_BUFFER_NUMS == 3) && (EXAMPLE_LVGL_PORT_ROTATION_DEGREE == 0) && LVGL_PORT_FULL_REFRESH
+#if LVGL_PORT_RUNTIME_ROT180
+    if (s_rot180) {
+        // Turned 180: LVGL draws into the third frame buffer, the flush
+        // copies rotated into the two the panel scans out (rotation path)
+        void *fbs[3];
+        ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle, 3, &fbs[0], &fbs[1], &fbs[2]));
+        buf1 = fbs[2];
+    } else {
+        ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle, 2, &buf1, &buf2)); // Get two frame buffers
+    }
+#elif (LVGL_PORT_LCD_RGB_BUFFER_NUMS == 3) && (EXAMPLE_LVGL_PORT_ROTATION_DEGREE == 0) && LVGL_PORT_FULL_REFRESH
     // With three buffers and full-refresh, one buffer is always available for rendering
     ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle, 3, &lvgl_port_rgb_last_buf, &buf1, &buf2));
     lvgl_port_rgb_next_buf = lvgl_port_rgb_last_buf; // Set the next RGB buffer
@@ -462,6 +528,13 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
                                                           &touchpad_cnt, LVGL_PORT_TOUCH_MAX_POINTS);
     if (touchpad_pressed && touchpad_cnt > 0) {
         if (touchpad_cnt > LVGL_PORT_TOUCH_MAX_POINTS) touchpad_cnt = LVGL_PORT_TOUCH_MAX_POINTS;
+        if (s_rot180) {
+            /* screen turned 180: so is the touch panel under it */
+            for (int i = 0; i < touchpad_cnt; i++) {
+                s_touch.x[i] = (uint16_t)(LVGL_PORT_H_RES - 1 - (s_touch.x[i] < LVGL_PORT_H_RES ? s_touch.x[i] : LVGL_PORT_H_RES - 1));
+                s_touch.y[i] = (uint16_t)(LVGL_PORT_V_RES - 1 - (s_touch.y[i] < LVGL_PORT_V_RES ? s_touch.y[i] : LVGL_PORT_V_RES - 1));
+            }
+        }
         data->point.x = s_touch.x[0]; // Set the X coordinate
         data->point.y = s_touch.y[0]; // Set the Y coordinate
         data->state = LV_INDEV_STATE_PRESSED; // Set state to pressed

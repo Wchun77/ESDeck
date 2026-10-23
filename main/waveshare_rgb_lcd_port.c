@@ -89,6 +89,7 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init()
 {
     ESP_LOGI(TAG, "Install RGB LCD panel driver"); // Log the start of the RGB LCD panel driver installation
     esp_lcd_panel_handle_t panel_handle = NULL; // Declare a handle for the LCD panel
+    lvgl_port_rotation_load();   // 0 / 180 from NVS -- decides the frame buffer count below
     esp_lcd_rgb_panel_config_t panel_config = {
         .clk_src = LCD_CLK_SRC_DEFAULT, // Set the clock source for the panel
         .timings =  {
@@ -107,7 +108,7 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init()
         },
         .data_width = EXAMPLE_RGB_DATA_WIDTH, // Data width for RGB
         .bits_per_pixel = EXAMPLE_RGB_BIT_PER_PIXEL, // Bits per pixel
-        .num_fbs = LVGL_PORT_LCD_RGB_BUFFER_NUMS, // Number of frame buffers
+        .num_fbs = lvgl_port_rgb_fb_count(), // Number of frame buffers (3 when turned 180, see lvgl_port.h)
         .bounce_buffer_size_px = EXAMPLE_RGB_BOUNCE_BUFFER_SIZE, // Bounce buffer size in pixels
         .sram_trans_align = 4, // SRAM transaction alignment
         .psram_trans_align = 64, // PSRAM transaction alignment

@@ -118,6 +118,24 @@ extern "C" {
 #endif /* LVGL_PORT_AVOID_TEAR_ENABLE */
 
 /**
+ * Screen rotation picked at boot (Settings > System > Screen Rotation).
+ *
+ * With the Kconfig rotation at 0 and direct mode (this project's setup),
+ * the screen can also be turned 180 degrees from NVS: 0 keeps the
+ * zero-copy direct-mode path (two RGB frame buffers, LVGL draws straight
+ * into them), 180 uses the rotation path the Kconfig rotation would have
+ * used (a third frame buffer that LVGL draws into, rotated copies into the
+ * two the panel scans out) -- ~750 KB more PSRAM and one copy per update,
+ * paid only while turned. It takes effect on the next boot: the panel's
+ * frame buffer count is fixed when it's created.
+ */
+#if LVGL_PORT_AVOID_TEAR_ENABLE && defined(LVGL_PORT_DIRECT_MODE) && LVGL_PORT_DIRECT_MODE && (EXAMPLE_LVGL_PORT_ROTATION_DEGREE == 0)
+#define LVGL_PORT_RUNTIME_ROT180        (1)
+#else
+#define LVGL_PORT_RUNTIME_ROT180        (0)
+#endif
+
+/**
  * @brief Initialize LVGL port
  *
  * @param[in] lcd_handle: LCD panel handle
@@ -129,6 +147,17 @@ extern "C" {
  *      - Others: Fail
  */
 esp_err_t lvgl_port_init(esp_lcd_panel_handle_t lcd_handle, esp_lcd_touch_handle_t tp_handle);
+
+/* Screen rotation (see LVGL_PORT_RUNTIME_ROT180 above).
+ * load: read the saved setting from NVS -- once, before the RGB panel is
+ *   created (NVS must be initialized); returns it and makes it active.
+ * 180: the rotation in effect (what load returned; false if unsupported).
+ * save: store it for the next boot; the caller restarts.
+ * rgb_fb_count: frame buffers the RGB panel needs for the active rotation. */
+bool lvgl_port_rotation_load(void);
+bool lvgl_port_rotation_180(void);
+bool lvgl_port_rotation_save(bool rot180);
+int  lvgl_port_rgb_fb_count(void);
 
 /**
  * @brief Take LVGL mutex

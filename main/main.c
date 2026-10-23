@@ -32,6 +32,10 @@ void app_main(void)
     sys_log_init();
 
     heap_caps_malloc_extmem_enable(4096);
+
+    /* NVS 要在 LCD 之前：畫面旋轉（0 / 180）存在 NVS，建立 RGB 面板時就要
+     * 知道（轉 180 需要第三個 frame buffer），見 lvgl_port.h。 */
+    nvs_manager_init();
     waveshare_esp32_s3_rgb_lcd_init();   /* CH422G 在這裡初始化，EXIO4 拉高 */
 
     /* esp_new_jpeg 解碼器第一次初始化有明顯耗時(實測約1秒),提早在背景
@@ -39,7 +43,6 @@ void app_main(void)
      * JPEG時就不用再等這筆一次性成本。 */
     boot_anim_prewarm_jpeg();
 
-    nvs_manager_init();
     fs_sd_init();
 
     /* Second half of the dump_manager_check() call above -- copies the
