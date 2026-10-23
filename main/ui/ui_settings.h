@@ -96,3 +96,10 @@ void ui_settings_touchpad_reload(void);
  * lazily on next ui_settings_select(), only the "which file" bookkeeping
  * updates immediately. */
 void ui_settings_apply_appearance(const ui_settings_appearance_t *appearance);
+
+/* Same as ui_settings_apply_appearance(), but with ready-made images
+ * instead of SD file names -- Canvas mode, whose look comes from ESDeckPC.
+ * Either may be NULL (= glyph / plain bg). The images stay owned by the
+ * caller and must stay valid until replaced: call with (NULL, NULL) before
+ * freeing them. The next ui_settings_apply_appearance() also drops them. */
+void ui_settings_set_external_appearance(const lv_img_dsc_t *gear_icon, const lv_img_dsc_t *bg);

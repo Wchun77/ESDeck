@@ -98,8 +98,9 @@
  * onto the page on screen; with F_FULL they go to the second buffer, which
  * is swapped in at END (the whole page arrives at once, no half-drawn
  * frame). F_ICONS: page count is valid and the sidebar icons follow (ICON
- * records), so the sidebar is rebuilt at END. F_EMPTY: the PC has nothing
- * to show (no config / no pages).
+ * records, plus GEAR / SETTINGS_BG for the Settings look -- left out =
+ * default glyph / plain bg), so the sidebar is rebuilt at END. F_EMPTY: the
+ * PC has nothing to show (no config / no pages).
  *
  * Encodings (pixels are RGB565 little-endian, same as LVGL here):
  *   RAW  : w*h pixels
@@ -123,8 +124,10 @@
 #define HID_CANVAS_F_EMPTY        0x02
 #define HID_CANVAS_F_ICONS        0x04
 
-#define HID_CANVAS_REC_RECT       1
-#define HID_CANVAS_REC_ICON       2
+#define HID_CANVAS_REC_RECT       1   /* page pixels, x/y/w/h */
+#define HID_CANVAS_REC_ICON       2   /* sidebar page icon, x = slot, up to 64 x 64 */
+#define HID_CANVAS_REC_GEAR       3   /* Settings gear icon, up to 64 x 64 */
+#define HID_CANVAS_REC_SETTINGS_BG 4  /* Settings page background, x/y/w/h within 720 x 480 */
 
 #define HID_CANVAS_ENC_RAW        0
 #define HID_CANVAS_ENC_RLE        1

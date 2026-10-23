@@ -144,6 +144,8 @@ static lv_img_dsc_t  s_bg_dsc;
 static lv_img_dsc_t *s_bg_dsc_ptr  = NULL;  /* NULL until a decode has succeeded */
 static bool          s_bg_owns_buf = false; /* true only for the standalone/private-buffer case */
 static bool          s_bg_applied  = false; /* true once settings_lazy_bg_set() has run for the current s_bg_image (even if it failed) -- guards against re-running every select */
+static bool          s_bg_ext      = false; /* bg came from ui_settings_set_external_appearance(): caller's buffer, never decoded / freed here */
+static bool          s_gear_ext    = false; /* gear icon came from ui_settings_set_external_appearance() */
 
 /* Navigation stack -- index 0 is always the root menu. */
 static const setting_node_t *s_menu_stack[SETTINGS_STACK_MAX];
@@ -1407,7 +1409,12 @@ static bool settings_decode_standalone(const char *bg_path, lv_img_dsc_t *out)
  * already-existing content (s_content here, btn_cont there). */
 static void settings_lazy_bg_set(void)
 {
-    if (s_bg_applied || s_bg_image[0] == '\0') return;
+    if (s_bg_applied) return;
+    if (s_bg_ext) {
+        if (!s_bg_dsc_ptr) return;
+        goto attach;   /* caller's ready-made image, nothing to decode */
+    }
+    if (s_bg_image[0] == '\0') return;
 
     char bg_path[sizeof("S:") + sizeof(SD_PATH_ASSETS_BG) + 1 + UI_SETTINGS_BG_LEN];
     snprintf(bg_path, sizeof(bg_path), "S:%s/%s", SD_PATH_ASSETS_BG, s_bg_image);
@@ -1441,6 +1448,7 @@ static void settings_lazy_bg_set(void)
         }
     }
 
+attach:;
     int page_w = SCREEN_W - SIDEBAR_W;
     int page_h = SCREEN_H;
 
@@ -1522,7 +1530,9 @@ void ui_settings_current_bg_path(char *out, size_t out_size)
  * flicker from deleting live content. */
 static void settings_bg_release(void)
 {
-    if (s_bg_dsc_ptr) {
+    /* Widgets exist only once attached (an external bg is set first and
+     * attached on the next select). */
+    if (s_bg_dsc_ptr && s_bg_applied) {
         lv_obj_t *bg = lv_obj_get_child(s_panel, 0);
         if (bg) lv_obj_del(bg);
         lv_obj_t *mask = lv_obj_get_child(s_panel, 0);   /* shifted into index 0 */
@@ -1539,6 +1549,7 @@ static void settings_bg_release(void)
     s_bg_dsc_ptr  = NULL;
     s_bg_owns_buf = false;
     s_bg_applied  = false;
+    s_bg_ext      = false;
 
     /* s_bg_dsc lives at a fixed static address reused across config
      * switches -- LVGL's image cache keys decoded entries by that pointer,
@@ -1551,10 +1562,59 @@ static void settings_bg_release(void)
 
 /* Update Settings' background image and gear sidebar icon to match the
  * currently active Deck/Monitor config. See ui_settings.h. */
+static void gear_icon_clear(void)
+{
+    if (s_gear_has_icon) {
+        /* Custom icon is gear_btn's child 1 (child 0 is the glyph label
+         * created once in ui_settings_build()). */
+        lv_obj_t *old_img = lv_obj_get_child(s_gear_btn, 1);
+        if (old_img) lv_obj_del(old_img);
+        s_gear_has_icon = false;
+    }
+    s_gear_ext = false;
+    if (s_gear_glyph) lv_obj_clear_flag(s_gear_glyph, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_settings_set_external_appearance(const lv_img_dsc_t *gear_icon, const lv_img_dsc_t *bg)
+{
+    /* Drop whatever file-based or external appearance is there. */
+    ui_settings_apply_appearance(NULL);
+    gear_icon_clear();
+    settings_bg_release();
+
+    if (gear_icon) {
+        lv_img_cache_invalidate_src(gear_icon);
+        if (s_gear_glyph) lv_obj_add_flag(s_gear_glyph, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_t *img = lv_img_create(s_gear_btn);
+        lv_img_set_src(img, gear_icon);
+        lv_obj_center(img);
+        lv_obj_set_style_clip_corner(s_gear_btn, true, 0);
+        s_gear_has_icon = true;
+        s_gear_ext      = true;
+    }
+    if (bg) {
+        lv_img_cache_invalidate_src(bg);
+        s_bg_ext     = true;
+        s_bg_dsc_ptr = (lv_img_dsc_t *)bg;
+        s_bg_applied = false;
+        if (!lv_obj_has_flag(s_panel, LV_OBJ_FLAG_HIDDEN)) settings_lazy_bg_set();   /* Settings is open: show it now */
+    }
+
+    /* Highlight style follows icon / no icon (see ui_settings_select()). */
+    if (!lv_obj_has_flag(s_panel, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_set_style_bg_color(s_gear_btn, lv_color_hex(s_gear_has_icon ? 0x2a2a2a : 0x0055cc), 0);
+        lv_obj_set_style_outline_width(s_gear_btn, s_gear_has_icon ? 3 : 0, 0);
+    }
+}
+
 void ui_settings_apply_appearance(const ui_settings_appearance_t *appearance)
 {
     static const ui_settings_appearance_t empty = { 0 };
     if (!appearance) appearance = &empty;
+
+    /* Leaving Canvas-style external images: back to plain first. */
+    if (s_gear_ext) gear_icon_clear();
+    if (s_bg_ext)   settings_bg_release();
 
     /* ---- gear sidebar icon ---- */
     if (strcmp(appearance->side_icon, s_side_icon) != 0) {

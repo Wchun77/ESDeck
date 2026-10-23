@@ -78,6 +78,15 @@ static uint8_t     *s_icon_buf[CANVAS_MAX_PAGES];
 static lv_img_dsc_t s_icon_dsc[CANVAS_MAX_PAGES];
 static bool         s_icon_ok[CANVAS_MAX_PAGES];
 
+/* Settings look from the PC (gear icon, page background) -- handed to
+ * ui_settings_set_external_appearance() when an F_ICONS batch ends. */
+static uint8_t     *s_gear_buf    = NULL;
+static lv_img_dsc_t s_gear_dsc;
+static bool         s_gear_new    = false;   /* this F_ICONS batch carried one */
+static uint8_t     *s_setbg_buf   = NULL;    /* 720 x 480, allocated on first use */
+static lv_img_dsc_t s_setbg_dsc;
+static bool         s_setbg_new   = false;
+
 /* batch being processed (worker) */
 static bool    s_batch_open  = false;
 static uint8_t s_batch_flags = 0;
@@ -117,6 +126,7 @@ static jpeg_dec_handle_t s_jpeg = NULL;   /* worker only */
 
 static void show_empty(const char *text);
 static void rebuild_sidebar(void);
+static void fb_dsc_init(lv_img_dsc_t *d, uint8_t *data, uint16_t w, uint16_t h);
 
 /* -----------------------------------------------------------------------
  * IN reports (LVGL timer flushes s_ev_q; producers: LVGL task, TinyUSB task)
@@ -393,6 +403,46 @@ static void handle_icon(canvas_item_t *it)
     heap_caps_free(px);
 }
 
+static void handle_gear(canvas_item_t *it)
+{
+    if (it->w > ICON_W || it->h > ICON_H) return;
+    uint8_t *px = decode_pixels(it);
+    if (!px) return;
+    xSemaphoreTake(s_buf_mtx, portMAX_DELAY);
+    if (s_active && s_gear_buf) {
+        memcpy(s_gear_buf, px, (size_t)it->w * it->h * 2);
+        s_gear_dsc.header.w  = it->w;
+        s_gear_dsc.header.h  = it->h;
+        s_gear_dsc.data_size = (uint32_t)it->w * it->h * 2;
+        s_gear_new = true;
+    }
+    xSemaphoreGive(s_buf_mtx);
+    heap_caps_free(px);
+}
+
+static void handle_setbg(canvas_item_t *it)
+{
+    if (it->x + it->w > CANVAS_W || it->y + it->h > CANVAS_H) return;
+    uint8_t *px = decode_pixels(it);
+    if (!px) return;
+    xSemaphoreTake(s_buf_mtx, portMAX_DELAY);
+    if (s_active && !s_setbg_buf) {
+        s_setbg_buf = heap_caps_aligned_alloc(16, CANVAS_FB_BYTES, MALLOC_CAP_SPIRAM);
+        if (s_setbg_buf) {
+            memset(s_setbg_buf, 0, CANVAS_FB_BYTES);
+            fb_dsc_init(&s_setbg_dsc, s_setbg_buf, CANVAS_W, CANVAS_H);
+        } else {
+            ESP_LOGW(TAG, "Settings background: PSRAM alloc failed");
+        }
+    }
+    if (s_active && s_setbg_buf) {
+        blit(s_setbg_buf, px, it->x, it->y, it->w, it->h);
+        s_setbg_new = true;
+    }
+    xSemaphoreGive(s_buf_mtx);
+    heap_caps_free(px);
+}
+
 static void handle_end(void)
 {
     if (!lvgl_port_lock(-1)) return;
@@ -403,6 +453,7 @@ static void handle_end(void)
             s_page_count  = 0;
             s_has_content = false;
             rebuild_sidebar();
+            ui_settings_set_external_appearance(NULL, NULL);
             show_empty("No pages\nSet up Canvas in ESDeckPC");
         } else if (s_batch_flags & HID_CANVAS_F_FULL) {
             s_front = 1 - s_front;
@@ -414,6 +465,8 @@ static void handle_end(void)
                 s_page_count = s_batch_count > CANVAS_MAX_PAGES ? CANVAS_MAX_PAGES : s_batch_count;
                 s_sel        = s_batch_page;
                 rebuild_sidebar();
+                ui_settings_set_external_appearance(s_gear_new  ? &s_gear_dsc  : NULL,
+                                                    s_setbg_new ? &s_setbg_dsc : NULL);
             }
         }
         lv_obj_add_flag(s_cover, LV_OBJ_FLAG_HIDDEN);
@@ -442,6 +495,8 @@ static void worker_task(void *arg)
             if (it.flags & HID_CANVAS_F_ICONS) {
                 xSemaphoreTake(s_buf_mtx, portMAX_DELAY);
                 memset(s_icon_ok, 0, sizeof(s_icon_ok));
+                s_gear_new  = false;
+                s_setbg_new = false;
                 xSemaphoreGive(s_buf_mtx);
             }
             /* Nothing on screen yet (PC just connected): cover until the
@@ -458,8 +513,10 @@ static void worker_task(void *arg)
 
         case ITEM_REC:
             if (s_batch_open) {
-                if (it.type == HID_CANVAS_REC_RECT)      handle_rect(&it);
-                else if (it.type == HID_CANVAS_REC_ICON) handle_icon(&it);
+                if (it.type == HID_CANVAS_REC_RECT)             handle_rect(&it);
+                else if (it.type == HID_CANVAS_REC_ICON)        handle_icon(&it);
+                else if (it.type == HID_CANVAS_REC_GEAR)        handle_gear(&it);
+                else if (it.type == HID_CANVAS_REC_SETTINGS_BG) handle_setbg(&it);
             }
             item_free(&it);
             break;
@@ -651,6 +708,9 @@ void ui_canvas_enter(lv_obj_t *sidebar)
         fb_dsc_init(&s_icon_dsc[i], s_icon_buf[i], ICON_W, ICON_H);
         s_icon_ok[i] = false;
     }
+    s_gear_buf = heap_caps_malloc(ICON_W * ICON_H * 2, MALLOC_CAP_SPIRAM);
+    fb_dsc_init(&s_gear_dsc, s_gear_buf, ICON_W, ICON_H);
+    s_gear_new = s_setbg_new = false;
     s_front       = 0;
     s_page_count  = 0;
     s_has_content = false;
@@ -759,7 +819,9 @@ void ui_canvas_exit(void)
     if (s_hb_timer) { lv_timer_del(s_hb_timer); s_hb_timer = NULL; }
     if (s_ev_q) xQueueReset(s_ev_q);
 
-    /* Objects first (nothing may still point at the buffers), then buffers. */
+    /* Objects first (nothing may still point at the buffers), then buffers.
+     * Settings may be showing our gear icon / background. */
+    ui_settings_set_external_appearance(NULL, NULL);
     if (s_page)    { lv_obj_del(s_page);    s_page = NULL; }
     if (s_sb_cont) { lv_obj_del(s_sb_cont); s_sb_cont = NULL; }
     s_img = s_empty_lbl = s_cover = NULL;
@@ -775,6 +837,11 @@ void ui_canvas_exit(void)
         if (s_icon_buf[i]) { heap_caps_free(s_icon_buf[i]); s_icon_buf[i] = NULL; }
         s_icon_ok[i] = false;
     }
+    lv_img_cache_invalidate_src(&s_gear_dsc);
+    lv_img_cache_invalidate_src(&s_setbg_dsc);
+    if (s_gear_buf)  { heap_caps_free(s_gear_buf);  s_gear_buf = NULL; }
+    if (s_setbg_buf) { heap_caps_free(s_setbg_buf); s_setbg_buf = NULL; }
+    s_gear_new = s_setbg_new = false;
     xSemaphoreGive(s_buf_mtx);
 
     /* Whatever is still queued goes nowhere (the worker also drops items
