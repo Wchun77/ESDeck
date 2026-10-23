@@ -1734,7 +1734,7 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
         usb_hid_reply_mode(mode);
         if (mode == 4 && s_canvas_sync_cb) s_canvas_sync_cb();   /* PC (re)connected: Canvas asks for its page */
     }
-    else if (cmd >= HID_CANVAS_CMD_BEGIN && cmd <= HID_CANVAS_CMD_END) {
+    else if (cmd >= HID_CANVAS_CMD_BEGIN && cmd <= HID_CANVAS_CMD_CFG) {
         if (s_canvas_rx_cb) s_canvas_rx_cb(buffer, bufsize);
     }
     else if (cmd == HID_MEDIA_CMD_NOWPLAYING_PROGRESS && bufsize >= 10) {

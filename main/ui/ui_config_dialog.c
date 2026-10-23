@@ -3,6 +3,7 @@
 #include "ui_monitor_config.h"
 #include "ui_media_config.h"
 #include "ui_touchpad_config.h"
+#include "ui_canvas.h"
 #include "ui_settings.h"
 #include "ui_deck.h"
 #include "ui.h"
@@ -17,6 +18,8 @@
 #define SCREEN_W        800
 #define SCREEN_H        480
 #define CFG_ROWS_PER_PAGE  4
+#define CANVAS_LIST_POLL_MS     100
+#define CANVAS_LIST_TIMEOUT_MS  3000   /* no list from ESDeckPC by then: say so */
 
 /* -----------------------------------------------------------------------
  * Dialog state
@@ -38,12 +41,19 @@ static int  s_cfg_pages  = 0;
 static int  s_sel_idx    = -1;
 static lv_obj_t *s_sel_row = NULL;
 
+/* Canvas only: the list comes from ESDeckPC, so the dialog opens empty
+ * with a status line and fills in when the list has arrived. */
+static lv_obj_t   *s_status_lbl = NULL;
+static lv_timer_t *s_poll_timer = NULL;
+static uint32_t    s_poll_tick  = 0;
+
 /* Which mode's config list the dialog is currently showing. */
 typedef enum {
     CFG_DIALOG_DECK,
     CFG_DIALOG_MONITOR,
     CFG_DIALOG_MEDIA,
     CFG_DIALOG_TOUCHPAD,
+    CFG_DIALOG_CANVAS,
 } cfg_dialog_mode_t;
 
 static cfg_dialog_mode_t s_dialog_mode = CFG_DIALOG_DECK;
@@ -53,6 +63,11 @@ static cfg_dialog_mode_t s_dialog_mode = CFG_DIALOG_DECK;
  * ----------------------------------------------------------------------- */
 static void dialog_close(void)
 {
+    if (s_poll_timer) {
+        lv_timer_del(s_poll_timer);
+        s_poll_timer = NULL;
+    }
+    s_status_lbl = NULL;   /* child of s_dialog, deleted with it */
     if (s_dim) {
         lv_obj_del(s_dim);
         s_dim = NULL;
@@ -124,6 +139,14 @@ static void confirm_cb(lv_event_t *e)
 
     const char *fname = s_scan.names[s_sel_idx];
     ESP_LOGI("CFG_DLG", "switching config: %s", fname);
+
+    if (s_dialog_mode == CFG_DIALOG_CANVAS) {
+        /* The PC switches and resends everything; ui_canvas keeps Settings
+         * up until the new config's first page is here. */
+        ui_canvas_select_config(fname);
+        dialog_close();
+        return;
+    }
 
     if (s_dialog_mode == CFG_DIALOG_TOUCHPAD) {
         if (!ui_touchpad_config_nvs_save(fname)) {
@@ -238,6 +261,61 @@ static void warn_dismiss_cb(lv_event_t *e)
     lv_obj_del(lv_event_get_target(e));
 }
 
+/* Select (and page to) s_active_fname if it's in the list. */
+static void preselect_active(void)
+{
+    for (int i = 0; i < s_scan.count; i++) {
+        if (strcmp(s_scan.names[i], s_active_fname) == 0) {
+            s_sel_idx  = i;
+            s_cfg_page = i / CFG_ROWS_PER_PAGE;
+            break;
+        }
+    }
+}
+
+static void set_status(const char *text)
+{
+    if (!s_status_lbl) return;
+    if (text) {
+        lv_label_set_text(s_status_lbl, text);
+        lv_obj_clear_flag(s_status_lbl, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_status_lbl, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* Canvas: wait for ESDeckPC's config list. */
+static void canvas_poll_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_dialog) return;
+    cfg_scan_result_t res = { .names = NULL, .count = 0 };
+    int active = -1;
+    int r = ui_canvas_config_list_poll(&res, &active);
+    if (r == 0) {
+        if (lv_tick_elaps(s_poll_tick) < CANVAS_LIST_TIMEOUT_MS) return;
+        set_status("ESDeckPC did not answer.\nIs it running?");
+    } else if (r < 0) {
+        set_status("Out of memory");
+    } else if (res.count == 0) {
+        cfg_scan_result_free(&res);
+        set_status("No configs in ESDeckPC.\nCreate one in Canvas Pages...");
+    } else {
+        cfg_scan_result_free(&s_scan);
+        s_scan = res;
+        s_cfg_page  = 0;
+        s_cfg_pages = (s_scan.count + CFG_ROWS_PER_PAGE - 1) / CFG_ROWS_PER_PAGE;
+        s_active_fname[0] = '\0';
+        if (active >= 0 && active < s_scan.count)
+            snprintf(s_active_fname, sizeof(s_active_fname), "%s", s_scan.names[active]);
+        preselect_active();
+        set_status(NULL);
+        render_page();
+    }
+    lv_timer_del(s_poll_timer);
+    s_poll_timer = NULL;
+}
+
 static void dialog_show_internal(cfg_dialog_mode_t mode)
 {
     s_dialog_mode = mode;
@@ -249,6 +327,13 @@ static void dialog_show_internal(cfg_dialog_mode_t mode)
      * mode's own _scan() return value assigns into s_scan directly --
      * no per-mode temp + manual field copy needed. */
     switch (mode) {
+    case CFG_DIALOG_CANVAS:
+        /* filled in later by canvas_poll_cb() */
+        if (!ui_canvas_request_config_list()) return;
+        s_scan.names = NULL;
+        s_scan.count = 0;
+        cfg_dir = "ESDeckPC";
+        break;
     case CFG_DIALOG_MONITOR:
         s_scan  = ui_monitor_config_scan();
         cfg_dir = UI_MONITOR_PATH;
@@ -302,7 +387,7 @@ static void dialog_show_internal(cfg_dialog_mode_t mode)
         return;
     }
 
-    if (s_scan.count == 0) {
+    if (s_scan.count == 0 && mode != CFG_DIALOG_CANVAS) {
         cfg_scan_result_free(&s_scan);
         ESP_LOGW("CFG_DLG", "No JSON files found in %s", cfg_dir);
         return;
@@ -310,6 +395,7 @@ static void dialog_show_internal(cfg_dialog_mode_t mode)
 
     s_cfg_page  = 0;
     s_cfg_pages = (s_scan.count + CFG_ROWS_PER_PAGE - 1) / CFG_ROWS_PER_PAGE;
+    if (s_cfg_pages < 1) s_cfg_pages = 1;
 
     lv_obj_t *scr = lv_scr_act();
 
@@ -353,6 +439,7 @@ static void dialog_show_internal(cfg_dialog_mode_t mode)
     if (s_dialog_mode == CFG_DIALOG_MONITOR) title_text = "Select Monitor Config";
     else if (s_dialog_mode == CFG_DIALOG_MEDIA) title_text = "Select Media Config";
     else if (s_dialog_mode == CFG_DIALOG_TOUCHPAD) title_text = "Select Touchpad Config";
+    else if (s_dialog_mode == CFG_DIALOG_CANVAS) title_text = "Select Canvas Config";
     lv_label_set_text(title_lbl, title_text);
     lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title_lbl, lv_color_hex(0xffffff), 0);
@@ -470,6 +557,20 @@ static void dialog_show_internal(cfg_dialog_mode_t mode)
     lv_obj_set_style_text_color(lbl_confirm, lv_color_hex(0x555555), 0);
     lv_obj_center(lbl_confirm);
 
+    if (s_dialog_mode == CFG_DIALOG_CANVAS) {
+        s_status_lbl = lv_label_create(s_dialog);
+        lv_obj_set_style_text_color(s_status_lbl, lv_color_hex(0x888888), 0);
+        lv_obj_set_style_text_font(s_status_lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_align(s_status_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(s_status_lbl, LV_ALIGN_CENTER, 0, -(bottom_h - title_h) / 2);
+        s_active_fname[0] = '\0';
+        render_page();
+        set_status("Loading configs from ESDeckPC...");
+        s_poll_tick  = lv_tick_get();
+        s_poll_timer = lv_timer_create(canvas_poll_cb, CANVAS_LIST_POLL_MS, NULL);
+        return;
+    }
+
     /* Pre-select the currently active config. */
     s_active_fname[0] = '\0';
     if (s_dialog_mode == CFG_DIALOG_MONITOR)
@@ -480,14 +581,7 @@ static void dialog_show_internal(cfg_dialog_mode_t mode)
         ui_touchpad_config_nvs_load(s_active_fname, sizeof(s_active_fname));
     else
         ui_deck_config_nvs_load(s_active_fname, sizeof(s_active_fname));
-    for (int i = 0; i < s_scan.count; i++) {
-        if (strcmp(s_scan.names[i], s_active_fname) == 0) {
-            s_sel_idx  = i;
-            s_cfg_page = i / CFG_ROWS_PER_PAGE;
-            break;
-        }
-    }
-
+    preselect_active();
     render_page();
 }
 
@@ -509,4 +603,9 @@ void ui_media_config_dialog_show(void)
 void ui_touchpad_config_dialog_show(void)
 {
     dialog_show_internal(CFG_DIALOG_TOUCHPAD);
+}
+
+void ui_canvas_config_dialog_show(void)
+{
+    dialog_show_internal(CFG_DIALOG_CANVAS);
 }

@@ -406,6 +406,8 @@ static void item_config_cb(lv_event_t *e)
         ui_media_config_dialog_show();
     else if (s_mode == UI_MODE_TOUCHPAD)
         ui_touchpad_config_dialog_show();
+    else if (s_mode == UI_MODE_CANVAS)
+        ui_canvas_config_dialog_show();
     else
         ui_deck_config_dialog_show();
 }
@@ -851,7 +853,7 @@ static const setting_node_t s_keyboard_menu[] = {
 
 static const setting_node_t s_custom_menu[] = {
     /* Canvas: the config lives on the PC, picked in ESDeckPC. */
-    { "Select Config",  SETTING_ACTION, SETMASK_ALL & ~SETMASK_CANVAS, item_config_cb, NULL, 0 },
+    { "Select Config",  SETTING_ACTION, SETMASK_ALL, item_config_cb, NULL, 0 },
     { "Boot Mode",      SETTING_CHOICE, SETMASK_ALL, NULL, NULL, 0, NULL, NULL, NULL, NULL,
       ui_settings_boot_mode_names, UI_BOOT_MODE_CHOICES,
       ui_settings_get_boot_mode_choice, ui_settings_set_boot_mode_choice },

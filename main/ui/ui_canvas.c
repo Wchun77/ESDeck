@@ -29,6 +29,7 @@ static const char *TAG = "CANVAS";
 #define REC_MAX_LEN       (512 * 1024)   /* one record's encoded data */
 #define ITEM_Q_LEN        16
 #define EV_Q_LEN          32
+#define EV_LEN            HID_VENDOR_IN_LEN   /* one queued IN report */
 #define RX_PUSH_WAIT_MS   500            /* TinyUSB task waits this long for the worker (backpressure) */
 
 #define HEARTBEAT_MS      6000           /* no Feature report from the PC for this long = ESDeckPC gone */
@@ -64,7 +65,7 @@ typedef struct {
  * ----------------------------------------------------------------------- */
 static volatile bool     s_active      = false;   /* between enter and exit */
 static QueueHandle_t     s_item_q      = NULL;
-static QueueHandle_t     s_ev_q        = NULL;    /* 8-byte IN reports waiting to go out */
+static QueueHandle_t     s_ev_q        = NULL;    /* EV_LEN-byte IN reports waiting to go out */
 static SemaphoreHandle_t s_buf_mtx     = NULL;
 static TaskHandle_t      s_worker      = NULL;
 
@@ -110,7 +111,20 @@ static uint32_t s_cover_tick  = 0;
  * page has arrived (instead of showing the old page in between). -1 = none. */
 static int      s_close_settings_for = -1;
 static uint32_t s_close_tick         = 0;
+static uint32_t s_close_max_ms       = 0;
 #define CLOSE_SETTINGS_MAX_MS  3000      /* PC too slow / gone: show what we have */
+#define CLOSE_CONFIG_MAX_MS    6000      /* another config: the PC reloads everything */
+
+/* Config list asked for with EV_LIST (Select Config). Written by rx_cb on
+ * the TinyUSB task, read by ui_canvas_config_list_poll() on the LVGL task,
+ * both under s_cl_lock. */
+static portMUX_TYPE s_cl_lock    = portMUX_INITIALIZER_UNLOCKED;
+static char         s_cl_names[CANVAS_CFG_LIST_MAX][HID_CANVAS_CFG_NAME_MAX];
+static uint8_t      s_cl_got[CANVAS_CFG_LIST_MAX];
+static int          s_cl_total   = -1;       /* -1 = no answer yet */
+static int          s_cl_active  = -1;
+static uint8_t      s_cl_seq     = 0;
+static bool         s_cl_wait    = false;    /* a request is out */
 
 /* LVGL objects */
 static lv_obj_t   *s_page       = NULL;   /* content container */
@@ -140,7 +154,7 @@ static void highlight(int idx);
 static void ev_push(uint8_t ev, uint8_t a, uint8_t b, uint16_t x, uint16_t y)
 {
     if (!s_ev_q) return;
-    uint8_t r[8] = { HID_CANVAS_PAGE, ev, a, b, 0, 0, 0, 0 };
+    uint8_t r[EV_LEN] = { HID_CANVAS_PAGE, ev, a, b };
     if (ev == HID_CANVAS_EV_TOUCH) {
         r[2] = a;
         r[3] = (uint8_t)x; r[4] = (uint8_t)(x >> 8);
@@ -158,7 +172,7 @@ static void request_page(int page, uint8_t reason)
 static void ev_timer_cb(lv_timer_t *t)
 {
     (void)t;
-    uint8_t r[8];
+    uint8_t r[EV_LEN];
     /* A few per tick; the vendor endpoint takes one report per 1 ms poll. */
     for (int i = 0; i < 4; i++) {
         if (xQueuePeek(s_ev_q, r, 0) != pdTRUE) return;
@@ -207,6 +221,25 @@ static void rx_cb(const uint8_t *buf, uint16_t len)
     uint8_t gen = buf[1];
 
     switch (cmd) {
+    case HID_CANVAS_CMD_CFG: {
+        /* not part of a batch -- gen here is the EV_LIST seq */
+        if (len < 6) return;
+        int idx = buf[2], total = buf[3];
+        if (total > CANVAS_CFG_LIST_MAX) total = CANVAS_CFG_LIST_MAX;
+        size_t n = len - 5 < HID_CANVAS_CFG_NAME_MAX - 1 ? len - 5 : HID_CANVAS_CFG_NAME_MAX - 1;
+        portENTER_CRITICAL(&s_cl_lock);
+        if (s_cl_wait && gen == s_cl_seq) {
+            s_cl_total = total;
+            if (idx < total && !s_cl_got[idx]) {
+                memcpy(s_cl_names[idx], buf + 5, n);
+                s_cl_names[idx][n] = '\0';
+                s_cl_got[idx] = 1;
+                if (buf[4] & HID_CANVAS_CFG_F_ACTIVE) s_cl_active = idx;
+            }
+        }
+        portEXIT_CRITICAL(&s_cl_lock);
+        break;
+    }
     case HID_CANVAS_CMD_BEGIN: {
         if (len < 5) return;
         rx_drop_rec();
@@ -470,6 +503,7 @@ static void handle_end(void)
             rebuild_sidebar();
             ui_settings_set_external_appearance(NULL, NULL);
             show_empty("No pages\nSet up Canvas in ESDeckPC");
+            if (s_close_settings_for >= 0) finish_settings_close();
         } else if (s_batch_flags & HID_CANVAS_F_FULL) {
             s_front = 1 - s_front;
             lv_img_set_src(s_img, &s_fb_dsc[s_front]);
@@ -592,6 +626,7 @@ static void sb_btn_cb(lv_event_t *e)
         highlight(idx);
         s_close_settings_for = idx;
         s_close_tick = lv_tick_get();
+        s_close_max_ms = CLOSE_SETTINGS_MAX_MS;
         request_page(idx, HID_CANVAS_REQ_PAGE);
         return;
     }
@@ -677,7 +712,7 @@ static void touch_cb(lv_event_t *e)
 static void hb_timer_cb(lv_timer_t *t)
 {
     (void)t;
-    if (s_close_settings_for >= 0 && lv_tick_elaps(s_close_tick) > CLOSE_SETTINGS_MAX_MS)
+    if (s_close_settings_for >= 0 && lv_tick_elaps(s_close_tick) > s_close_max_ms)
         finish_settings_close();   /* the page didn't come: leave Settings anyway */
     if (s_has_content && lv_tick_elaps(usb_hid_last_pc_rx_tick()) > HEARTBEAT_MS) {
         ESP_LOGI(TAG, "no data from ESDeckPC for %d ms, clearing", HEARTBEAT_MS);
@@ -717,7 +752,7 @@ static void fb_dsc_init(lv_img_dsc_t *d, uint8_t *data, uint16_t w, uint16_t h)
 void ui_canvas_enter(lv_obj_t *sidebar)
 {
     if (!s_item_q)  s_item_q  = xQueueCreate(ITEM_Q_LEN, sizeof(canvas_item_t));
-    if (!s_ev_q)    s_ev_q    = xQueueCreate(EV_Q_LEN, 8);
+    if (!s_ev_q)    s_ev_q    = xQueueCreate(EV_Q_LEN, EV_LEN);
     if (!s_buf_mtx) s_buf_mtx = xSemaphoreCreateMutex();
     if (!s_worker)  xTaskCreate(worker_task, "canvas_wk", 6144, NULL, 4, &s_worker);
     xQueueReset(s_ev_q);
@@ -900,4 +935,73 @@ void ui_canvas_reselect_current(void)
     if (!s_page) return;
     lv_obj_clear_flag(s_page, LV_OBJ_FLAG_HIDDEN);
     highlight(s_sel);
+}
+
+/* -----------------------------------------------------------------------
+ * Config selection (Select Config dialog, ui_config_dialog.c) -- the
+ * configs live on the PC, so the list is asked for and the pick sent back.
+ * ----------------------------------------------------------------------- */
+bool ui_canvas_request_config_list(void)
+{
+    if (!s_active) return false;
+    portENTER_CRITICAL(&s_cl_lock);
+    s_cl_seq++;
+    s_cl_wait   = true;
+    s_cl_total  = -1;
+    s_cl_active = -1;
+    memset(s_cl_got, 0, sizeof(s_cl_got));
+    uint8_t seq = s_cl_seq;
+    portEXIT_CRITICAL(&s_cl_lock);
+    ev_push(HID_CANVAS_EV_LIST, seq, 0, 0, 0);
+    return true;
+}
+
+int ui_canvas_config_list_poll(cfg_scan_result_t *out, int *active_idx)
+{
+    int total, active;
+
+    portENTER_CRITICAL(&s_cl_lock);
+    total = s_cl_total;
+    bool done = s_cl_wait && total >= 0;
+    for (int i = 0; done && i < total; i++)
+        if (!s_cl_got[i]) done = false;
+    if (done) s_cl_wait = false;
+    active = s_cl_active;
+    portEXIT_CRITICAL(&s_cl_lock);
+    if (!done) return 0;
+
+    /* s_cl_wait is false now, so rx_cb no longer writes the names */
+    out->names = NULL;
+    out->count = 0;
+    if (total > 0) {
+        out->names = calloc((size_t)total, sizeof(char *));
+        if (!out->names) return -1;
+        for (int i = 0; i < total; i++) {
+            out->names[i] = strdup(s_cl_names[i]);
+            if (!out->names[i]) { cfg_scan_result_free(out); return -1; }
+            out->count = i + 1;
+        }
+    }
+    if (active_idx) *active_idx = active;
+    return 1;
+}
+
+void ui_canvas_select_config(const char *name)
+{
+    if (!s_active || !s_ev_q || !name) return;
+    uint8_t r[EV_LEN] = { HID_CANVAS_PAGE, HID_CANVAS_EV_SELECT };
+    size_t n = strlen(name);
+    if (n > EV_LEN - 3) n = EV_LEN - 3;
+    memcpy(r + 2, name, n);
+    if (xQueueSend(s_ev_q, r, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "event queue full, config select dropped");
+        return;
+    }
+    /* The new config starts on its first page: Settings stays up until it
+     * has arrived, same as picking a page from Settings. */
+    if (settings_shown()) {
+        s_close_settings_for = 0;
+        s_close_tick   = lv_tick_get();
+        s_close_max_ms = CLOSE_CONFIG_MAX_MS;
+    }
 }

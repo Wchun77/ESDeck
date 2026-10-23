@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "lvgl.h"
+#include "app_config.h"   /* cfg_scan_result_t */
 
 /*
  * Canvas mode -- pages rendered by ESDeckPC.
@@ -38,3 +39,15 @@ void ui_canvas_wait_first_frame(uint32_t timeout_ms);
 /* Settings over / away from the content area -- same pair as the other modes. */
 void ui_canvas_deselect_current(void);
 void ui_canvas_reselect_current(void);
+
+/* Select Config in Canvas mode -- the configs are on the PC.
+ * request: ask ESDeckPC for its list (false = not in Canvas mode).
+ * poll (LVGL task): 0 = not complete yet, 1 = *out filled (free with
+ *   cfg_scan_result_free(); count 0 = the PC has none) and *active_idx set
+ *   (-1 = none in use), -1 = out of memory.
+ * select: make that config active on the PC; with Settings open, Settings
+ *   stays up until the new config's first page has arrived. */
+#define CANVAS_CFG_LIST_MAX  32
+bool ui_canvas_request_config_list(void);
+int  ui_canvas_config_list_poll(cfg_scan_result_t *out, int *active_idx);
+void ui_canvas_select_config(const char *name);

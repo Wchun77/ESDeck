@@ -94,6 +94,11 @@
  *   CMD_DATA  : [2..63] next 62 bytes of the current record's data (the
  *               last one zero-padded; the length in CMD_REC is the truth)
  *   CMD_END   : batch complete
+ *   CMD_CFG   : one entry of the config list asked for with EV_LIST, sent
+ *               outside any batch -- [1] = the EV_LIST seq (not a gen),
+ *               [2] index, [3] total, [4] flags (HID_CANVAS_CFG_F_*),
+ *               [5..63] file name, UTF-8, NUL-terminated. total = 0: no
+ *               configs (one entry with an empty name is still sent).
  * Batch = BEGIN, records, END. Without F_FULL the rectangles go straight
  * onto the page on screen; with F_FULL they go to the second buffer, which
  * is swapped in at END (the whole page arrives at once, no half-drawn
@@ -114,11 +119,19 @@
  *   EV_TOUCH   : [2] action (HID_CANVAS_TOUCH_*), [3..4] x, [5..6] y
  *                (content coordinates, 0..719 / 0..479)
  *   EV_LEAVE   : left Canvas mode -- stop rendering
+ *   EV_LIST    : [2] seq -- send the config list (CMD_CFG, one per config)
+ *   EV_SELECT  : [2..63] config file name, NUL-terminated -- make it the
+ *                active config (the PC's own selection follows) and send
+ *                its first page as a full batch with icons
  * ----------------------------------------------------------------------- */
 #define HID_CANVAS_CMD_BEGIN      0x20
 #define HID_CANVAS_CMD_REC        0x21
 #define HID_CANVAS_CMD_DATA       0x22
 #define HID_CANVAS_CMD_END        0x23
+#define HID_CANVAS_CMD_CFG        0x24
+
+#define HID_CANVAS_CFG_F_ACTIVE   0x01   /* the config in use */
+#define HID_CANVAS_CFG_NAME_MAX   59     /* name bytes incl. NUL in CMD_CFG */
 
 #define HID_CANVAS_F_FULL         0x01
 #define HID_CANVAS_F_EMPTY        0x02
@@ -137,6 +150,8 @@
 #define HID_CANVAS_EV_REQUEST     0x01
 #define HID_CANVAS_EV_TOUCH       0x02
 #define HID_CANVAS_EV_LEAVE       0x03
+#define HID_CANVAS_EV_LIST        0x04
+#define HID_CANVAS_EV_SELECT      0x05
 
 #define HID_CANVAS_REQ_ENTER      0
 #define HID_CANVAS_REQ_PAGE       1

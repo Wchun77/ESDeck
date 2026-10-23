@@ -14,3 +14,8 @@ void ui_media_config_dialog_show(void);
 /* Same dialog, Touchpad's config list (the *.json files under config/touchpad). On confirm,
  * saves to NVS and calls ui_settings_touchpad_reload(). */
 void ui_touchpad_config_dialog_show(void);
+
+/* Same dialog, Canvas: the configs are on the PC, so the list is asked
+ * from ESDeckPC (opens with "Loading..." until it arrives). On confirm the
+ * PC switches to it (its own selection follows) and resends the pages. */
+void ui_canvas_config_dialog_show(void);
