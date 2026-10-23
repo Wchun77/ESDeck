@@ -1,4 +1,5 @@
 #include "ui_msc.h"
+#include "ui_canvas.h"
 #include "usb/usb_manager.h"
 #include "ui_settings.h"
 #include "ui_monitor.h"
@@ -87,6 +88,8 @@ static void dialog_confirm_cb(lv_event_t *e)
     } else if (mode == UI_MODE_TOUCHPAD) {
         /* No timer to stop, but exit restores the touch read period. */
         ui_touchpad_exit();
+    } else if (mode == UI_MODE_CANVAS) {
+        ui_canvas_exit();   /* timers + frame buffers */
     }
 
     lv_obj_t *black = lv_obj_create(lv_scr_act());

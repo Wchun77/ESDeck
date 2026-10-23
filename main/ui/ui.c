@@ -3,6 +3,7 @@
 #include "ui_monitor.h"
 #include "ui_media.h"
 #include "ui_touchpad.h"
+#include "ui_canvas.h"
 #include "ui_ota_dialog.h"
 #include "ui_settings.h"
 #include "ui_toast.h"
@@ -22,7 +23,7 @@ static lv_obj_t *s_switching_cover = NULL;
 
 /* -----------------------------------------------------------------------
  * Mode query callback — called from TinyUSB task via usb_hid.
- * Returns the raw ui_mode_t value (0=deck, 1=monitor, 2=media, 3=touchpad) -- usb_hid.c
+ * Returns the raw ui_mode_t value (0=deck, 1=monitor, 2=media, 3=touchpad, 4=canvas) -- usb_hid.c
  * intentionally doesn't know about ui_mode_t, see usb_hid_reply_mode().
  * ----------------------------------------------------------------------- */
 static uint8_t mode_query_cb(void)
@@ -219,6 +220,7 @@ void my_ui_init(ui_mode_t mode)
     case UI_MODE_MONITOR:  ui_monitor_enter(s_sidebar);  break;
     case UI_MODE_MEDIA:    ui_media_enter(s_sidebar);    break;
     case UI_MODE_TOUCHPAD: ui_touchpad_enter(s_sidebar); break;
+    case UI_MODE_CANVAS:   ui_canvas_enter(s_sidebar);   break;   /* ESDeckPC fills it in once connected */
     case UI_MODE_DECK:
     default:
         ui_deck_build(s_sidebar, ui_deck_preload_take_cfg());

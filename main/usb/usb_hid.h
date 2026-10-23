@@ -74,6 +74,93 @@
 #define HID_MON_BTN_MODE_MONITOR 0x04
 #define HID_MON_BTN_MODE_MEDIA   0x05
 #define HID_MON_BTN_MODE_TOUCHPAD 0x06
+#define HID_MON_BTN_MODE_CANVAS   0x07
+
+/* -----------------------------------------------------------------------
+ * Canvas mode (PC-rendered pages, see ui_canvas.c)
+ *
+ * ESDeckPC renders an HTML page (720 x 480) and sends what changed as
+ * rectangles; the ESP only shows them and reports touches back. Sidebar
+ * page icons (64 x 64) come from the PC the same way.
+ *
+ * PC -> ESP (Feature report, [0] = cmd, [1] = gen). gen is bumped by the
+ * PC for every batch; REC/DATA/END with a gen other than the last BEGIN's
+ * are dropped (a batch cut short by a newer one).
+ *   CMD_BEGIN : [2] flags (HID_CANVAS_F_*), [3] page index, [4] page count
+ *   CMD_REC   : starts one record --
+ *               [2] type (HID_CANVAS_REC_*), [3] encoding (HID_CANVAS_ENC_*),
+ *               [4..5] x (RECT) / slot (ICON), [6..7] y, [8..9] w, [10..11] h
+ *               (uint16 LE), [12..15] data length (uint32 LE)
+ *   CMD_DATA  : [2..63] next 62 bytes of the current record's data (the
+ *               last one zero-padded; the length in CMD_REC is the truth)
+ *   CMD_END   : batch complete
+ * Batch = BEGIN, records, END. Without F_FULL the rectangles go straight
+ * onto the page on screen; with F_FULL they go to the second buffer, which
+ * is swapped in at END (the whole page arrives at once, no half-drawn
+ * frame). F_ICONS: page count is valid and the sidebar icons follow (ICON
+ * records), so the sidebar is rebuilt at END. F_EMPTY: the PC has nothing
+ * to show (no config / no pages).
+ *
+ * Encodings (pixels are RGB565 little-endian, same as LVGL here):
+ *   RAW  : w*h pixels
+ *   RLE  : tokens -- byte n: n & 0x80 = run of (n & 0x7F) + 1 copies of the
+ *          next pixel; otherwise n + 1 literal pixels follow
+ *   JPEG : baseline JPEG, w x h (multiples of 16 from the PC)
+ *
+ * ESP -> PC (IN report, page HID_CANVAS_PAGE):
+ *   EV_REQUEST : [2] page index, [3] reason (HID_CANVAS_REQ_*) -- send that
+ *                page as a full batch (with icons for ENTER / SYNC)
+ *   EV_TOUCH   : [2] action (HID_CANVAS_TOUCH_*), [3..4] x, [5..6] y
+ *                (content coordinates, 0..719 / 0..479)
+ *   EV_LEAVE   : left Canvas mode -- stop rendering
+ * ----------------------------------------------------------------------- */
+#define HID_CANVAS_CMD_BEGIN      0x20
+#define HID_CANVAS_CMD_REC        0x21
+#define HID_CANVAS_CMD_DATA       0x22
+#define HID_CANVAS_CMD_END        0x23
+
+#define HID_CANVAS_F_FULL         0x01
+#define HID_CANVAS_F_EMPTY        0x02
+#define HID_CANVAS_F_ICONS        0x04
+
+#define HID_CANVAS_REC_RECT       1
+#define HID_CANVAS_REC_ICON       2
+
+#define HID_CANVAS_ENC_RAW        0
+#define HID_CANVAS_ENC_RLE        1
+#define HID_CANVAS_ENC_JPEG       2
+
+#define HID_CANVAS_PAGE           0xF9
+#define HID_CANVAS_EV_REQUEST     0x01
+#define HID_CANVAS_EV_TOUCH       0x02
+#define HID_CANVAS_EV_LEAVE       0x03
+
+#define HID_CANVAS_REQ_ENTER      0
+#define HID_CANVAS_REQ_PAGE       1
+#define HID_CANVAS_REQ_SYNC       2   /* PC (re)connected while in Canvas mode */
+
+#define HID_CANVAS_TOUCH_DOWN     0
+#define HID_CANVAS_TOUCH_MOVE     1
+#define HID_CANVAS_TOUCH_UP       2
+
+/* Canvas commands (HID_CANVAS_CMD_*) are handed over raw, on the TinyUSB
+ * task; ui_canvas.c does the rest. NULL = dropped. */
+typedef void (*usb_hid_canvas_rx_cb_t)(const uint8_t *buf, uint16_t len);
+void usb_hid_set_canvas_rx_cb(usb_hid_canvas_rx_cb_t cb);
+
+/* Called (TinyUSB task) right after a mode query was answered with mode
+ * 4 (Canvas) -- the PC just (re)connected, ui_canvas.c asks it for the
+ * page. */
+void usb_hid_set_canvas_sync_cb(void (*cb)(void));
+
+/* Send one Canvas IN report (64 bytes, [0] = HID_CANVAS_PAGE). false if
+ * not connected / endpoint busy -- caller retries. LVGL task. */
+bool usb_hid_canvas_send(const uint8_t *report, size_t len);
+
+/* lv_tick of the last Feature report from the PC (any command). ESDeckPC
+ * syncs the time every 2 s, so this doubles as an "is ESDeckPC running"
+ * heartbeat. 0 = nothing yet. */
+uint32_t usb_hid_last_pc_rx_tick(void);
 
 /* Media OUT report command byte (PC -> ESP), continuing after the monitor
  * cmd range above (0x03-0x05). Payload: position_ms(4B LE) +

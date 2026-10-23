@@ -6,6 +6,7 @@
 #include "ui_deck.h"
 #include "ui_media.h"
 #include "ui_touchpad.h"
+#include "ui_canvas.h"
 #include "ui_keyboard.h"
 #include "ui_img_pool.h"
 #include "ui_log_view.h"
@@ -47,8 +48,10 @@ typedef enum {
     SETMASK_MONITOR = 1 << 1,
     SETMASK_MEDIA    = 1 << 2,
     SETMASK_TOUCHPAD = 1 << 3,
+    SETMASK_CANVAS   = 1 << 4,
     SETMASK_BOTH     = SETMASK_DECK | SETMASK_MONITOR,
-    SETMASK_ALL      = SETMASK_DECK | SETMASK_MONITOR | SETMASK_MEDIA | SETMASK_TOUCHPAD,
+    SETMASK_ALL      = SETMASK_DECK | SETMASK_MONITOR | SETMASK_MEDIA | SETMASK_TOUCHPAD |
+                       SETMASK_CANVAS,
 } setting_mask_t;
 
 typedef enum {
@@ -180,7 +183,7 @@ static void nvs_set_small_int(const char *key, int val)
         ESP_LOGW("SETTINGS", "NVS save failed: %s", key);
 }
 
-static bool valid_mode(int m) { return m >= UI_MODE_DECK && m <= UI_MODE_TOUCHPAD; }
+static bool valid_mode(int m) { return m >= UI_MODE_DECK && m <= UI_MODE_CANVAS; }
 
 int ui_settings_get_boot_mode_choice(void)
 {
@@ -198,7 +201,7 @@ void ui_settings_set_boot_mode_choice(int idx)
 }
 
 static const char *const s_boot_mode_names[UI_BOOT_MODE_CHOICES] = {
-    "Auto (last used)", "Deck", "Monitor", "Media", "Touchpad",
+    "Auto (last used)", "Deck", "Monitor", "Media", "Touchpad", "Canvas",
 };
 
 const char *const *ui_settings_boot_mode_names(void) { return s_boot_mode_names; }
@@ -278,6 +281,34 @@ static void enter_touchpad_task(void *arg)
 {
     vTaskDelay(pdMS_TO_TICKS(1000));
     lv_async_call(on_enter_touchpad_done, NULL);
+    vTaskDelete(NULL);
+}
+
+/* Canvas: build right away (it asks ESDeckPC for the page), then keep the
+ * switching screen up until the first page has arrived -- the user never
+ * sees an empty or half-drawn canvas. Gives up after a few seconds (no
+ * ESDeckPC): the mode then shows "Waiting for ESDeckPC...". */
+static volatile bool s_canvas_built = false;
+
+static void on_enter_canvas_build(void *arg)
+{
+    ui_canvas_enter(ui_get_sidebar());
+    s_canvas_built = true;
+}
+
+static void on_enter_canvas_done(void *arg)
+{
+    ui_hide_switching_screen();
+}
+
+static void enter_canvas_task(void *arg)
+{
+    s_canvas_built = false;
+    lv_async_call(on_enter_canvas_build, NULL);
+    for (int i = 0; i < 100 && !s_canvas_built; i++) vTaskDelay(pdMS_TO_TICKS(20));
+    vTaskDelay(pdMS_TO_TICKS(300));
+    ui_canvas_wait_first_frame(5000);
+    lv_async_call(on_enter_canvas_done, NULL);
     vTaskDelete(NULL);
 }
 
@@ -413,6 +444,7 @@ static void switch_to_mode(ui_mode_t target)
     case UI_MODE_MONITOR: ui_monitor_exit(); break;
     case UI_MODE_MEDIA:    ui_media_exit();    break;
     case UI_MODE_TOUCHPAD: ui_touchpad_exit(); break;
+    case UI_MODE_CANVAS:   ui_canvas_exit();   break;
     }
 
     s_mode = target;
@@ -445,6 +477,12 @@ static void switch_to_mode(ui_mode_t target)
         lv_refr_now(NULL);
         xTaskCreate(enter_touchpad_task, "enter_tpad", 4096, NULL, 3, NULL);
         break;
+
+    case UI_MODE_CANVAS:
+        ui_show_switching_screen("Entering Canvas Mode...");
+        lv_refr_now(NULL);
+        xTaskCreate(enter_canvas_task, "enter_canvas", 4096, NULL, 3, NULL);
+        break;
     }
 }
 
@@ -452,13 +490,14 @@ static void item_mode_to_deck_cb(lv_event_t *e)    { (void)e; switch_to_mode(UI_
 static void item_mode_to_monitor_cb(lv_event_t *e) { (void)e; switch_to_mode(UI_MODE_MONITOR); }
 static void item_mode_to_media_cb(lv_event_t *e)   { (void)e; switch_to_mode(UI_MODE_MEDIA); }
 static void item_mode_to_touchpad_cb(lv_event_t *e) { (void)e; switch_to_mode(UI_MODE_TOUCHPAD); }
+static void item_mode_to_canvas_cb(lv_event_t *e)   { (void)e; switch_to_mode(UI_MODE_CANVAS); }
 
 /* Long press on the gear: pick a mode directly, without going through
  * Settings > Mode. Reuses the SETTING_CHOICE popup with a node of its own;
  * picking the current mode just closes it (switch_to_mode() no-op). */
 static void choice_open(const setting_node_t *node);   /* SETTING_CHOICE popup, defined below */
 
-static const char *const s_mode_pick_names[] = { "Deck", "Monitor", "Media", "Touchpad" };
+static const char *const s_mode_pick_names[] = { "Deck", "Monitor", "Media", "Touchpad", "Canvas" };
 static const char *const *mode_pick_names(void) { return s_mode_pick_names; }
 static int  mode_pick_get(void)    { return (int)s_mode; }
 static void mode_pick_set(int idx) { if (valid_mode(idx)) switch_to_mode((ui_mode_t)idx); }
@@ -809,7 +848,8 @@ static const setting_node_t s_keyboard_menu[] = {
 };
 
 static const setting_node_t s_custom_menu[] = {
-    { "Select Config",  SETTING_ACTION, SETMASK_ALL, item_config_cb,    NULL, 0 },
+    /* Canvas: the config lives on the PC, picked in ESDeckPC. */
+    { "Select Config",  SETTING_ACTION, SETMASK_ALL & ~SETMASK_CANVAS, item_config_cb, NULL, 0 },
     { "Boot Mode",      SETTING_CHOICE, SETMASK_ALL, NULL, NULL, 0, NULL, NULL, NULL, NULL,
       ui_settings_boot_mode_names, UI_BOOT_MODE_CHOICES,
       ui_settings_get_boot_mode_choice, ui_settings_set_boot_mode_choice },
@@ -854,6 +894,7 @@ static const setting_node_t s_mode_menu[] = {
     { "Monitor Mode",  SETTING_ACTION, SETMASK_ALL & ~SETMASK_MONITOR,  item_mode_to_monitor_cb,  NULL, 0 },
     { "Media Mode",    SETTING_ACTION, SETMASK_ALL & ~SETMASK_MEDIA,    item_mode_to_media_cb,    NULL, 0 },
     { "Touchpad Mode", SETTING_ACTION, SETMASK_ALL & ~SETMASK_TOUCHPAD, item_mode_to_touchpad_cb, NULL, 0 },
+    { "Canvas Mode",   SETTING_ACTION, SETMASK_ALL & ~SETMASK_CANVAS,   item_mode_to_canvas_cb,   NULL, 0 },
 };
 
 static const setting_node_t s_root_menu[] = {
@@ -1049,6 +1090,8 @@ static void close_settings(void)
         ui_monitor_reselect_current();
     else if (s_mode == UI_MODE_TOUCHPAD)
         ui_touchpad_reselect_current();
+    else if (s_mode == UI_MODE_CANVAS)
+        ui_canvas_reselect_current();
     else
         ui_media_reselect_current();
 }
@@ -1683,6 +1726,8 @@ void ui_settings_select(void)
         ui_monitor_deselect_current();
     else if (s_mode == UI_MODE_TOUCHPAD)
         ui_touchpad_deselect_current();
+    else if (s_mode == UI_MODE_CANVAS)
+        ui_canvas_deselect_current();
     else
         ui_media_deselect_current();
 

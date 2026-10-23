@@ -384,6 +384,11 @@ static void (*s_time_cb)(uint16_t year, uint8_t month, uint8_t day,
 /* Called when PC sends CMD_QUERY; returns true if currently in monitor mode */
 static uint8_t (*s_mode_query_cb)(void) = NULL;
 
+/* Canvas mode (see usb_hid.h "Canvas mode") */
+static usb_hid_canvas_rx_cb_t s_canvas_rx_cb   = NULL;
+static void                 (*s_canvas_sync_cb)(void) = NULL;
+static volatile uint32_t      s_pc_rx_tick     = 0;
+
 /* Called when PC sends CMD_NOWPLAYING_PROGRESS */
 static void (*s_nowplaying_cb)(uint32_t position_ms, uint32_t duration_ms,
                                bool playing) = NULL;
@@ -699,6 +704,16 @@ void usb_hid_set_time_cb(void (*cb)(uint16_t, uint8_t, uint8_t,
 void usb_hid_set_mode_query_cb(uint8_t (*cb)(void))
 {
     s_mode_query_cb = cb;
+}
+
+void usb_hid_set_canvas_rx_cb(usb_hid_canvas_rx_cb_t cb) { s_canvas_rx_cb = cb; }
+void usb_hid_set_canvas_sync_cb(void (*cb)(void))      { s_canvas_sync_cb = cb; }
+uint32_t usb_hid_last_pc_rx_tick(void)                 { return s_pc_rx_tick; }
+
+bool usb_hid_canvas_send(const uint8_t *report, size_t len)
+{
+    if (!s_active || !tud_hid_n_ready(HID_ITF_VENDOR)) return false;
+    return vendor_send(report, len);
 }
 
 void usb_hid_set_nowplaying_cb(void (*cb)(uint32_t, uint32_t, bool))
@@ -1109,6 +1124,7 @@ void usb_hid_reply_mode(uint8_t mode)
         case 1:  btn = HID_MON_BTN_MODE_MONITOR; name = "monitor"; break;
         case 2:  btn = HID_MON_BTN_MODE_MEDIA;   name = "media";   break;
         case 3:  btn = HID_MON_BTN_MODE_TOUCHPAD; name = "touchpad"; break;
+        case 4:  btn = HID_MON_BTN_MODE_CANVAS;  name = "canvas";  break;
         default: btn = HID_MON_BTN_MODE_DECK;    name = "deck";    break;
     }
 
@@ -1688,6 +1704,7 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
     if (bufsize < 1) return;
 
     uint8_t cmd = buffer[0];
+    s_pc_rx_tick = lv_tick_get();   /* heartbeat for Canvas mode, see usb_hid_last_pc_rx_tick() */
 
     /* Firmware update running: only the update itself, time sync and the
      * mode query get through -- no Monitor stats / Media progress, level or
@@ -1715,6 +1732,10 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
     else if (cmd == HID_MON_CMD_QUERY) {
         uint8_t mode = s_mode_query_cb ? s_mode_query_cb() : 0;
         usb_hid_reply_mode(mode);
+        if (mode == 4 && s_canvas_sync_cb) s_canvas_sync_cb();   /* PC (re)connected: Canvas asks for its page */
+    }
+    else if (cmd >= HID_CANVAS_CMD_BEGIN && cmd <= HID_CANVAS_CMD_END) {
+        if (s_canvas_rx_cb) s_canvas_rx_cb(buffer, bufsize);
     }
     else if (cmd == HID_MEDIA_CMD_NOWPLAYING_PROGRESS && bufsize >= 10) {
         if (s_nowplaying_cb) {

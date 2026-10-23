@@ -7,6 +7,7 @@ typedef enum {
     UI_MODE_MONITOR = 1,
     UI_MODE_MEDIA    = 2,
     UI_MODE_TOUCHPAD = 3,
+    UI_MODE_CANVAS   = 4,   /* pages rendered by ESDeckPC, see ui_canvas.h */
 } ui_mode_t;
 
 /* Settings page appearance -- bg_image + side_icon, same filename-only
@@ -49,14 +50,14 @@ ui_mode_t ui_settings_get_mode(void);
 /* Boot Mode (Settings > Custom): which mode the device starts in.
  *   Auto     -- the mode last switched to (remembered in NVS on every mode
  *               switch while Auto is selected)
- *   Deck / Monitor / Media / Touchpad -- always that mode
+ *   Deck / Monitor / Media / Touchpad / Canvas -- always that mode
  * ui_settings_boot_mode() resolves the setting to the mode to start in;
  * app_main() calls it before anything mode-specific (Deck's preload) and
  * passes the result to my_ui_init(). NVS only, safe before the UI
  * exists. */
 ui_mode_t ui_settings_boot_mode(void);
 
-/* Mode picker popup (Deck / Monitor / Media / Touchpad) -- opened by a
+/* Mode picker popup (Deck / Monitor / Media / Touchpad / Canvas) -- opened by a
  * long press on the sidebar gear, switches mode on pick. */
 void ui_settings_mode_picker_open(void);
 
@@ -64,7 +65,7 @@ void ui_settings_mode_picker_open(void);
  * right before it enters the boot mode. */
 void ui_settings_init_mode(ui_mode_t mode);
 
-#define UI_BOOT_MODE_CHOICES 5   /* Auto + the four modes */
+#define UI_BOOT_MODE_CHOICES 6   /* Auto + the five modes */
 const char *const *ui_settings_boot_mode_names(void);
 int  ui_settings_get_boot_mode_choice(void);
 void ui_settings_set_boot_mode_choice(int idx);
