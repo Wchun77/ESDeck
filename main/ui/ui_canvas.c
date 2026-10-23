@@ -106,6 +106,11 @@ static bool     s_has_content = false;
 static volatile bool s_entering   = false;   /* switching screen up, no local cover */
 static volatile bool s_first_done = false;   /* first full / empty batch finished */
 static uint32_t s_cover_tick  = 0;
+/* A page was picked while Settings was open: Settings stays up until that
+ * page has arrived (instead of showing the old page in between). -1 = none. */
+static int      s_close_settings_for = -1;
+static uint32_t s_close_tick         = 0;
+#define CLOSE_SETTINGS_MAX_MS  3000      /* PC too slow / gone: show what we have */
 
 /* LVGL objects */
 static lv_obj_t   *s_page       = NULL;   /* content container */
@@ -127,6 +132,7 @@ static jpeg_dec_handle_t s_jpeg = NULL;   /* worker only */
 static void show_empty(const char *text);
 static void rebuild_sidebar(void);
 static void fb_dsc_init(lv_img_dsc_t *d, uint8_t *data, uint16_t w, uint16_t h);
+static void highlight(int idx);
 
 /* -----------------------------------------------------------------------
  * IN reports (LVGL timer flushes s_ev_q; producers: LVGL task, TinyUSB task)
@@ -443,6 +449,15 @@ static void handle_setbg(canvas_item_t *it)
     heap_caps_free(px);
 }
 
+/* Caller holds the LVGL lock. */
+static void finish_settings_close(void)
+{
+    s_close_settings_for = -1;
+    ui_settings_deselect();
+    if (s_page) lv_obj_clear_flag(s_page, LV_OBJ_FLAG_HIDDEN);
+    highlight(s_sel);
+}
+
 static void handle_end(void)
 {
     if (!lvgl_port_lock(-1)) return;
@@ -461,6 +476,8 @@ static void handle_end(void)
             lv_obj_clear_flag(s_img, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(s_empty_lbl, LV_OBJ_FLAG_HIDDEN);
             s_has_content = true;
+            if (s_close_settings_for >= 0 && s_close_settings_for == s_batch_page)
+                finish_settings_close();   /* the page picked from Settings is here */
             if (s_batch_flags & HID_CANVAS_F_ICONS) {
                 s_page_count = s_batch_count > CANVAS_MAX_PAGES ? CANVAS_MAX_PAGES : s_batch_count;
                 s_sel        = s_batch_page;
@@ -566,9 +583,22 @@ static bool settings_shown(void)
 static void sb_btn_cb(lv_event_t *e)
 {
     int idx = (int)(uintptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_page_count) return;
+
+    if (settings_shown() && idx != s_sel) {
+        /* From Settings to another page: keep Settings up until the new
+         * page has arrived (handle_end()), so the old page never flashes. */
+        s_sel = idx;
+        highlight(idx);
+        s_close_settings_for = idx;
+        s_close_tick = lv_tick_get();
+        request_page(idx, HID_CANVAS_REQ_PAGE);
+        return;
+    }
+
+    s_close_settings_for = -1;
     ui_settings_deselect();               /* picking a page leaves Settings */
     if (s_page) lv_obj_clear_flag(s_page, LV_OBJ_FLAG_HIDDEN);
-    if (idx < 0 || idx >= s_page_count) return;
     highlight(idx);
     if (idx == s_sel) return;
     s_sel = idx;
@@ -647,6 +677,8 @@ static void touch_cb(lv_event_t *e)
 static void hb_timer_cb(lv_timer_t *t)
 {
     (void)t;
+    if (s_close_settings_for >= 0 && lv_tick_elaps(s_close_tick) > CLOSE_SETTINGS_MAX_MS)
+        finish_settings_close();   /* the page didn't come: leave Settings anyway */
     if (s_has_content && lv_tick_elaps(usb_hid_last_pc_rx_tick()) > HEARTBEAT_MS) {
         ESP_LOGI(TAG, "no data from ESDeckPC for %d ms, clearing", HEARTBEAT_MS);
         go_empty("Waiting for ESDeckPC...");
@@ -851,6 +883,7 @@ void ui_canvas_exit(void)
 
     s_has_content = false;
     s_page_count  = 0;
+    s_close_settings_for = -1;
     ESP_LOGI(TAG, "exited canvas mode");
 }
 
@@ -863,6 +896,7 @@ void ui_canvas_deselect_current(void)
 
 void ui_canvas_reselect_current(void)
 {
+    s_close_settings_for = -1;   /* Settings closed some other way (X) */
     if (!s_page) return;
     lv_obj_clear_flag(s_page, LV_OBJ_FLAG_HIDDEN);
     highlight(s_sel);
