@@ -582,10 +582,29 @@ static bool obj_hit(lv_obj_t *obj, int16_t x, int16_t y)
     return x >= a.x1 && x <= a.x2 && y >= a.y1 && y <= a.y2;
 }
 
+/* True when nothing is stacked over the page at (x, y): the topmost
+ * clickable object there (same search order as LVGL's own press -- sys
+ * layer, top layer, screen) is s_page or something inside it. Any popup
+ * (mode picker, keyboard, dialogs, toast) is a clickable object above the
+ * page, so a finger landing on it belongs to that popup, not to the
+ * pad / buttons underneath. */
+static bool page_on_top_at(int16_t x, int16_t y)
+{
+    lv_point_t pt = { x, y };
+    lv_disp_t *disp = lv_disp_get_default();
+    lv_obj_t *hit = lv_indev_search_obj(lv_disp_get_layer_sys(disp), &pt);
+    if (!hit) hit = lv_indev_search_obj(lv_disp_get_layer_top(disp), &pt);
+    if (!hit) hit = lv_indev_search_obj(lv_disp_get_scr_act(disp), &pt);
+    for (lv_obj_t *o = hit; o; o = lv_obj_get_parent(o))
+        if (o == s_page) return true;
+    return false;
+}
+
 /* Region a finger went down in (screen coordinates). */
 static tp_region_t region_at(int16_t x, int16_t y)
 {
     if (!input_enabled()) return REG_NONE;
+    if (!page_on_top_at(x, y)) return REG_NONE;   /* covered by a popup */
     if (obj_hit(s_btn_left, x, y))  return REG_LEFT;
     if (obj_hit(s_btn_right, x, y)) return REG_RIGHT;
     if (obj_hit(s_pad, x, y))       return REG_PAD;

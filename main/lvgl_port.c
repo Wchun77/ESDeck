@@ -249,7 +249,6 @@ static void flush_callback_rot(lv_disp_drv_t *drv, const lv_area_t *area, lv_col
     const int offsety2 = area->y2; // End Y coordinate of the area to flush
     void *next_fb = NULL; // Pointer for the next frame buffer
     lv_port_flush_probe_t probe_result = FLUSH_PROBE_PART_COPY; // Default probe result
-    lv_disp_t *disp = lv_disp_get_default(); // Get the default display
 
     /* Action after last area refresh */
     if (lv_disp_flush_is_last(drv)) {
@@ -277,16 +276,25 @@ static void flush_callback_rot(lv_disp_drv_t *drv, const lv_area_t *area, lv_col
             probe_result = flush_copy_probe(drv);
 
             if (probe_result == FLUSH_PROBE_FULL_COPY) {
-                /* Save current dirty area for the next frame buffer */
-                flush_dirty_save(&dirty_area);
+                /* Partial frame right after full-screen ones: the other
+                 * scanout buffer missed those (their second copy is
+                 * skipped). The Espressif example re-renders every object
+                 * here (lv_refr_now), which took 0.5 s+ on heavy screens
+                 * and turned a tap into a long press. LVGL has a single
+                 * draw buffer on this path, so color_map already holds the
+                 * whole current frame: just rotate-copy all of it into
+                 * both scanout buffers. */
+                const lv_coord_t w = LV_HOR_RES, h = LV_VER_RES;
+                next_fb = flush_get_next_buf(panel_handle);
+                rotate_copy_pixel((uint16_t *)color_map, next_fb, 0, 0, w - 1, h - 1, w, h, PORT_ROT_DEG);
+                esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, w, h, next_fb);
 
-                /* Set LVGL full-refresh flag and set flush ready in advance */
-                drv->full_refresh = 1; // Indicate that a full refresh is required
-                disp->rendering_in_progress = false; // Mark rendering as not in progress
-                lv_disp_flush_ready(drv); // Mark flush as ready
+                /* Wait for the current frame buffer to complete transmission */
+                ulTaskNotifyValueClear(NULL, ULONG_MAX);
+                ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-                /* Force to refresh the whole screen, will invoke `flush_callback` recursively */
-                lv_refr_now(_lv_refr_get_disp_refreshing());
+                rotate_copy_pixel((uint16_t *)color_map, flush_get_next_buf(panel_handle), 0, 0, w - 1, h - 1, w, h, PORT_ROT_DEG);
+                flush_get_next_buf(panel_handle);
             } else {
                 /* Update current dirty area for the next frame buffer */
                 next_fb = flush_get_next_buf(panel_handle);
