@@ -102,7 +102,7 @@ static bool          s_rx_rec_on  = false;
 
 /* page state (LVGL side) */
 static int      s_page_count  = 0;
-static int      s_sel         = 0;      /* kept across visits */
+static int      s_sel         = 0;      /* selected page; back to 0 on every enter */
 static bool     s_has_content = false;
 static volatile bool s_entering   = false;   /* switching screen up, no local cover */
 static volatile bool s_first_done = false;   /* first full / empty batch finished */
@@ -841,7 +841,7 @@ void ui_canvas_enter(lv_obj_t *sidebar)
     s_ev_timer = lv_timer_create(ev_timer_cb, 10, NULL);
     s_hb_timer = lv_timer_create(hb_timer_cb, 500, NULL);
 
-    if (s_sel >= CANVAS_MAX_PAGES) s_sel = 0;
+    s_sel = 0;   /* every enter starts on the first page, like the other modes */
     if (fb_ok) {
         s_active = true;
         usb_hid_set_canvas_rx_cb(rx_cb);
