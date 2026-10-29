@@ -16,6 +16,23 @@
 #define SCREEN_W   800
 #define SCREEN_H   480
 
+/* Button grid: 4 x 3 = 12 per page (no scrolling; more pages instead).
+ * 11 px around, 10 px between -> 167 x 146 buttons fill 720 x 480 evenly.
+ * Icons stay 100 x 100. Mirrored by ESDeckPC's DeckPreviewPanel. */
+#define DECK_BTN_COLS     4
+#define DECK_BTN_ROWS     3
+#define DECK_BTNS_MAX     (DECK_BTN_COLS * DECK_BTN_ROWS)
+#define DECK_BTN_W        167
+#define DECK_BTN_H        146
+#define DECK_GRID_MARGIN  11
+#define DECK_GRID_GAP     10
+
+/* Buttons past the 12th are in the config but never built or decoded. */
+static int shown_buttons(const page_cfg_t *pg)
+{
+    return pg->button_count < DECK_BTNS_MAX ? pg->button_count : DECK_BTNS_MAX;
+}
+
 /* -----------------------------------------------------------------------
  * Deck state
  * ----------------------------------------------------------------------- */
@@ -225,9 +242,9 @@ static lv_obj_t *create_page(lv_obj_t *parent, const page_cfg_t *page_cfg,
     lv_obj_set_style_bg_opa(btn_cont, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(btn_cont, 0, 0);
     lv_obj_set_style_radius(btn_cont, 0, 0);
-    lv_obj_set_style_pad_all(btn_cont, 8, 0);
-    lv_obj_set_style_pad_row(btn_cont, 10, 0);
-    lv_obj_set_style_pad_column(btn_cont, 10, 0);
+    lv_obj_set_style_pad_all(btn_cont, DECK_GRID_MARGIN, 0);
+    lv_obj_set_style_pad_row(btn_cont, DECK_GRID_GAP, 0);
+    lv_obj_set_style_pad_column(btn_cont, DECK_GRID_GAP, 0);
     lv_obj_set_layout(btn_cont, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(btn_cont, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(btn_cont, LV_FLEX_ALIGN_START,
@@ -242,11 +259,14 @@ static lv_obj_t *create_page(lv_obj_t *parent, const page_cfg_t *page_cfg,
 static void create_buttons(lv_obj_t *btn_cont, int page_idx,
                             const page_cfg_t *page_cfg)
 {
-    for (int i = 0; i < page_cfg->button_count; i++) {
+    if (page_cfg->button_count > DECK_BTNS_MAX)
+        ESP_LOGW("DECK", "page %d has %d buttons, showing the first %d",
+                 page_idx + 1, page_cfg->button_count, DECK_BTNS_MAX);
+    for (int i = 0; i < shown_buttons(page_cfg); i++) {
         const btn_cfg_t *bcfg = &page_cfg->buttons[i];
 
         lv_obj_t *btn = lv_btn_create(btn_cont);
-        lv_obj_set_size(btn, 160, 150);
+        lv_obj_set_size(btn, DECK_BTN_W, DECK_BTN_H);
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x2d2d2d), 0);
         lv_obj_set_style_bg_opa(btn, LV_OPA_50, 0);
         lv_obj_set_style_radius(btn, 10, 0);
@@ -478,7 +498,7 @@ void ui_deck_preload_icons(const deck_cfg_t *cfg)
     for (int p = 0; p < cfg->page_count; p++) {
         if (cfg->pages[p].bg_image[0]) bg_count++;
         if (cfg->pages[p].side_icon[0]) icon_count++;
-        icon_count += cfg->pages[p].button_count;
+        icon_count += shown_buttons(&cfg->pages[p]);
     }
 
     /* +1 reserves a slot for Settings' own bg image, which shares this
@@ -491,7 +511,7 @@ void ui_deck_preload_icons(const deck_cfg_t *cfg)
 
     /* Decode icons only — bg images are decoded lazily in ui_deck_lazy_bg_set. */
     for (int p = 0; p < cfg->page_count; p++) {
-        for (int b = 0; b < cfg->pages[p].button_count; b++) {
+        for (int b = 0; b < shown_buttons(&cfg->pages[p]); b++) {
             if (!cfg->pages[p].buttons[b].icon[0]) continue;
             char path[sizeof("S:") + sizeof(SD_PATH_ASSETS_ICONS) + 1 + UI_DECK_CONFIG_ICON_LEN];
             snprintf(path, sizeof(path), "S:%s/%s",
