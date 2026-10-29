@@ -27,6 +27,11 @@ static lv_obj_t *s_bar_bg     = NULL;
 static lv_obj_t *s_bar        = NULL;
 static lv_obj_t *s_pct_lbl    = NULL;
 
+/* Progress screen up (SD or PC update) -- see ui_ota_in_progress(). */
+static volatile bool s_in_progress = false;
+
+bool ui_ota_in_progress(void) { return s_in_progress; }
+
 /* -----------------------------------------------------------------------
  * Confirm dialog
  * ----------------------------------------------------------------------- */
@@ -129,7 +134,12 @@ static void build_confirm_dialog(void)
  * ----------------------------------------------------------------------- */
 static void build_progress_screen(void)
 {
-    lv_obj_t *scr = lv_scr_act();
+    /* System layer: above the screen and the top layer (toasts), so
+     * nothing the UI builds afterwards -- e.g. a Deck config switch that
+     * was still decoding images when the update began -- can cover it.
+     * Opaque and clickable, so it also takes every touch. */
+    lv_obj_t *scr = lv_layer_sys();
+    s_in_progress = true;
 
     s_dim = lv_obj_create(scr);
     lv_obj_set_size(s_dim, SCREEN_W, SCREEN_H);
@@ -252,6 +262,7 @@ static void ota_apply_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(2500));
 
     if (lvgl_port_lock(-1)) {
+        s_in_progress = false;
         if (s_dim) {
             lv_obj_del(s_dim);
             s_dim = NULL;
@@ -379,6 +390,7 @@ static void hid_ota_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(2500));
 
     if (lvgl_port_lock(-1)) {
+        s_in_progress = false;
         if (s_dim) {
             lv_obj_del(s_dim);
             s_dim = NULL;

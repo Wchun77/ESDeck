@@ -26,3 +26,11 @@ void ui_ota_check_and_prompt(void);
  * UI. Call once at boot after the UI exists (my_ui_init()).
  */
 void ui_ota_hid_init(void);
+
+/*
+ * True while the update progress screen is up (SD or PC update): mode and
+ * config switches are refused meanwhile. The screen itself lives on
+ * lv_layer_sys(), above everything else.
+ */
+#include <stdbool.h>
+bool ui_ota_in_progress(void);

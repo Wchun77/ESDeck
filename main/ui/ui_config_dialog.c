@@ -7,6 +7,7 @@
 #include "ui_settings.h"
 #include "ui_deck.h"
 #include "ui.h"
+#include "ui_ota_dialog.h"
 #include "lvgl.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -136,6 +137,7 @@ static void cancel_cb(lv_event_t *e)
 static void confirm_cb(lv_event_t *e)
 {
     if (s_sel_idx < 0 || s_sel_idx >= s_scan.count) return;
+    if (ui_ota_in_progress()) { dialog_close(); return; }   /* firmware update running */
 
     const char *fname = s_scan.names[s_sel_idx];
     ESP_LOGI("CFG_DLG", "switching config: %s", fname);

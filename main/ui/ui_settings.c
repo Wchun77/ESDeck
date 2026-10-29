@@ -12,6 +12,7 @@
 #include "ui_log_view.h"
 #include "usb/usb_hid.h"
 #include "ui_toast.h"
+#include "ui_ota_dialog.h"
 #include "ui.h"
 #include "ble/ble_manager.h"
 #include "lvgl.h"
@@ -439,6 +440,7 @@ static void item_config_cb(lv_event_t *e)
 static void switch_to_mode(ui_mode_t target)
 {
     if (target == s_mode) return;
+    if (ui_ota_in_progress()) return;   /* firmware update running: stay put */
 
     /* This really does leave the Settings page (mode switch replaces the
      * whole page set), unlike the dialog-opening items above. */
