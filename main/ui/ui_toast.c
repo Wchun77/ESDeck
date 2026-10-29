@@ -31,7 +31,6 @@
 #define TOAST_Y_HIDDEN    (-TOAST_MAX_H)
 #define TOAST_Y_SHOWN     12
 
-#define TOAST_ANIM_MS     220
 #define TOAST_HOLD_MS     3200
 
 typedef struct {
@@ -59,17 +58,7 @@ static bool          s_showing = false;
 static lv_timer_t *s_hold_timer = NULL;
 
 static void toast_try_show_next(void);
-static void toast_start_slide_out(void);
-
-/* lv_anim_exec_xcb_t is void(*)(void *, int32_t) -- lv_obj_set_y takes a
- * plain lv_coord_t (int16_t in this build's sdkconfig, LV_USE_LARGE_COORD
- * is off), so casting lv_obj_set_y directly to lv_anim_exec_xcb_t and
- * calling through that pointer would be undefined behavior (mismatched
- * parameter width). Every LVGL example wraps instead -- do the same. */
-static void toast_set_y(void *obj, int32_t v)
-{
-    lv_obj_set_y((lv_obj_t *)obj, (lv_coord_t)v);
-}
+static void toast_hide(void);
 
 /* -----------------------------------------------------------------------
  * Label text
@@ -144,20 +133,20 @@ static void toast_refresh_label(void)
 }
 
 /* -----------------------------------------------------------------------
- * Animations
+ * Show / hide -- instant. Was a 220 ms slide in / out (lv_anim on y), but
+ * every frame of it redrew the banner and whatever it passed over, which
+ * the S3 couldn't keep smooth.
  * ----------------------------------------------------------------------- */
 static void hold_timer_cb(lv_timer_t *t)
 {
     (void)t;
     s_hold_timer = NULL;
-    toast_start_slide_out();
+    toast_hide();
 }
 
-static void slide_in_ready_cb(lv_anim_t *a)
+static void toast_show(void)
 {
-    (void)a;
-    /* Cancel any leftover timer (shouldn't normally happen) before arming
-     * a fresh one. */
+    lv_obj_set_y(s_toast, TOAST_Y_SHOWN);
     if (s_hold_timer) {
         lv_timer_del(s_hold_timer);
         s_hold_timer = NULL;
@@ -166,36 +155,12 @@ static void slide_in_ready_cb(lv_anim_t *a)
     lv_timer_set_repeat_count(s_hold_timer, 1);
 }
 
-static void slide_out_ready_cb(lv_anim_t *a)
+static void toast_hide(void)
 {
-    (void)a;
+    lv_obj_set_y(s_toast, TOAST_Y_HIDDEN);
     s_showing = false;
     memset(&s_current, 0, sizeof(s_current));
     toast_try_show_next();
-}
-
-static void toast_start_slide_in(void)
-{
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, s_toast);
-    lv_anim_set_values(&a, TOAST_Y_HIDDEN, TOAST_Y_SHOWN);
-    lv_anim_set_time(&a, TOAST_ANIM_MS);
-    lv_anim_set_exec_cb(&a, toast_set_y);
-    lv_anim_set_ready_cb(&a, slide_in_ready_cb);
-    lv_anim_start(&a);
-}
-
-static void toast_start_slide_out(void)
-{
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, s_toast);
-    lv_anim_set_values(&a, lv_obj_get_y(s_toast), TOAST_Y_HIDDEN);
-    lv_anim_set_time(&a, TOAST_ANIM_MS);
-    lv_anim_set_exec_cb(&a, toast_set_y);
-    lv_anim_set_ready_cb(&a, slide_out_ready_cb);
-    lv_anim_start(&a);
 }
 
 /* -----------------------------------------------------------------------
@@ -217,7 +182,7 @@ static void toast_try_show_next(void)
      * config" cover) are created/re-shown well after ui_toast_init(), so
      * without this the banner could end up buried under them. */
     lv_obj_move_foreground(s_toast);
-    toast_start_slide_in();
+    toast_show();
 }
 
 static bool s_enabled        = true;
@@ -314,7 +279,7 @@ static void toast_click_cb(lv_event_t *e)
         lv_timer_del(s_hold_timer);
         s_hold_timer = NULL;
     }
-    toast_start_slide_out();
+    toast_hide();
 }
 
 /* -----------------------------------------------------------------------
