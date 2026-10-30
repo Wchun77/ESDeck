@@ -47,7 +47,7 @@ void ui_canvas_reselect_current(void);
  *   (-1 = none in use), -1 = out of memory.
  * select: make that config active on the PC; with Settings open, Settings
  *   stays up until the new config's first page has arrived. */
-#define CANVAS_CFG_LIST_MAX  32
+#define CANVAS_CFG_LIST_MAX  64
 bool ui_canvas_request_config_list(void);
 int  ui_canvas_config_list_poll(cfg_scan_result_t *out, int *active_idx);
 void ui_canvas_select_config(const char *name);
