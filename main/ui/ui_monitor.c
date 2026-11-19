@@ -915,7 +915,7 @@ void ui_monitor_enter(lv_obj_t *sidebar)
                                 : s_mon_cfg.pages[i - 1].side_icon;
 
         lv_obj_t *btn = lv_btn_create(s_sidebar_pages);
-        lv_obj_set_size(btn, 64, 56);
+        lv_obj_set_size(btn, 64, 64);   /* square, same as the settings gear (ui.c) */
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x2a2a2a), 0);
         lv_obj_set_style_radius(btn, 8, 0);
         lv_obj_set_style_clip_corner(btn, true, 0);
