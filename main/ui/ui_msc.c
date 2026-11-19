@@ -5,10 +5,69 @@
 #include "ui_monitor.h"
 #include "ui_media.h"
 #include "ui_touchpad.h"
+#include "usb/usb_hid.h"
+#include "usb/usb_msc.h"
 #include "lvgl.h"
+#include "esp_system.h"
 
 #define SCREEN_W  800
 #define SCREEN_H  480
+
+/* -----------------------------------------------------------------------
+ * Restart (back to HID). Storage Mode is one-way, so leaving it is a
+ * restart: either the PC ejects the drive (usb_msc's eject callback,
+ * safe -- Windows has flushed by then), or the Restart button here,
+ * which needs a second tap since Windows may still be writing.
+ * ----------------------------------------------------------------------- */
+static lv_obj_t *s_sub_lbl     = NULL;
+static lv_obj_t *s_restart_lbl = NULL;
+static bool      s_armed       = false;
+
+static void restart_now_cb(lv_timer_t *t)
+{
+    (void)t;
+    esp_restart();
+}
+
+static void restarting(const char *why)
+{
+    if (s_sub_lbl) lv_label_set_text(s_sub_lbl, why);
+    if (s_restart_lbl) lv_label_set_text(s_restart_lbl, "Restarting...");
+    lv_timer_create(restart_now_cb, 500, NULL);
+}
+
+static void disarm_cb(lv_timer_t *t)
+{
+    lv_timer_del(t);
+    if (!s_armed) return;
+    s_armed = false;
+    if (s_restart_lbl) lv_label_set_text(s_restart_lbl, "Restart");
+}
+
+static void restart_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!s_armed) {
+        s_armed = true;
+        lv_label_set_text(s_restart_lbl, "Tap again");
+        lv_timer_create(disarm_cb, 3000, NULL);
+        return;
+    }
+    s_armed = false;
+    restarting("Restarting...\n(eject the drive on the PC first next time)");
+}
+
+static void eject_async(void *arg)
+{
+    (void)arg;
+    restarting("Drive ejected by PC\nRestarting...");
+}
+
+/* usb_msc's eject callback -- TinyUSB task, so hop to the LVGL thread. */
+static void on_msc_eject(void)
+{
+    lv_async_call(eject_async, NULL);
+}
 
 /* -----------------------------------------------------------------------
  * MSC mode landing screen
@@ -20,7 +79,7 @@ static void show_msc_screen(void)
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x111111), 0);
 
     lv_obj_t *cont = lv_obj_create(scr);
-    lv_obj_set_size(cont, 400, 200);
+    lv_obj_set_size(cont, 420, 260);
     lv_obj_center(cont);
     lv_obj_set_style_bg_color(cont, lv_color_hex(0x2a2a2a), 0);
     lv_obj_set_style_border_width(cont, 0, 0);
@@ -43,9 +102,33 @@ static void show_msc_screen(void)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
 
     lv_obj_t *sub = lv_label_create(cont);
-    lv_label_set_text(sub, "SD card connected\nRestart to return to HID mode");
+    lv_label_set_text(sub, "SD card connected\n"
+                           "Eject the drive on the PC to restart,\n"
+                           "or tap Restart once copying is done");
     lv_obj_set_style_text_color(sub, lv_color_hex(0x888888), 0);
     lv_obj_set_style_text_align(sub, LV_TEXT_ALIGN_CENTER, 0);
+    s_sub_lbl = sub;
+
+    /* extra room above the button (LVGL 8 has no margin style) */
+    lv_obj_t *gap = lv_obj_create(cont);
+    lv_obj_set_size(gap, 1, 8);
+    lv_obj_set_style_bg_opa(gap, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(gap, 0, 0);
+    lv_obj_clear_flag(gap, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *btn = lv_btn_create(cont);
+    lv_obj_set_size(btn, 140, 44);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x3a3a3a), 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x4a4a4a), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x555555), 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_radius(btn, 6, 0);
+    lv_obj_add_event_cb(btn, restart_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_PRESS_LOCK);
+    s_restart_lbl = lv_label_create(btn);
+    lv_label_set_text(s_restart_lbl, "Restart");
+    lv_obj_set_style_text_color(s_restart_lbl, lv_color_hex(0xffffff), 0);
+    lv_obj_center(s_restart_lbl);
 }
 
 static void msc_screen_timer_cb(lv_timer_t *t)
@@ -66,8 +149,15 @@ static void msc_start_timer_cb(lv_timer_t *t)
  * ----------------------------------------------------------------------- */
 static lv_obj_t *s_overlay = NULL;
 
-static void dialog_confirm_cb(lv_event_t *e)
+static bool s_switching = false;
+
+/* LVGL thread. Shared by the on-device confirm dialog and the PC's
+ * HID_SYS_CMD_STORAGE. */
+static void msc_begin(void)
 {
+    if (s_switching) return;
+    s_switching = true;
+
     if (s_overlay) {
         lv_obj_del(s_overlay);
         s_overlay = NULL;
@@ -99,6 +189,30 @@ static void dialog_confirm_cb(lv_event_t *e)
     lv_obj_set_style_border_width(black, 0, 0);
     lv_obj_set_style_radius(black, 0, 0);
     lv_timer_create(msc_start_timer_cb, 150, NULL);
+}
+
+static void dialog_confirm_cb(lv_event_t *e)
+{
+    (void)e;
+    msc_begin();
+}
+
+static void pc_storage_async(void *arg)
+{
+    (void)arg;
+    msc_begin();
+}
+
+/* usb_hid's Storage callback -- TinyUSB task, so hop to the LVGL thread. */
+static void on_pc_storage(void)
+{
+    lv_async_call(pc_storage_async, NULL);
+}
+
+void ui_msc_init(void)
+{
+    usb_hid_set_storage_cb(on_pc_storage);
+    usb_msc_set_eject_cb(on_msc_eject);
 }
 
 static void dialog_cancel_cb(lv_event_t *e)

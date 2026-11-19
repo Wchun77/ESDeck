@@ -60,6 +60,11 @@
 #define HID_OTA_CHUNK            61
 #define HID_OTA_WINDOW           8192
 
+/* PC -> ESP: switch to USB Mass Storage, same as Settings > Storage Mode
+ * > Switch on the device. No payload. One-way: the HID interface is gone
+ * afterwards, the device restarts when the PC ejects the drive. */
+#define HID_SYS_CMD_STORAGE      0x0E
+
 /* Monitor OUT report command bytes (PC -> ESP) */
 #define HID_MON_CMD_DATA         0x03
 #define HID_MON_CMD_TIME         0x04
@@ -386,6 +391,10 @@ bool usb_hid_send_action(const char *data, size_t len);
  * pulls the image with usb_hid_ota_read() and reports the end result with
  * usb_hid_ota_finish(). */
 typedef void (*usb_hid_ota_begin_cb_t)(uint32_t size);
+/* PC asked for Storage Mode (HID_SYS_CMD_STORAGE). Called from the
+ * TinyUSB task -- hop to the LVGL thread before touching UI. */
+typedef void (*usb_hid_storage_cb_t)(void);
+void usb_hid_set_storage_cb(usb_hid_storage_cb_t cb);
 void usb_hid_set_ota_begin_cb(usb_hid_ota_begin_cb_t cb);
 void usb_hid_ota_erased(void);                       /* worker: erase done */
 int  usb_hid_ota_read(uint8_t *buf, size_t max);    /* worker: > 0 bytes, 0 = end, < 0 = error/timeout */
