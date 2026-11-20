@@ -65,6 +65,12 @@
  * afterwards, the device restarts when the PC ejects the drive. */
 #define HID_SYS_CMD_STORAGE      0x0E
 
+/* PC -> ESP: switch UI mode, same as Settings > Mode on the device.
+ * Payload: [1] = mode (0 Deck, 1 Monitor, 2 Media, 3 Touchpad, 4 Canvas;
+ * the same numbers as the mode query reply). Storage Mode has its own
+ * command above -- it isn't a UI mode (USB changes identity, one-way). */
+#define HID_SYS_CMD_MODE         0x0F
+
 /* Monitor OUT report command bytes (PC -> ESP) */
 #define HID_MON_CMD_DATA         0x03
 #define HID_MON_CMD_TIME         0x04
@@ -395,6 +401,10 @@ typedef void (*usb_hid_ota_begin_cb_t)(uint32_t size);
  * TinyUSB task -- hop to the LVGL thread before touching UI. */
 typedef void (*usb_hid_storage_cb_t)(void);
 void usb_hid_set_storage_cb(usb_hid_storage_cb_t cb);
+/* PC asked for a UI mode (HID_SYS_CMD_MODE). Called from the TinyUSB
+ * task -- hop to the LVGL thread before touching UI. */
+typedef void (*usb_hid_mode_set_cb_t)(uint8_t mode);
+void usb_hid_set_mode_set_cb(usb_hid_mode_set_cb_t cb);
 void usb_hid_set_ota_begin_cb(usb_hid_ota_begin_cb_t cb);
 void usb_hid_ota_erased(void);                       /* worker: erase done */
 int  usb_hid_ota_read(uint8_t *buf, size_t max);    /* worker: > 0 bytes, 0 = end, < 0 = error/timeout */

@@ -1007,6 +1007,9 @@ void usb_hid_set_ota_begin_cb(usb_hid_ota_begin_cb_t cb) { s_ota_begin_cb = cb; 
 static usb_hid_storage_cb_t s_storage_cb = NULL;
 void usb_hid_set_storage_cb(usb_hid_storage_cb_t cb) { s_storage_cb = cb; }
 
+static usb_hid_mode_set_cb_t s_mode_set_cb = NULL;
+void usb_hid_set_mode_set_cb(usb_hid_mode_set_cb_t cb) { s_mode_set_cb = cb; }
+
 /* Status IN report. tries > 1 (worker task only) retries for a while if
  * the endpoint is busy -- a lost ACK would leave the PC waiting. From the
  * TinyUSB task (BEGIN errors) use 1: waiting there would stall the very
@@ -1782,6 +1785,10 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
     else if (cmd == HID_SYS_CMD_STORAGE) {
         ESP_LOGI(TAG, "PC requested Storage Mode");
         if (s_storage_cb) s_storage_cb();
+    }
+    else if (cmd == HID_SYS_CMD_MODE && bufsize >= 2) {
+        ESP_LOGI(TAG, "PC requested mode %u", buffer[1]);
+        if (s_mode_set_cb) s_mode_set_cb(buffer[1]);
     }
     else if (cmd == HID_MEDIA_CMD_NOWPLAYING_IMG_END && bufsize >= 3) {
         uint8_t generation = buffer[1];

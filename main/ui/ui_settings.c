@@ -437,6 +437,12 @@ static void item_config_cb(lv_event_t *e)
  * Deck's) so the switching screen is on-glass before any heavy setup work
  * starts, rather than a UAF guard.
  * ----------------------------------------------------------------------- */
+static void report_mode_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    usb_hid_reply_mode((uint8_t)s_mode);
+}
+
 static void switch_to_mode(ui_mode_t target)
 {
     if (target == s_mode) return;
@@ -492,6 +498,26 @@ static void switch_to_mode(ui_mode_t target)
         xTaskCreate(enter_canvas_task, "enter_canvas", 4096, NULL, 3, NULL);
         break;
     }
+
+    /* Tell the PC (its Mode menu ticks the current mode, and Monitor /
+     * Media start streaming off the reply). A moment later, once the
+     * new mode's own setup task has had time to run. */
+    lv_timer_t *t = lv_timer_create(report_mode_timer_cb, 1000, NULL);
+    lv_timer_set_repeat_count(t, 1);
+}
+
+/* PC -> ESP mode switch (HID_SYS_CMD_MODE): usb_hid calls this from the
+ * TinyUSB task, so hop to the LVGL thread; then it's the same switch as
+ * Settings > Mode on the device. */
+static void pc_mode_async(void *arg)
+{
+    int m = (int)(uintptr_t)arg;
+    if (valid_mode(m)) switch_to_mode((ui_mode_t)m);
+}
+
+static void on_pc_mode(uint8_t mode)
+{
+    lv_async_call(pc_mode_async, (void *)(uintptr_t)mode);
 }
 
 static void item_mode_to_deck_cb(lv_event_t *e)    { (void)e; switch_to_mode(UI_MODE_DECK); }
@@ -1869,6 +1895,7 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
      * s_system_menu[] / item_hid_status_cb) -- just register the redraw
      * hook here so that row's color/text stays live while visible. */
     usb_hid_set_conn_cb(hid_conn_cb);
+    usb_hid_set_mode_set_cb(on_pc_mode);   /* ESDeckPC's Device > Mode menu */
 #if ESDECK_ENABLE_BLE
     ble_manager_set_conn_cb(ble_conn_cb);
 #endif
