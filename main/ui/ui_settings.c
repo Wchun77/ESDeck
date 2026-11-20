@@ -512,12 +512,47 @@ static void switch_to_mode(ui_mode_t target)
 static void pc_mode_async(void *arg)
 {
     int m = (int)(uintptr_t)arg;
+    if (ui_switching_screen_visible()) return;   /* previous switch still running */
     if (valid_mode(m)) switch_to_mode((ui_mode_t)m);
 }
 
 static void on_pc_mode(uint8_t mode)
 {
     lv_async_call(pc_mode_async, (void *)(uintptr_t)mode);
+}
+
+/* PC -> ESP config list / select (HID_SYS_CMD_CFG_*): same hop to the LVGL
+ * thread, then ui_config_dialog.c does what the Select Config dialog does.
+ * The name only lives for the duration of the callback, so it's copied. */
+typedef struct {
+    uint8_t mode;
+    char    name[CFG_FNAME_LEN];
+} pc_cfg_select_t;
+
+static void pc_cfg_list_async(void *arg)
+{
+    ui_config_pc_send_list((uint8_t)(uintptr_t)arg);
+}
+
+static void on_pc_cfg_list(uint8_t seq)
+{
+    lv_async_call(pc_cfg_list_async, (void *)(uintptr_t)seq);
+}
+
+static void pc_cfg_select_async(void *arg)
+{
+    pc_cfg_select_t *sel = arg;
+    ui_config_pc_select(sel->mode, sel->name);
+    free(sel);
+}
+
+static void on_pc_cfg_select(uint8_t mode, const char *name)
+{
+    pc_cfg_select_t *sel = malloc(sizeof(*sel));
+    if (!sel) return;
+    sel->mode = mode;
+    snprintf(sel->name, sizeof(sel->name), "%s", name);
+    if (lv_async_call(pc_cfg_select_async, sel) != LV_RES_OK) free(sel);
 }
 
 static void item_mode_to_deck_cb(lv_event_t *e)    { (void)e; switch_to_mode(UI_MODE_DECK); }
@@ -1896,6 +1931,7 @@ lv_obj_t *ui_settings_build(lv_obj_t *scr, lv_obj_t *gear_btn)
      * hook here so that row's color/text stays live while visible. */
     usb_hid_set_conn_cb(hid_conn_cb);
     usb_hid_set_mode_set_cb(on_pc_mode);   /* ESDeckPC's Device > Mode menu */
+    usb_hid_set_cfg_cbs(on_pc_cfg_list, on_pc_cfg_select);   /* ... and Device > Config */
 #if ESDECK_ENABLE_BLE
     ble_manager_set_conn_cb(ble_conn_cb);
 #endif

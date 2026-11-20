@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 /* Select Config dialog, one per mode -- the *.json files under that mode's
  * config folder. On confirm each saves the selection to NVS and calls its
  * mode's ui_settings_*_reload(). */
@@ -19,3 +21,11 @@ void ui_touchpad_config_dialog_show(void);
  * from ESDeckPC (opens with "Loading..." until it arrives). On confirm the
  * PC switches to it (its own selection follows) and resends the pages. */
 void ui_canvas_config_dialog_show(void);
+
+/* ESDeckPC's Device > Config menu (HID_SYS_CMD_CFG_*), LVGL thread only.
+ * send_list: the current mode's configs go out as HID_CFG_PAGE reports,
+ * one per tick. select: same as Confirm in the dialog (closes it if it's
+ * open); ignored unless mode is the current mode and name is in its list.
+ * Canvas isn't handled here -- its configs are on the PC. */
+void ui_config_pc_send_list(uint8_t seq);
+void ui_config_pc_select(uint8_t mode, const char *name);

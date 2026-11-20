@@ -22,6 +22,9 @@ void ui_show_switching_screen(const char *msg);
  * doesn't linger as a leaked full-screen object. */
 void ui_hide_switching_screen(void);
 
+/* A switching cover is up: a mode / config change is still in progress. */
+bool ui_switching_screen_visible(void);
+
 /* Accessors for shared static widgets.
  * Modules that need to parent into the sidebar or bring the context panel
  * to the foreground use these instead of storing their own copies. */

@@ -71,6 +71,27 @@
  * command above -- it isn't a UI mode (USB changes identity, one-way). */
 #define HID_SYS_CMD_MODE         0x0F
 
+/* PC -> ESP: the current mode's configs, same as Settings > Select Config
+ * on the device (ESDeckPC's Device > Config menu).
+ *   CMD_CFG_LIST   : [1] seq -- answered with one HID_CFG_PAGE IN report
+ *                    per *.json in the current mode's config folder
+ *   CMD_CFG_SELECT : [1] mode, [2..63] file name, NUL-terminated -- make it
+ *                    that mode's active config and reload, same as Confirm
+ *                    in the dialog. Ignored unless mode is the current mode
+ *                    and the name is in its list.
+ * Not for Canvas: its configs are on the PC already (a list request in
+ * Canvas is answered with total = 0).
+ *
+ * ESP -> PC (IN report, page HID_CFG_PAGE): [1] seq, [2] mode, [3] index,
+ * [4] total, [5] flags (HID_CFG_F_*), [6..63] file name, NUL-terminated.
+ * total = 0: no configs (one entry with an empty name is still sent).
+ * Names longer than HID_CFG_NAME_MAX - 1 bytes don't fit and are left out. */
+#define HID_SYS_CMD_CFG_LIST     0x10
+#define HID_SYS_CMD_CFG_SELECT   0x11
+#define HID_CFG_PAGE             0xF8
+#define HID_CFG_F_ACTIVE         0x01   /* the mode's config in use */
+#define HID_CFG_NAME_MAX         58     /* name bytes incl. NUL in the IN report */
+
 /* Monitor OUT report command bytes (PC -> ESP) */
 #define HID_MON_CMD_DATA         0x03
 #define HID_MON_CMD_TIME         0x04
@@ -405,6 +426,15 @@ void usb_hid_set_storage_cb(usb_hid_storage_cb_t cb);
  * task -- hop to the LVGL thread before touching UI. */
 typedef void (*usb_hid_mode_set_cb_t)(uint8_t mode);
 void usb_hid_set_mode_set_cb(usb_hid_mode_set_cb_t cb);
+/* PC asked for the config list / a config (HID_SYS_CMD_CFG_*). Called from
+ * the TinyUSB task; name is a NUL-terminated copy, valid during the call. */
+typedef void (*usb_hid_cfg_list_cb_t)(uint8_t seq);
+typedef void (*usb_hid_cfg_select_cb_t)(uint8_t mode, const char *name);
+void usb_hid_set_cfg_cbs(usb_hid_cfg_list_cb_t list_cb, usb_hid_cfg_select_cb_t select_cb);
+/* One config-list entry (HID_CFG_PAGE). false if the endpoint is busy or
+ * HID is off -- the caller retries on its next tick. */
+bool usb_hid_send_cfg_entry(uint8_t seq, uint8_t mode, uint8_t index, uint8_t total,
+                            uint8_t flags, const char *name);
 void usb_hid_set_ota_begin_cb(usb_hid_ota_begin_cb_t cb);
 void usb_hid_ota_erased(void);                       /* worker: erase done */
 int  usb_hid_ota_read(uint8_t *buf, size_t max);    /* worker: > 0 bytes, 0 = end, < 0 = error/timeout */

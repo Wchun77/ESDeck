@@ -8,6 +8,7 @@
 #include "ui_deck.h"
 #include "ui.h"
 #include "ui_ota_dialog.h"
+#include "usb/usb_hid.h"
 #include "lvgl.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -134,15 +135,12 @@ static void cancel_cb(lv_event_t *e)
     dialog_close();
 }
 
-static void confirm_cb(lv_event_t *e)
+/* Make fname the mode's active config and reload the mode -- Confirm in
+ * the dialog and ESDeckPC's Config menu both end up here. fname may point
+ * into s_scan: it's only used before dialog_close() frees that. */
+static void apply_config(cfg_dialog_mode_t mode, const char *fname)
 {
-    if (s_sel_idx < 0 || s_sel_idx >= s_scan.count) return;
-    if (ui_ota_in_progress()) { dialog_close(); return; }   /* firmware update running */
-
-    const char *fname = s_scan.names[s_sel_idx];
-    ESP_LOGI("CFG_DLG", "switching config: %s", fname);
-
-    if (s_dialog_mode == CFG_DIALOG_CANVAS) {
+    if (mode == CFG_DIALOG_CANVAS) {
         /* The PC switches and resends everything; ui_canvas keeps Settings
          * up until the new config's first page is here. */
         ui_canvas_select_config(fname);
@@ -150,7 +148,7 @@ static void confirm_cb(lv_event_t *e)
         return;
     }
 
-    if (s_dialog_mode == CFG_DIALOG_TOUCHPAD) {
+    if (mode == CFG_DIALOG_TOUCHPAD) {
         if (!ui_touchpad_config_nvs_save(fname)) {
             ESP_LOGE("CFG_DLG", "Failed to save touchpad config to NVS");
             return;
@@ -160,7 +158,7 @@ static void confirm_cb(lv_event_t *e)
         return;
     }
 
-    if (s_dialog_mode == CFG_DIALOG_MEDIA) {
+    if (mode == CFG_DIALOG_MEDIA) {
         if (!ui_media_config_nvs_save(fname)) {
             ESP_LOGE("CFG_DLG", "Failed to save media config to NVS");
             return;
@@ -170,7 +168,7 @@ static void confirm_cb(lv_event_t *e)
         return;
     }
 
-    if (s_dialog_mode == CFG_DIALOG_MONITOR) {
+    if (mode == CFG_DIALOG_MONITOR) {
         if (!ui_monitor_config_nvs_save(fname)) {
             ESP_LOGE("CFG_DLG", "Failed to save monitor config to NVS");
             return;
@@ -188,6 +186,16 @@ static void confirm_cb(lv_event_t *e)
 
     dialog_close();
     ui_settings_deck_reload();
+}
+
+static void confirm_cb(lv_event_t *e)
+{
+    if (s_sel_idx < 0 || s_sel_idx >= s_scan.count) return;
+    if (ui_ota_in_progress()) { dialog_close(); return; }   /* firmware update running */
+
+    const char *fname = s_scan.names[s_sel_idx];
+    ESP_LOGI("CFG_DLG", "switching config: %s", fname);
+    apply_config(s_dialog_mode, fname);
 }
 
 static void update_confirm(void);
@@ -330,6 +338,31 @@ static void canvas_poll_cb(lv_timer_t *t)
     }
     lv_timer_del(s_poll_timer);
     s_poll_timer = NULL;
+}
+
+/* The mode's active config name from NVS ("" if none). Not for Canvas. */
+static void load_active(cfg_dialog_mode_t mode, char *out, size_t out_size)
+{
+    out[0] = '\0';
+    if (mode == CFG_DIALOG_MONITOR)
+        ui_monitor_config_nvs_load(out, out_size);
+    else if (mode == CFG_DIALOG_MEDIA)
+        ui_media_config_nvs_load(out, out_size);
+    else if (mode == CFG_DIALOG_TOUCHPAD)
+        ui_touchpad_config_nvs_load(out, out_size);
+    else
+        ui_deck_config_nvs_load(out, out_size);
+}
+
+/* The mode's config folder listing. Not for Canvas. */
+static cfg_scan_result_t scan_mode(cfg_dialog_mode_t mode)
+{
+    switch (mode) {
+    case CFG_DIALOG_MONITOR:  return ui_monitor_config_scan();
+    case CFG_DIALOG_MEDIA:    return ui_media_config_scan();
+    case CFG_DIALOG_TOUCHPAD: return ui_touchpad_config_scan();
+    default:                  return ui_deck_config_scan();
+    }
 }
 
 static void dialog_show_internal(cfg_dialog_mode_t mode)
@@ -588,15 +621,7 @@ static void dialog_show_internal(cfg_dialog_mode_t mode)
     }
 
     /* Pre-select the currently active config. */
-    s_active_fname[0] = '\0';
-    if (s_dialog_mode == CFG_DIALOG_MONITOR)
-        ui_monitor_config_nvs_load(s_active_fname, sizeof(s_active_fname));
-    else if (s_dialog_mode == CFG_DIALOG_MEDIA)
-        ui_media_config_nvs_load(s_active_fname, sizeof(s_active_fname));
-    else if (s_dialog_mode == CFG_DIALOG_TOUCHPAD)
-        ui_touchpad_config_nvs_load(s_active_fname, sizeof(s_active_fname));
-    else
-        ui_deck_config_nvs_load(s_active_fname, sizeof(s_active_fname));
+    load_active(s_dialog_mode, s_active_fname, sizeof(s_active_fname));
     preselect_active();
     render_page();
 }
@@ -624,4 +649,131 @@ void ui_touchpad_config_dialog_show(void)
 void ui_canvas_config_dialog_show(void)
 {
     dialog_show_internal(CFG_DIALOG_CANVAS);
+}
+
+/* -----------------------------------------------------------------------
+ * ESDeckPC's Device > Config menu (HID_SYS_CMD_CFG_*). LVGL thread only.
+ * The list goes out one IN report per timer tick (the endpoint takes one
+ * packet per poll); a newer request restarts it.
+ * ----------------------------------------------------------------------- */
+#define PC_LIST_TRIES  500   /* ticks on a busy endpoint before giving up */
+
+static cfg_scan_result_t s_pc_scan = { .names = NULL, .count = 0 };
+static char        s_pc_active[CFG_FNAME_LEN];
+static lv_timer_t *s_pc_timer = NULL;
+static uint8_t     s_pc_seq   = 0;
+static uint8_t     s_pc_mode  = 0;
+static uint8_t     s_pc_total = 0;   /* entries that fit the report */
+static int         s_pc_next  = 0;   /* next index into s_pc_scan */
+static int         s_pc_sent  = 0;   /* entries sent = the next one's index */
+static int         s_pc_wait  = 0;
+
+/* ui_mode_t and cfg_dialog_mode_t list the modes in the same order, but
+ * map them by name rather than lean on that. */
+static cfg_dialog_mode_t dialog_mode_of(ui_mode_t m)
+{
+    switch (m) {
+    case UI_MODE_MONITOR:  return CFG_DIALOG_MONITOR;
+    case UI_MODE_MEDIA:    return CFG_DIALOG_MEDIA;
+    case UI_MODE_TOUCHPAD: return CFG_DIALOG_TOUCHPAD;
+    case UI_MODE_CANVAS:   return CFG_DIALOG_CANVAS;
+    default:               return CFG_DIALOG_DECK;
+    }
+}
+
+static bool pc_name_fits(const char *name)
+{
+    return strlen(name) < HID_CFG_NAME_MAX;
+}
+
+static void pc_list_stop(void)
+{
+    if (s_pc_timer) {
+        lv_timer_del(s_pc_timer);
+        s_pc_timer = NULL;
+    }
+    cfg_scan_result_free(&s_pc_scan);
+}
+
+static void pc_list_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    const char *name  = "";
+    uint8_t     flags = 0;
+    if (s_pc_total > 0) {
+        while (s_pc_next < s_pc_scan.count && !pc_name_fits(s_pc_scan.names[s_pc_next]))
+            s_pc_next++;
+        if (s_pc_next >= s_pc_scan.count) { pc_list_stop(); return; }   /* can't happen: total counts these */
+        name = s_pc_scan.names[s_pc_next];
+        if (strcmp(name, s_pc_active) == 0) flags |= HID_CFG_F_ACTIVE;
+    }
+
+    if (!usb_hid_send_cfg_entry(s_pc_seq, s_pc_mode, (uint8_t)s_pc_sent, s_pc_total, flags, name)) {
+        if (++s_pc_wait >= PC_LIST_TRIES) {
+            ESP_LOGW("CFG_DLG", "config list for ESDeckPC not sent (endpoint busy)");
+            pc_list_stop();
+        }
+        return;
+    }
+    s_pc_wait = 0;
+    s_pc_next++;
+    s_pc_sent++;
+    if (s_pc_sent >= (s_pc_total ? s_pc_total : 1)) pc_list_stop();
+}
+
+void ui_config_pc_send_list(uint8_t seq)
+{
+    pc_list_stop();
+
+    ui_mode_t m = ui_settings_get_mode();
+    s_pc_seq   = seq;
+    s_pc_mode  = (uint8_t)m;
+    s_pc_total = 0;
+    s_pc_next  = 0;
+    s_pc_sent  = 0;
+    s_pc_wait  = 0;
+    s_pc_active[0] = '\0';
+
+    if (m != UI_MODE_CANVAS) {
+        cfg_dialog_mode_t d = dialog_mode_of(m);
+        s_pc_scan = scan_mode(d);
+        if (s_pc_scan.count < 0) s_pc_scan.count = 0;   /* no folder: same as no configs */
+        int n = 0;
+        for (int i = 0; i < s_pc_scan.count; i++)
+            if (pc_name_fits(s_pc_scan.names[i])) n++;
+        s_pc_total = (uint8_t)(n > 255 ? 255 : n);
+        load_active(d, s_pc_active, sizeof(s_pc_active));
+    }
+
+    s_pc_timer = lv_timer_create(pc_list_timer_cb, 1, NULL);
+    pc_list_timer_cb(s_pc_timer);   /* first entry right away if the endpoint is free */
+}
+
+void ui_config_pc_select(uint8_t mode, const char *name)
+{
+    if (ui_ota_in_progress() || ui_switching_screen_visible()) return;   /* busy: the PC can try again */
+
+    ui_mode_t m = ui_settings_get_mode();
+    if (mode != (uint8_t)m || m == UI_MODE_CANVAS || !name || !name[0]) {
+        ESP_LOGW("CFG_DLG", "PC config %s for mode %u ignored (now in %d)", name ? name : "", mode, (int)m);
+        return;
+    }
+
+    cfg_dialog_mode_t d = dialog_mode_of(m);
+    char active[CFG_FNAME_LEN];
+    load_active(d, active, sizeof(active));
+    if (strcmp(active, name) == 0) return;   /* already in use */
+
+    cfg_scan_result_t res = scan_mode(d);
+    bool found = false;
+    for (int i = 0; i < res.count && !found; i++)
+        found = strcmp(res.names[i], name) == 0;
+    cfg_scan_result_free(&res);
+    if (!found) {
+        ESP_LOGW("CFG_DLG", "PC config %s not found", name);
+        return;
+    }
+
+    ESP_LOGI("CFG_DLG", "switching config (PC): %s", name);
+    apply_config(d, name);
 }

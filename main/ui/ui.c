@@ -81,6 +81,11 @@ void ui_hide_switching_screen(void)
     s_switching_cover = NULL;
 }
 
+bool ui_switching_screen_visible(void)
+{
+    return s_switching_cover != NULL;
+}
+
 /* -----------------------------------------------------------------------
  * Gear button callback
  * ----------------------------------------------------------------------- */

@@ -1010,6 +1010,23 @@ void usb_hid_set_storage_cb(usb_hid_storage_cb_t cb) { s_storage_cb = cb; }
 static usb_hid_mode_set_cb_t s_mode_set_cb = NULL;
 void usb_hid_set_mode_set_cb(usb_hid_mode_set_cb_t cb) { s_mode_set_cb = cb; }
 
+static usb_hid_cfg_list_cb_t   s_cfg_list_cb   = NULL;
+static usb_hid_cfg_select_cb_t s_cfg_select_cb = NULL;
+void usb_hid_set_cfg_cbs(usb_hid_cfg_list_cb_t list_cb, usb_hid_cfg_select_cb_t select_cb)
+{
+    s_cfg_list_cb   = list_cb;
+    s_cfg_select_cb = select_cb;
+}
+
+bool usb_hid_send_cfg_entry(uint8_t seq, uint8_t mode, uint8_t index, uint8_t total,
+                            uint8_t flags, const char *name)
+{
+    if (!s_active || !tud_hid_n_ready(HID_ITF_VENDOR)) return false;
+    uint8_t r[HID_VENDOR_IN_LEN] = { HID_CFG_PAGE, seq, mode, index, total, flags };
+    if (name) memcpy(r + 6, name, strnlen(name, HID_CFG_NAME_MAX - 1));
+    return vendor_send(r, sizeof(r));
+}
+
 /* Status IN report. tries > 1 (worker task only) retries for a while if
  * the endpoint is busy -- a lost ACK would leave the PC waiting. From the
  * TinyUSB task (BEGIN errors) use 1: waiting there would stall the very
@@ -1789,6 +1806,18 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
     else if (cmd == HID_SYS_CMD_MODE && bufsize >= 2) {
         ESP_LOGI(TAG, "PC requested mode %u", buffer[1]);
         if (s_mode_set_cb) s_mode_set_cb(buffer[1]);
+    }
+    else if (cmd == HID_SYS_CMD_CFG_LIST && bufsize >= 2) {
+        if (s_cfg_list_cb) s_cfg_list_cb(buffer[1]);
+    }
+    else if (cmd == HID_SYS_CMD_CFG_SELECT && bufsize >= 3) {
+        char name[64];
+        size_t n = bufsize - 2;
+        if (n > sizeof(name) - 1) n = sizeof(name) - 1;
+        memcpy(name, buffer + 2, n);
+        name[n] = '\0';
+        ESP_LOGI(TAG, "PC requested config %s (mode %u)", name, buffer[1]);
+        if (s_cfg_select_cb) s_cfg_select_cb(buffer[1], name);
     }
     else if (cmd == HID_MEDIA_CMD_NOWPLAYING_IMG_END && bufsize >= 3) {
         uint8_t generation = buffer[1];
